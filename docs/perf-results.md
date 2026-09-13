@@ -217,6 +217,51 @@ minutes, and would have evicted 93% of the backlog.
 
 ---
 
+## 8. Relay is indexed to block size, and decoupling breaks that
+
+Two nodes on one box, the peer connected *to* the SUT so the SUT sees it as inbound
+(the 5-second trickle). Load offered to the SUT only.
+
+At the shipped 2 MB block size:
+
+| | |
+|---|---|
+| SUT accepted | 957 tx/s |
+| peer received | **74.7 tx/s** |
+| ratio | 13× |
+| delivered over the run | 14,560 of 120,002, **12.1%** |
+
+Every non-zero sample was **exactly 280** transactions — `140 × MaxBlockSize()/1e6` —
+arriving on the Poisson trickle. The derived constant is confirmed to the transaction.
+
+The backlog is **not lost**: with load stopped, the peer kept draining at the same
+74.7/s. Relay is a constant-rate pipe, not a lossy one.
+
+And the rate is deliberately proportioned. Over a 120-second block interval, 74.7/s
+delivers ~9,000 transactions per peer against the ~5,350 a full 2 MB block holds — about
+70% margin. The `4 *` in `4 * 7 * 5` is the comment's "4 times smaller block times"
+doing exactly that job.
+
+**Tested by patching the block size** (test-only, never leaves the rig branch):
+
+| block size | peer received/s | burst quantum |
+|---|---|---|
+| 2 MB | 74.7 | exactly 280 |
+| 8 MB | 230.3 | up to 2,211 |
+
+4× the block size gives 3.2× the relay rate. Proportional, if not perfectly linear.
+
+**The consequence for decoupling.** The formula treats block size as a proxy for how
+much needs to propagate, and that proxy holds only while blocks carry bodies. A
+decoupled block committing to 600,000 transactions at 32 bytes each is 19.2 MB, so
+relay would scale to roughly 700 tx/s — while those 600,000 bodies still have to cross
+at 5,000 tx/s. The block shrinks twelvefold; the propagation requirement does not shrink
+at all.
+
+Under decoupling `INVENTORY_BROADCAST_MAX_PER_1MB_BLOCK` must be re-indexed to something
+that still tracks transaction volume — committed transaction count — rather than to the
+size of a block that no longer carries them.
+
 ## Rig notes
 
 Three rig defects were found by accounting rather than by failure, each of which would
