@@ -670,7 +670,10 @@ namespace llmq {
         }
 
         // need mempool.cs due to GetTransaction calls
+        int64_t nCleanupStart = GetTimeMillis();
+        size_t nSeenBefore = txFirstSeenTime.size();
         LOCK2(cs_main, mempool.cs);
+        int64_t nLocksHeld = GetTimeMillis();
         LOCK(cs);
 
         for (auto it = seenChainLocks.begin(); it != seenChainLocks.end();) {
@@ -715,6 +718,9 @@ namespace llmq {
             }
         }
 
+        LogPrintf("CLCLEANUP entries=%d walked_ms=%d lockwait_ms=%d interval_ms=%d\n",
+                  (int)nSeenBefore, (int)(GetTimeMillis() - nLocksHeld),
+                  (int)(nLocksHeld - nCleanupStart), (int)CLEANUP_INTERVAL);
         lastCleanupTime = GetTimeMillis();
     }
 
