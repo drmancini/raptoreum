@@ -18,12 +18,15 @@ from test_framework.address import key_to_p2pkh          # noqa: E402
 from test_framework.authproxy import AuthServiceProxy     # noqa: E402
 
 
-def rpc(datadir, chain="regtest"):
+def rpc(datadir, chain="regtest", wallet=None):
     cookie = os.path.join(datadir, chain, ".cookie")
     with open(cookie) as f:
         auth = f.read().strip()
     port = {"regtest": 19898, "testnet3": 10229, "main": 10226}[chain]
-    return AuthServiceProxy("http://%s@127.0.0.1:%d" % (auth, port))
+    url = "http://%s@127.0.0.1:%d" % (auth, port)
+    if wallet is not None:
+        url += "/wallet/" + wallet
+    return AuthServiceProxy(url)
 
 
 def make_keys(n, seed):
@@ -44,10 +47,11 @@ def main():
     ap.add_argument("--per-tx", type=int, default=1000)
     ap.add_argument("--value", type=float, default=0.0005)
     ap.add_argument("--seed", default="rtm-perf-fanout-v1")
+    ap.add_argument("--wallet", default="perf")
     a = ap.parse_args()
 
     os.makedirs(a.out, exist_ok=True)
-    node = rpc(a.datadir)
+    node = rpc(a.datadir, wallet=a.wallet)
     print("height at start:", node.getblockcount())
 
     mine_to = node.getnewaddress()
