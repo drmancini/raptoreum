@@ -15,6 +15,7 @@ import coincurve
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "functional"))
 from test_framework.address import key_to_p2pkh          # noqa: E402
+from test_framework.messages import COIN                  # noqa: E402
 from test_framework.authproxy import AuthServiceProxy     # noqa: E402
 
 
@@ -82,7 +83,7 @@ def main():
         for out in raw["vout"]:
             spk = out["scriptPubKey"]
             for addr in spk.get("addresses", []):
-                by_addr[addr] = (txid, out["n"], int(round(out["value"] * 1e8)))
+                by_addr[addr] = (txid, out["n"], int(out["value"] * COIN))
 
     utxos = []
     for secret, pub, addr in keys:
@@ -91,7 +92,7 @@ def main():
             utxos.append(dict(txid=txid, vout=vout, value=value,
                               secret=secret.hex(), pubkey=pub.hex(), addr=addr))
 
-    manifest = dict(utxos=len(utxos), requested=a.utxos, value_sat=int(a.value * 1e8),
+    manifest = dict(utxos=len(utxos), requested=a.utxos, value_sat=int(round(a.value * 1e8)),
                     seed=a.seed, tip=node.getbestblockhash(), height=node.getblockcount())
     with open(os.path.join(a.out, "utxos.json"), "w") as f:
         json.dump(utxos, f)
