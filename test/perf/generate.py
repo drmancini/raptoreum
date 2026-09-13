@@ -94,6 +94,7 @@ def main():
     ap.add_argument("--batches-per-second", type=float, default=500.0)
     ap.add_argument("--duration", type=float, default=0.0, help="seconds; 0 = until corpus ends")
     ap.add_argument("--queue-cap", type=int, default=4 << 20, help="bytes buffered per socket before we count a shortfall")
+    ap.add_argument("--linger", type=float, default=30.0, help="seconds to hold the connection open after the offer ends")
     a = ap.parse_args()
 
     limit = a.count if a.count else 1 << 30
@@ -174,6 +175,13 @@ def main():
             pending[k] = b""
     if stuck:
         print("WARNING: %d bytes could not be flushed at the end" % stuck)
+
+    if a.linger:
+        # The node discards a peer's unprocessed receive buffer when the peer
+        # goes away, so closing at the end of the offer throws away whatever it
+        # had not reached yet and understates what it accepted.
+        print("holding connections open %.0fs so the node can drain" % a.linger)
+        time.sleep(a.linger)
 
     print("target %.0f tx/s, batch %d, %.1fs" % (a.rate, per_batch, elapsed))
     print("offered  %d (%.0f tx/s)" % (len(sent), len(sent) / elapsed))
