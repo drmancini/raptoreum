@@ -41,6 +41,7 @@ def main():
 
     prev_size = None
     prev_cpu = None
+    prev_t = None
     rows = []
     t_end = time.time() + a.seconds
     with open(a.out, "w") as f:
@@ -52,15 +53,20 @@ def main():
             ni = node.getnettotals()
             peers = len(node.getpeerinfo())
             cpu, rss = proc_cpu(pid)
+            t_cpu = time.time()
             size = int(mi["size"])
             accepted = "" if prev_size is None else size - prev_size
-            cpu_pct = "" if prev_cpu is None else round((cpu - prev_cpu) * 100 / a.interval, 1)
+            # Divide by the interval actually elapsed, not the nominal one. An RPC
+            # call above can block for seconds under load, and dividing that CPU by
+            # 1.0 s reports a node using two cores as using eight.
+            dt = a.interval if prev_t is None else max(1e-3, t_cpu - prev_t)
+            cpu_pct = "" if prev_cpu is None else round((cpu - prev_cpu) * 100 / dt, 1)
             f.write("%.3f,%d,%d,%d,%s,%d,%d,%d,%s,%s\n"
                     % (t, size, int(mi["bytes"]), int(mi["usage"]), accepted, peers,
                        int(ni["totalbytesrecv"]), int(ni["totalbytessent"]), cpu_pct, rss))
             f.flush()
             rows.append(accepted)
-            prev_size, prev_cpu = size, cpu
+            prev_size, prev_cpu, prev_t = size, cpu, t_cpu
             time.sleep(max(0.0, a.interval - (time.time() - t)))
 
     vals = [r for r in rows if isinstance(r, int)]
