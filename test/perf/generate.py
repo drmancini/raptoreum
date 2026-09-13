@@ -160,6 +160,21 @@ def main():
         next_t += interval
     elapsed = time.perf_counter() - start
 
+    # Anything still queued was counted as offered, so it has to reach the
+    # kernel before the run ends or the tail is silently lost.
+    stuck = 0
+    for k, sk in enumerate(socks):
+        if pending[k]:
+            sk.setblocking(True)
+            sk.settimeout(30)
+            try:
+                sk.sendall(pending[k])
+            except OSError:
+                stuck += len(pending[k])
+            pending[k] = b""
+    if stuck:
+        print("WARNING: %d bytes could not be flushed at the end" % stuck)
+
     print("target %.0f tx/s, batch %d, %.1fs" % (a.rate, per_batch, elapsed))
     print("offered  %d (%.0f tx/s)" % (len(sent), len(sent) / elapsed))
     print("withheld %d (%.1f%%) because the node stopped reading"
