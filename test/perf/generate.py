@@ -92,6 +92,8 @@ def main():
     ap.add_argument("--sent-log", default="")
     ap.add_argument("--null", action="store_true", help="measure the generator alone")
     ap.add_argument("--batches-per-second", type=float, default=500.0)
+    ap.add_argument("--duration", type=float, default=0.0, help="seconds; 0 = until corpus ends")
+    ap.add_argument("--queue-cap", type=int, default=4 << 20, help="bytes buffered per socket before we count a shortfall")
     a = ap.parse_args()
 
     limit = a.count if a.count else 1 << 30
@@ -116,26 +118,52 @@ def main():
     # the batch's timestamp, which at the default is a 2 ms granularity.
     per_batch = max(1, int(round(a.rate / a.batches_per_second)))
     interval = per_batch / a.rate
+    for s in socks:
+        s.setblocking(False)
+    pending = [b""] * len(socks)
+
+    def flush(k):
+        """Push what we can without blocking; return bytes still queued."""
+        if not pending[k]:
+            return 0
+        try:
+            n = socks[k].send(pending[k])
+            pending[k] = pending[k][n:]
+        except BlockingIOError:
+            pass
+        return len(pending[k])
+
     sent = []
+    withheld = 0
     start = time.perf_counter()
     next_t = start
     i = 0
-    while i < len(records):
+    deadline = start + a.duration if a.duration else float("inf")
+    while i < len(records) and time.perf_counter() < deadline:
         now = time.perf_counter()
         if now < next_t:
             time.sleep(next_t - now)
+        k = (i // per_batch) % len(socks)
+        flush(k)
         chunk = records[i:i + per_batch]
-        ts = time.time()
-        blob = b"".join(chunk)
-        socks[(i // per_batch) % len(socks)].sendall(blob)
-        for j in range(len(chunk)):
-            sent.append((txids[i + j], ts))
+        if len(pending[k]) > a.queue_cap:
+            # The node is not reading. Count the shortfall rather than block,
+            # so the offered rate stays a measurement instead of an outcome.
+            withheld += len(chunk)
+        else:
+            ts = time.time()
+            pending[k] += b"".join(chunk)
+            flush(k)
+            for j in range(len(chunk)):
+                sent.append((txids[i + j], ts))
         i += len(chunk)
         next_t += interval
     elapsed = time.perf_counter() - start
 
-    print("offered %d in %.2fs = %.0f tx/s (target %.0f, batch %d)"
-          % (len(sent), elapsed, len(sent) / elapsed, a.rate, per_batch))
+    print("target %.0f tx/s, batch %d, %.1fs" % (a.rate, per_batch, elapsed))
+    print("offered  %d (%.0f tx/s)" % (len(sent), len(sent) / elapsed))
+    print("withheld %d (%.1f%%) because the node stopped reading"
+          % (withheld, 100.0 * withheld / max(1, withheld + len(sent))))
     if a.sent_log:
         with open(a.sent_log, "w") as f:
             for txid, ts in sent:
