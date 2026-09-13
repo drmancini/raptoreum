@@ -262,6 +262,40 @@ Under decoupling `INVENTORY_BROADCAST_MAX_PER_1MB_BLOCK` must be re-indexed to s
 that still tracks transaction volume — committed transaction count — rather than to the
 size of a block that no longer carries them.
 
+## 9. Peer fan-out: peak holds, smoothness does not
+
+Every figure above came from a node with one peer that ignores announcements — the only
+configuration where relay costs nothing. Eight peer nodes were attached to the SUT (each
+connecting *to* it, so all inbound) and the over-drive repeated.
+
+| | 1 peer | 8 peers |
+|---|---|---|
+| peak accepted | ~5,520/s | **5,353/s** |
+| mean accepted | ~5,000/s | **4,021/s** |
+| CPU median | ~210% | 207% |
+| CPU p90 | ~210% | **622%** |
+| CPU max | ~213% | **1,107%** |
+
+Peak throughput and median CPU are unchanged, so announcement work does not eat the
+ceiling. What fan-out adds is **burstiness**: 11 of 93 seconds exceeded 400% CPU, peaking
+above eleven cores, with acceptance dipping to 2,341/s and below during those windows.
+The 27% drop in the mean is entirely the dips.
+
+Corroborating from a third direction: 11 of the collector's own RPC calls took up to
+5.2 s to return, so the node was also unresponsive to RPC in those windows. The CPU
+bursts, the acceptance dips and the RPC stalls are very likely one event seen three ways.
+
+**Unexplained.** It is not script verification, which is inline during acceptance and
+was flat in the profiles. It is not the peers, which consumed 26% of one core between
+them on a 24-thread box. A per-thread capture during a burst would name it, the same way
+one named the socket spin in §6.
+
+**A correction worth recording.** A single mid-run sample showed 1,142 tx/s with eight
+peers and was reported as an 80% collapse of the ceiling. It was a dip, not the steady
+state, and the clean run contradicts it. One sample is not a measurement — the same
+mistake that made relay look dead in §8 when four consecutive samples landed between
+trickle bursts.
+
 ## Rig notes
 
 Three rig defects were found by accounting rather than by failure, each of which would
