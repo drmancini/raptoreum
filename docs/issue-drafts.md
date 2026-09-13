@@ -1,13 +1,13 @@
 # Two issue drafts for Raptor3um/raptoreum
 
-Both measured on 2.0.4.1 (`develop`), regtest, with `checkmempool=0`. Review before
-posting.
+Measured on `develop` (2.0.4.1), regtest, `checkmempool=0`. Review before posting.
+Revised after an adversarial review; corrections noted at the end.
 
 ---
 
-## Issue 1 — ChainLocks cleanup holds cs_main and mempool.cs for seconds, proportional to mempool size
+## Issue 1 — ChainLocks cleanup holds cs_main and mempool.cs proportionally to mempool size
 
-**Title:** `CChainLocksHandler::Cleanup()` stalls the node for seconds at a large mempool, on every node
+**Title:** `CChainLocksHandler::Cleanup()` holds cs_main and mempool.cs for a time linear in mempool size, on every node
 
 ### What happens
 
@@ -15,74 +15,107 @@ posting.
 while holding `cs_main` **and** `mempool.cs`:
 
 ```cpp
-// llmq/quorums_chainlocks.cpp
+// src/llmq/quorums_chainlocks.cpp:675
 // need mempool.cs due to GetTransaction calls
 LOCK2(cs_main, mempool.cs);
 LOCK(cs);
 ...
+// :700
 for (auto it = txFirstSeenTime.begin(); it != txFirstSeenTime.end();) {
     uint256 hashBlock;
     CTransactionRef tx = GetTransaction(nullptr, &mempool, it->first,
                                         Params().GetConsensus(), hashBlock);
 ```
 
-`txFirstSeenTime` gets one entry per accepted transaction
-(`TransactionAddedToMempool` → `txFirstSeenTime.emplace(...)`), so the walk is O(mempool).
+`txFirstSeenTime` gets one entry per accepted transaction (`:368-374`, driven from
+`dsnotificationinterface.cpp:80`), and entries are erased once confirmed six deep
+(`:707-712`), so its size is bounded by the mempool plus roughly six blocks.
 
-Two details make it bite harder than it first looks:
+Two details widen the blast radius:
 
 - It runs on **every node, not only smartnodes**. `TrySignChainTip()` calls `Cleanup()`
-  *before* the `if (!fSmartnodeMode) return;`, and `TrySignChainTip()` is on a
-  5-second scheduler.
-- It holds the two locks the message handler needs, so the node accepts no transactions
-  and answers no RPC for the duration.
+  at `:248`, *before* the `if (!fSmartnodeMode) return;` at `:250`. `TrySignChainTip()`
+  is invoked every 5 s (`:56-61`); `Cleanup()` self-throttles to at most once per 30 s
+  (`CLEANUP_INTERVAL`, `quorums_chainlocks.h:63`).
+- It holds the two locks the message handler needs, so while it runs the node accepts no
+  transactions and any RPC that takes `cs_main` blocks.
 
 ### Measured
 
-A timing log added to the function, during a fill at 5,000 tx/s:
+A timing log added to the function, during a sustained fill at 5,000 tx/s with
+`-maxmempool=8000`:
 
-| entries | walk time | µs/entry |
+| entries | walk | µs/entry |
 |---|---|---|
 | 35,150 | 17 ms | 0.48 |
 | 185,280 | 94 ms | 0.51 |
+| 335,770 | 170 ms | 0.51 |
 | 637,870 | 332 ms | 0.52 |
+| 941,922 | 494 ms | 0.52 |
 | 1,094,409 | 587 ms | 0.54 |
 | 2,018,847 | 1,141 ms | 0.57 |
 | 2,909,415 | 1,803 ms | 0.62 |
 
-Linear, drifting slightly upward with cache pressure. At 3 million entries that is
-**~1.9 seconds of total stall every 30 seconds** (`CLEANUP_INTERVAL = 1000 * 30`).
+Linear, drifting slightly upward. **This is the mempool-hit path only** — no blocks were
+mined during the fill, so every `GetTransaction()` resolved from the mempool. Smartnodes
+must run `-txindex` (`init.cpp:1726`), and for an entry that has left the mempool but is
+under six deep, `GetTransaction` falls through to `g_txindex->FindTx`
+(`validation.cpp:983-985`): a LevelDB lookup and a block-file read, far above 0.5 µs.
+The per-entry figure above should not be read as the general case.
 
-### Why it matters
+### Scale in real configurations
 
-A node that can accept ~5,600 tx/s reaches a million mempool entries in three minutes, so
-this is not a hypothetical size. The stall is a latency defect rather than a throughput
-one — it does not reduce the sustained rate much — but it blocks RPC and acceptance
-entirely while it runs, and it scales without bound.
+Because the map is bounded by the mempool, the cost is linear in `-maxmempool`:
+
+| `-maxmempool` | approx. entries | walk, every 30 s |
+|---|---|---|
+| 300 (default) | ~204,000 | **~105 ms** |
+| 1,000 | ~680,000 | ~360 ms |
+| 8,000 | ~5,400,000 | ~3.3 s |
+
+So at stock settings this is a ~100 ms hiccup twice a minute, not a multi-second stall.
+The seconds-long figures require a deliberately enlarged mempool. It is raised because
+the relationship is linear and unavoidable, and because any plan to raise throughput
+raises `-maxmempool` with it.
 
 ### Reproduce
 
-Regtest with `checkmempool=0` and `maxmempool=8000`, push transactions at a few thousand
-per second until the mempool passes a million, and watch RPC latency every 30 seconds.
+Regtest, `checkmempool=0`, `-maxmempool=8000`, **with at least one peer connected** —
+`Cleanup()` returns early unless `smartnodeSync.IsBlockchainSynced()` (`:661`), which on
+regtest does not advance without a peer. Push transactions at a few thousand per second
+and log the walk duration, or poll `getblockcount` and watch the latency every 30 s.
+
+### Prior art
+
+The same walk under the same two locks is present in Dash `develop`
+(`src/chainlock/handler.cpp`), so this is inherited rather than Raptoreum-specific.
+Worth raising there too.
 
 ### Possible directions
 
-Bounding the work per invocation, or keying the map so expiry does not require a full
-walk, or holding the locks only for the portion that needs them rather than the whole
-scan.
+Bounding the work per invocation, keying the map so expiry does not need a full scan, or
+narrowing the lock scope to the part that needs it.
 
 ---
 
-## Issue 2 — Socket thread busy-polls at 100% CPU whenever a peer's receive buffer is paused
+## Issue 2 — Socket thread busy-polls at 100% CPU while any peer is receive-paused (fixed upstream in Dash)
 
-**Title:** `CConnman::SocketHandler()` spins with a zero-timeout poll while any peer has `fPauseRecv` set
+**Title:** Backport dashpay/dash `cb6afcbe5f` — `SocketHandler()` busy-loops on receive-paused peers
+
+### Summary
+
+**This is already fixed upstream.** Dash commit
+[`cb6afcbe5f`](https://github.com/dashpay/dash/commit/cb6afcbe5f) (2026-06-29), "net:
+avoid ThreadSocketHandler busy-loop on receive-paused peers", shipped in Dash Core
+v23.1.8. Raptoreum's `net.cpp` predates the `Sock` refactor, but the change is about ten
+lines. This report is a backport request with a local reproduction.
 
 ### What happens
 
-`SocketHandler()` decides whether to wait for events or poll with no timeout:
+`SocketHandler()` chooses between waiting for events and polling with no timeout:
 
 ```cpp
-// net.cpp
+// src/net.cpp:1619
 bool fOnlyPoll = false;
 {
     LOCK2(cs_vNodes, cs_mapNodesWithDataToSend);
@@ -95,59 +128,75 @@ bool fOnlyPoll = false;
         ...
 ```
 
-`fOnlyPoll` makes `epoll_wait` use a timeout of 0.
+`fOnlyPoll` gives a timeout of 0 — in every socket-events backend, not only epoll
+(`:1413-1414` kqueue, `:1448` epoll, `:1501` poll, `:1531` select).
 
-A node leaves `mapReceivableNodes` only when it has no data waiting:
+A node is removed from `mapReceivableNodes` when it has no data waiting (`:1707-1708`) or
+on disconnect (`:508`). A receive-paused peer has neither: `fPauseRecv` is set once its
+queued bytes exceed `-maxreceivebuffer` (5 MB default, `net.h:107`), it is skipped for
+reading (`:1718`, `:1758`), and `fHasRecvData` is only cleared by `SocketRecvData()`
+(`:1810`), which it never reaches. So it stays in the map, `fOnlyPoll` stays true, and the
+thread polls with a zero timeout continuously — reading almost nothing, since the peer is
+only drained when the message handler unpauses it (`net_processing.cpp:3972`), after which
+one 64 KB read re-pauses it.
 
-```cpp
-if (!it->second->fHasRecvData) {
-    it = mapReceivableNodes.erase(it);
-} else {
-    if (!it->second->fPauseRecv && it->second->nSendMsgSize == 0 && !it->second->fDisconnect) {
-        vReceivableNodes.emplace_back(it->second);
-    }
-    ++it;
-}
-```
+**The send branch already guards against exactly this case and its comment explains why.
+The receive branch has no equivalent check.** The upstream fix adds
+`HasUnpausedReceivableNode()` and gates the fast path on it, plus a unit test.
 
-A peer whose receive buffer is full has `fPauseRecv` set and still has data waiting, so it
-stays in `mapReceivableNodes`, is skipped for reading, and keeps `fOnlyPoll` true. The
-thread then polls with no timeout, finds the same paused peer, and repeats — burning a
-full core while reading nothing.
-
-The send side already guards against precisely this, and its comment says why. The receive
-side has no equivalent check.
+As the upstream commit message notes, this is remotely triggerable: any single peer that
+sends faster than the node processes will pin the socket thread. It does not require a
+flood.
 
 ### Measured
 
-Per-thread CPU on a node under load, one peer, sustained:
+Per-thread CPU on a node whose receive buffer is backed up:
 
-```
-100.3%  rtm-msghand
- 51.0%  rtm-net        (rising to ~100% as the pause persists)
- 11.0%  rtm-scheduler
-```
+| condition | rtm-msghand | rtm-net |
+|---|---|---|
+| 1 peer, at the moment total CPU crossed 150% | 100.3% | 51.0% |
+| 8 peers, under load | 99.6% | 96.6% |
+| 1 peer, mempool consistency checks on (heavy) | ~100% | ~100% |
 
-`perf diff` between a healthy and a backlogged node, same binary and rate, shows every
-growth term in the networking path and none in validation: a kernel symbol 11% → 40%,
-`CConnman::SocketHandler` +3.08%, `epoll_wait` +0.93%, `SocketEventsEpoll` +0.86%,
-`ThreadSocketHandler` +0.55%, `NotifyNumConnectionsChanged` +0.45% — per-iteration costs
-rather than per-message ones. Signature verification *shrank* as a share while total CPU
-doubled.
-
-### Why it matters
-
-The cost lands exactly when the node is already behind: falling behind sets `fPauseRecv`,
-which costs an extra core, which makes catching up harder. On a small node the wasted core
-may be the one the message handler needs.
+`perf diff` between a healthy and a backlogged node, same binary and rate, shows the
+growth terms in the networking path and none in validation: `CConnman::SocketHandler`
++3.08%, `epoll_wait` +0.93%, `SocketEventsEpoll` +0.86%, `ThreadSocketHandler` +0.55%,
+`NotifyNumConnectionsChanged` +0.45%, `vector<CNode*>::reserve` +0.41% — per-iteration
+costs rather than per-message ones. Signature verification *shrank* as a share of samples
+while total CPU doubled, so the extra cycles are not validation.
 
 ### Reproduce
 
-Push transactions faster than the node can accept them until the receive buffer fills,
-then look at per-thread CPU. The socket thread will sit near 100% while doing no reads.
+Send transactions faster than the node accepts them until its receive buffer fills, then
+read per-thread CPU. `rtm-net` sits near 100% while performing almost no reads.
+`strace -c -p <rtm-net tid>` will show `epoll_wait` returning tens of thousands of times a
+second with a zero timeout.
 
-### Possible directions
+### Mitigation available today
 
-Excluding paused peers when deciding `fOnlyPoll`, or removing them from
-`mapReceivableNodes` until they are unpaused, so the thread sleeps when there is genuinely
-nothing it may do.
+Raising `-maxreceivebuffer` delays the pause but does not prevent it.
+
+---
+
+## Corrections made after review
+
+Recorded so the reasoning is auditable:
+
+- Issue 2 was written as a novel finding. It is fixed upstream; verified that
+  `cb6afcbe5f` exists, is dated 2026-06-29, carries that subject, adds
+  `HasUnpausedReceivableNode()` plus a unit test, and that v23.1.8 is a real tag.
+- Issue 1 claimed the map "scales without bound". It does not — entries are erased at six
+  confirmations, so it is bounded by `-maxmempool`, and at stock settings the walk is
+  ~105 ms rather than seconds. The default-config table was added and the severity
+  reduced accordingly.
+- Issue 1 said the node "answers no RPC". Only RPCs taking `cs_main` or `mempool.cs`
+  block.
+- The per-entry cost is the mempool-hit path; with `-txindex` (which smartnodes require)
+  out-of-mempool entries cost far more. Now stated.
+- The two measurement tables in this file and `perf-results.md` quoted different subsets
+  of the same log; reconciled to the full set.
+- An unresolved kernel symbol was being cited as a networking growth term. It cannot be
+  attributed and has been removed from the evidence.
+- The repro omitted that `Cleanup()` needs a connected peer on regtest to run at all.
+- "Sustained" was claimed for a figure taken from a trigger snapshot of an oscillating
+  state; the three measurements are now presented separately as what they are.

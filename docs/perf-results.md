@@ -115,11 +115,21 @@ Measured directly, with a timing log added to the function:
 | 637,870 | 332 ms | 0.52 |
 | 941,922 | 494 ms | 0.52 |
 | 1,094,409 | 587 ms | 0.54 |
+| 2,018,847 | 1,141 ms | 0.57 |
+| 2,909,415 | 1,803 ms | 0.62 |
 
-Linear at ~0.5 µs/entry. At 3 M entries that is roughly **1.5 seconds every 30 seconds
-during which the node accepts nothing and answers no RPC**, because it holds the two
-locks everything else needs. It is a latency defect, not a throughput one, and it scales
-without bound with mempool size.
+Linear, drifting slightly upward. At 2.9 M entries the walk takes **1.8 seconds every 30
+seconds**, during which the node accepts nothing and any RPC taking `cs_main` blocks.
+
+It does **not** scale without bound: entries are erased once confirmed six deep
+(`:707-712`), so the map is bounded by the mempool plus ~6 blocks, and the cost is linear
+in `-maxmempool`. At the 300 MB default (~204,000 entries) the walk is ~105 ms, not
+seconds. The multi-second figures here required `-maxmempool=8000`.
+
+The per-entry cost measured is the **mempool-hit path only** — no blocks were mined during
+the fill. With `-txindex`, which smartnodes require, an entry that has left the mempool but
+is under six deep falls through to `g_txindex->FindTx` (`validation.cpp:983-985`), which is
+far more expensive.
 
 It is *not* the cause of the CPU cliff in §6 — the hypothesis that the walk outruns its
 own interval was tested and killed by this data.
@@ -321,9 +331,12 @@ have biased results:
 
 ## Still open
 
-- Confirm the socket-thread spin in §6 with a per-thread capture taken at the cliff.
-- Relay: the derived per-peer announcement ceiling is 56 tx/s inbound (see
-  `perf-constants.md`), two orders below acceptance and never measured.
-- Block connection at large sizes, and the acceptance gap it causes.
-- Everything here is one box and one peer. Fan-out to several peers changes both the
-  CPU and the bandwidth picture and is untested.
+- Stage C, InstantSend. `-llmqtestparams` overrides only size and threshold;
+  `dkgBadVotesThreshold`, `signingActiveQuorumCount`, `recoveryMembers` and
+  `keepOldConnections` stay at their three-member values and need a test-only patch.
+- Stage D, block connection at large sizes. Needs `MAX_PROTOCOL_MESSAGE_LENGTH` raised
+  from 3 MB first, or the blocks cannot cross the wire at all.
+- Everything here is one machine. Nothing has been measured on hardware a typical
+  smartnode actually runs, and the network's ceiling is its slowest member.
+- The unresolved kernel symbol in §6's `perf diff` (11% → 40%) is still unattributed and
+  is deliberately not claimed as a networking cost.
