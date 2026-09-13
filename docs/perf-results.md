@@ -262,7 +262,7 @@ Under decoupling `INVENTORY_BROADCAST_MAX_PER_1MB_BLOCK` must be re-indexed to s
 that still tracks transaction volume — committed transaction count — rather than to the
 size of a block that no longer carries them.
 
-## 9. Peer fan-out: peak holds, smoothness does not
+## 9. Peer fan-out: the ceiling holds
 
 Every figure above came from a node with one peer that ignores announcements — the only
 configuration where relay costs nothing. Eight peer nodes were attached to the SUT (each
@@ -270,31 +270,43 @@ connecting *to* it, so all inbound) and the over-drive repeated.
 
 | | 1 peer | 8 peers |
 |---|---|---|
-| peak accepted | ~5,520/s | **5,353/s** |
-| mean accepted | ~5,000/s | **4,021/s** |
-| CPU median | ~210% | 207% |
-| CPU p90 | ~210% | **622%** |
-| CPU max | ~213% | **1,107%** |
+| peak accepted | ~5,520/s | **5,697/s** |
+| mean accepted | ~5,000/s | ~3,700/s |
+| CPU, per-thread capture | ~210% | **209%** |
 
-Peak throughput and median CPU are unchanged, so announcement work does not eat the
-ceiling. What fan-out adds is **burstiness**: 11 of 93 seconds exceeded 400% CPU, peaking
-above eleven cores, with acceptance dipping to 2,341/s and below during those windows.
-The 27% drop in the mean is entirely the dips.
+Peak throughput and CPU are unchanged. Announcement work to eight peers does not eat the
+acceptance ceiling, and the per-thread split is the same as always:
 
-Corroborating from a third direction: 11 of the collector's own RPC calls took up to
-5.2 s to return, so the node was also unresponsive to RPC in those windows. The CPU
-bursts, the acceptance dips and the RPC stalls are very likely one event seen three ways.
+```
+ 99.6%  rtm-msghand
+ 96.6%  rtm-net
+ 12.9%  rtm-scheduler
+```
 
-**Unexplained.** It is not script verification, which is inline during acceptance and
-was flat in the profiles. It is not the peers, which consumed 26% of one core between
-them on a 24-thread box. A per-thread capture during a burst would name it, the same way
-one named the socket spin in §6.
+The lower mean is backpressure, not slowdown: at 10,000 offered the node refuses 42% of
+what is pushed and the generator's spare capacity shows up as dips in the accepted rate.
 
-**A correction worth recording.** A single mid-run sample showed 1,142 tx/s with eight
-peers and was reported as an 80% collapse of the ceiling. It was a dip, not the steady
-state, and the clean run contradicts it. One sample is not a measurement — the same
-mistake that made relay look dead in §8 when four consecutive samples landed between
-trickle bursts.
+### A phantom, and what it cost
+
+An earlier version of this section reported CPU bursts to eleven cores under fan-out, and
+before that a collapse of the ceiling to 1,142 tx/s. Both were wrong, and the sequence is
+worth recording because each error was found by a different discipline:
+
+1. **1,142 tx/s** came from one mid-run sample taken during a dip. One sample is not a
+   measurement.
+2. **The bursts** came from the collector dividing the CPU delta by the *nominal* 1 s
+   interval. Under load the RPC calls in the same loop block for seconds, so a node
+   steadily using two cores was reported as using eight — and the inflation correlated
+   with load, which made it look like a real effect.
+3. Chasing it produced two further mistakes of my own: a hunt run *without* the collector,
+   which removed the only trigger and returned a meaningless null; and a check of the
+   sampling gaps that was off by one, which briefly "disproved" the correct explanation.
+
+What settled it was running a per-thread capture *concurrently* with the collector: two
+instruments reading the same `/proc` data in the same run, disagreeing 2,085% against
+209%. When two measurements of one quantity disagree, at most one of them is the node.
+
+`collect.py` now measures the interval between the CPU reads themselves.
 
 ## Rig notes
 
