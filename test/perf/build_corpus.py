@@ -14,6 +14,8 @@ import sys
 import time
 from multiprocessing import get_context
 
+import hashlib
+
 import coincurve
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -34,12 +36,27 @@ def sign_one(spec):
     return tx.hash, wire.tx_message(tx)
 
 
-def generation(pool, utxos, fee, chunk):
+def lineage_fee(seed, lineage, lo, hi):
+    """Deterministic per-lineage fee, so shards stay self-consistent.
+
+    Skewed low: most transactions pay near the floor and a tail pays much more,
+    which is the shape a real mempool has and the shape fee-ordered relay and
+    block selection are designed for.
+    """
+    h = hashlib.sha256(b"%s:%d" % (seed, lineage)).digest()
+    u = int.from_bytes(h[:8], "big") / float(1 << 64)
+    return int(lo + (hi - lo) * (u ** 3))
+
+
+def generation(pool, utxos, fee, chunk, fee_range=None, fee_seed=b""):
     """Pair the utxos up, sign, and return (results, next_utxos)."""
     specs = []
     for i in range(0, len(utxos) - 1, 2):
         a, b = utxos[i], utxos[i + 1]
-        out_value = (a[2] + b[2] - fee) // 2
+        f = fee if fee_range is None else lineage_fee(fee_seed, i // 2, *fee_range)
+        # keep both outputs comfortably above dust however large the fee is
+        f = min(f, max(0, a[2] + b[2] - 4000))
+        out_value = (a[2] + b[2] - f) // 2
         if out_value <= 0:
             break
         specs.append(((a, b), out_value))
@@ -62,6 +79,9 @@ def main():
     ap.add_argument("--count", type=int, default=250000)
     ap.add_argument("--depth", type=int, default=5)
     ap.add_argument("--fee", type=int, default=10000)
+    ap.add_argument("--fee-min", type=int, default=0, help="if set, draw a per-lineage fee in [fee-min, fee-max]")
+    ap.add_argument("--fee-max", type=int, default=0)
+    ap.add_argument("--fee-seed", default="rtm-perf-fees-v1")
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--chunk", type=int, default=256)
     a = ap.parse_args()
@@ -82,7 +102,9 @@ def main():
         for gen in range(a.depth):
             if written >= a.count:
                 break
-            results, utxos = generation(pool, utxos, a.fee, a.chunk)
+            fee_range = (a.fee_min, a.fee_max) if a.fee_max > a.fee_min else None
+            results, utxos = generation(pool, utxos, a.fee, a.chunk,
+                                        fee_range, a.fee_seed.encode())
             if not results:
                 print("generation %d produced nothing; values exhausted" % gen)
                 break
@@ -103,6 +125,7 @@ def main():
 
     elapsed = time.time() - t0
     manifest = dict(count=written, depth=a.depth, fee=a.fee,
+                    fee_min=a.fee_min, fee_max=a.fee_max, fee_seed=a.fee_seed,
                     payload_min=min(sizes), payload_max=max(sizes),
                     payload_mean=round(sum(sizes) / len(sizes), 1),
                     seconds=round(elapsed, 1), workers=a.workers)

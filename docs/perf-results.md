@@ -651,6 +651,76 @@ The threshold is **128 MiB of serialised block**, not a transaction count. The a
 cliff "between 343,327 and 515,000 transactions" was an artefact of testing at decimal
 128 MB, which is 122 MiB — under the limit by six mebibytes.
 
+## 13. Compact-block reconstruction, and why fee variation decides it
+
+A compact block is decoupling in miniature. The sender transmits short identifiers, the
+receiver fills the block from its own mempool, and fetches only what it lacks. The
+fraction it must fetch is the decoupling premise made measurable: if a peer that has seen
+only a slice of the traffic can still fill a block, then committing to transactions
+instead of carrying them costs nothing at reconstruction time.
+
+`test/perf/reconstruct.py` measures it directly — mempool sets before the block, the
+block's transaction list after, and the `getblocktxn`/`blocktxn` byte counters that say
+what actually had to be re-fetched.
+
+The first run said decoupling was hopeless. The second said it was free. The corpus was
+the difference.
+
+| corpus | offered | peer's share of the hub mempool | block fill |
+|---|---|---|---|
+| uniform fee | 500 tx/s | 12% | **6.3%** |
+| varied fee | 500 tx/s | 13.4% | **100%** |
+| varied fee | 5,000 tx/s | **1.5%** (8,400 of 550,010) | **100%** (5,333 of 5,333) |
+
+**The uniform-fee number is an artefact, and it is worth stating why.** Relay announces in
+`CompareDepthAndScore` order; the block selects in `CompareTxMemPoolEntryByAncestorFee`
+order. Both are fee-ordered, so on real traffic they agree: the transactions a peer is
+told about first are the transactions the miner puts in the block. Give every transaction
+the same fee and both comparators fall back on tie-breaks that have nothing to do with
+each other, and the two subsets become independent draws. 6.3% is not a property of the
+protocol; it is what two unrelated orderings over the same pool produce. The corpus was
+uniform-fee because it was built for throughput, where fee is irrelevant — carrying it
+into a selection experiment silently changed what was being measured.
+
+**The real result is the third row.** At 5,000 tx/s the peer held 8,400 of the hub's
+550,010 transactions — one and a half percent — and still filled the entire block from its
+own mempool with nothing to fetch. Fee ordering is doing the work: the trickle is not a
+random 1.5% sample, it is the top 1.5% by fee, which is precisely the set the miner
+selects from.
+
+**What this proves, and what it does not.** It proves the *coupled* design is
+self-consistent. Relay's cap (~75 tx/s at 2 MB) exceeds a 2 MB block's appetite (~44 tx/s
+averaged over a 120-second interval), and both are indexed to `MaxBlockSize()`, so the
+margin holds at any block size — §8's `4 *`.
+
+It does not prove the decoupled case, and the same indexing is why. A 19.2 MB commitment
+block sets relay to roughly 538 tx/s while the traffic it commits to runs at 5,000 tx/s.
+Reconstruction fill stays perfect only while the peer has seen the transactions that end
+up in the block; at nine times the relay rate it will not have. The fill measured here is
+evidence that *fee-ordered relay is the right mechanism*, not evidence that it is
+provisioned for decoupled volumes. Re-indexing the constant to committed transaction
+count, per §8, is what would carry this result across.
+
+## 14. Peers hold the same subset, not complementary ones
+
+If relay delivers only a slice, the obvious mitigation is more peers: eight neighbours,
+eight different slices, better coverage. The trickle's ordering makes that false.
+
+`CompareDepthAndScore` is a single global ordering over the mempool, evaluated the same
+way on every peer link. Each link announces its own prefix of the same sequence, so what
+differs between peers is how far down that sequence they have got — not which
+transactions they got. The subsets are nested, not disjoint.
+
+`test/perf/overlap.py` measures it: the union across all peers against the best single
+peer. Adding peers moved the union by nothing worth reporting; the second and third peer
+contributed no transaction the first did not already have.
+
+This is the structural finding behind §8. A node that is missing a transaction cannot
+route around it, because every peer it could ask is missing the same one — redundancy in
+the peer graph buys resilience against a peer *failing*, and buys no coverage at all
+against relay being rate-limited. It also means the fix for a relay shortfall is
+necessarily the rate constant or the ordering, and can never be topology.
+
 ## Rig notes
 
 Three rig defects were found by accounting rather than by failure, each of which would
