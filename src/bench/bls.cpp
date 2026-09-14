@@ -345,6 +345,35 @@ static void BLS_Verify_BatchedParallel(benchmark::Bench &bench) {
     blsWorker.Stop();
 }
 
+
+static void BLS_RecoverThreshold(size_t threshold, benchmark::Bench &bench, uint32_t epoch_iters) {
+    // Threshold recovery is Lagrange interpolation over the shares and is purely
+    // algebraic: its cost depends on the number of shares, not on whether they are
+    // consistent. Random shares therefore measure the real cost.
+    std::vector <CBLSSignature> sigs(threshold);
+    std::vector <CBLSId> ids(threshold);
+    for (size_t i = 0; i < threshold; i++) {
+        CBLSSecretKey sk;
+        sk.MakeNewKey();
+        sigs[i] = sk.Sign(GetRandHash());
+        ids[i] = CBLSId(GetRandHash());
+    }
+
+    // Benchmark.
+    bench.minEpochIterations(epoch_iters).run([&] {
+        CBLSSignature recovered;
+        recovered.Recover(sigs, ids);
+    });
+}
+
+static void BLS_Recover_30(benchmark::Bench &bench) {
+    BLS_RecoverThreshold(30, bench, 20);   // llmq50_60, InstantSend above 600 smartnodes
+}
+
+static void BLS_Recover_240(benchmark::Bench &bench) {
+    BLS_RecoverThreshold(240, bench, 5);   // llmq400_60, ChainLocks
+}
+
 BENCHMARK(BLS_PubKeyAggregate_Normal)
 BENCHMARK(BLS_SecKeyAggregate_Normal)
 BENCHMARK(BLS_SignatureAggregate_Normal)
@@ -359,3 +388,5 @@ BENCHMARK(BLS_Verify_LargeAggregatedBlock1000)
 BENCHMARK(BLS_Verify_LargeAggregatedBlock1000PreVerified)
 BENCHMARK(BLS_Verify_Batched)
 BENCHMARK(BLS_Verify_BatchedParallel)
+BENCHMARK(BLS_Recover_30)
+BENCHMARK(BLS_Recover_240)

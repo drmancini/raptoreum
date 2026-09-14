@@ -721,6 +721,102 @@ the peer graph buys resilience against a peer *failing*, and buys no coverage at
 against relay being rate-limited. It also means the fix for a relay shortfall is
 necessarily the rate constant or the ordering, and can never be topology.
 
+## 15. The quorum signing path, and what it costs
+
+Trí's proposal is that transactions attested by the smartnode network take a shorter
+validation path, with InstantSend named as the existing precedent. That makes the cost of
+producing an attestation the load-bearing number, and nobody in the discussion had one.
+
+### What the live parameters actually are
+
+Two facts from the source, neither of them the test-network values:
+
+**The InstantSend quorum is 50 members, not 3.** `UpdateLLMQParams` rescales by smartnode
+count, and above 600 smartnodes `LLMQ_50_60` resolves to `llmq50_60` — size 50, threshold
+30, `signingActiveQuorumCount` 24, `recoveryMembers` 25 (`src/chainparams.cpp:1101`,
+`src/llmq/quorums_parameters.h:301`). The size-3 `llmq3_60` only applies below five
+smartnodes.
+
+**InstantSend signs each input separately, then the lock.**
+`CInstantSendManager::TrySignInputLocks` loops over `tx.vin` calling `AsyncSignIfMember`
+per input (`src/llmq/quorums_instantsend.cpp:548-561`), and `TrySignInstantSendLock` signs
+the islock as a further session once the inputs are locked (`:724`). A two-input
+transaction is **three threshold signatures**, not one.
+
+### The crypto, measured
+
+`src/bench/bls.cpp` on bowser. `BLS_Recover_30` and `BLS_Recover_240` were added for this;
+the rest ship with the tree. Threshold recovery is Lagrange interpolation and is purely
+algebraic, so random shares measure its real cost.
+
+| operation | per op | per core |
+|---|---|---|
+| BLS sign (produce one share) | 0.99 ms | 1,006/s |
+| BLS verify, single, unbatched | 2.48 ms | 404/s |
+| batched verify, per distinct session | 1.15–1.59 ms | 628–870/s |
+| **threshold recovery, 30 of 50 (InstantSend)** | **9.41 ms** | **106/s** |
+| threshold recovery, 240 of 400 (ChainLocks) | 85.3 ms | 11.7/s |
+
+Batching matters and it works: `CBLSBatchVerifier` groups by message hash, aggregates the
+public keys for each hash, and does a single `VerifyInsecureAggregated` over the distinct
+hashes (`src/bls/bls_batchverifier.h:130-178`). All 50 shares of one session carry the same
+`signHash`, so they collapse to one verification. Share count is nearly free; **session
+count is what costs**.
+
+Recovery does not batch, and at 9.41 ms it is nine times the cost of everything else in the
+session put together.
+
+### It is one thread
+
+`CSigSharesManager::WorkThreadMain` (`src/llmq/quorums_signing_shares.cpp:1447`) runs the
+whole pipeline serially on a single thread: `ProcessPendingRecoveredSigs`, then
+`ProcessPendingSigShares`, then `SignPendingSigShares`, then `SendMessages` at most once
+per 100 ms, then two `Cleanup` calls — and `workInterrupt.sleep_for(100ms)` when idle, with
+a `// TODO Wakeup when pending signing is needed?` still in place.
+
+This is the same shape as the `rtm-msghand` ceiling in §1: one thread, everything on it,
+the rest of the machine idle.
+
+### The arithmetic
+
+Per session a recovering member pays sign + verify + recover ≈ **11.5 ms**, so ~87
+sessions/s on its one thread; the recovery term alone caps it at 106/s.
+
+| | sessions/s | transactions/s (2-input, 3 sessions each) |
+|---|---|---|
+| one smartnode, one quorum | ~87–106 | **~29–35** |
+| network, 24 active quorums, no member doubled up | ~2,400 | **~800** |
+| required at the 5,000 tx/s target | 15,000 | 5,000 |
+
+The network-wide row is the generous reading: it assumes enough smartnodes that no node
+sits in two active InstantSend quorums at once, and that each has a core free for signing
+and nothing else. It is still **six times short** of the target, and the per-node row is
+what a single smartnode actually experiences.
+
+Against §1's measured 5,600 tx/s of plain mempool acceptance, the attestation path is
+roughly **160 times slower per node** than the path it is proposed to relieve.
+
+### What this does and does not say
+
+It does not say quorum attestation is a bad idea. It says the cost is in **recovery**, that
+recovery is **per signing session**, and that the current design spends three sessions on a
+two-input transaction and does them all on one thread.
+
+Three consequences follow, and they are all engineering rather than architecture:
+
+1. **One session per transaction, not one per input.** Signing the transaction hash once
+   instead of each input would cut the work by the input count plus one — a 3× reduction on
+   this corpus, before anything else is touched.
+2. **Recovery is the target, not verification.** Optimising share verification, which
+   already batches, buys nothing; 9.41 ms of Lagrange interpolation is the whole cost.
+3. **The signing thread has the same problem as the message handler.** Recovery is
+   independent per session and embarrassingly parallel, and `CBLSWorker` — the thread pool
+   `BLS_Verify_BatchedParallel` uses — already exists in the tree.
+
+The measurement is raw crypto cost on bowser, whose CPU governor was `schedutil` with turbo
+enabled (nanobench warned). A typical smartnode is weaker than this machine, not stronger,
+so these are optimistic figures.
+
 ## Rig notes
 
 Three rig defects were found by accounting rather than by failure, each of which would
