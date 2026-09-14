@@ -78,6 +78,30 @@ The seconds-long figures require a deliberately enlarged mempool. It is raised b
 the relationship is linear and unavoidable, and because any plan to raise throughput
 raises `-maxmempool` with it.
 
+### The stall, measured from outside
+
+The figures above are the walk itself. The user-visible effect was measured separately and
+by accident, on an unmodified build, by timing ordinary RPC calls during a fill.
+`getmempoolinfo` reads three counters and has a median latency of 1.3 ms. During the same
+fill it recorded:
+
+| mempool | `getmempoolinfo` latency |
+|---|---|
+| 604,525 | 663 ms |
+| 1,327,170 | 1,740 ms |
+| 1,631,327 | 1,830 ms |
+| 1,792,489 | 839 ms |
+
+Six of sixty samples stalled; the rest were ~1 ms. A call that does no work taking 1.8
+seconds is blocked on a lock, and the wait grows with mempool size. `getblocktemplate`
+stalled in the same iterations, so the node was answering nothing at all.
+
+Note the magnitudes run roughly 2.3x the measured walk above, and a caller arriving
+mid-walk should wait *less* than a full walk, not more. So either the walk is slower on
+the unmodified build or there is a second O(mempool) holder of these locks. **This report
+does not claim the two are the same thing** — the walk is measured, the stall is measured,
+and the link between them is not yet established.
+
 ### Reproduce
 
 Regtest, `checkmempool=0`, `-maxmempool=8000`, **with at least one peer connected** —
@@ -106,9 +130,10 @@ narrowing the lock scope to the part that needs it.
 
 **This is already fixed upstream.** Dash commit
 [`cb6afcbe5f`](https://github.com/dashpay/dash/commit/cb6afcbe5f) (2026-06-29), "net:
-avoid ThreadSocketHandler busy-loop on receive-paused peers", shipped in Dash Core
-v23.1.8. Raptoreum's `net.cpp` predates the `Sock` refactor, but the change is about ten
-lines. This report is a backport request with a local reproduction.
+avoid ThreadSocketHandler busy-loop on receive-paused peers", first released in Dash Core
+**v23.1.7 (2026-07-01)** and present in every release since; it is not in v23.1.5.
+Raptoreum's `net.cpp` predates the `Sock` refactor, but the change is about ten lines.
+This report is a backport request with a local reproduction.
 
 ### What happens
 
@@ -178,13 +203,107 @@ Raising `-maxreceivebuffer` delays the pause but does not prevent it.
 
 ---
 
+## Issue 3 — FindBlockPos() loops forever if a block exceeds MAX_BLOCKFILE_SIZE
+
+**Title:** `FindBlockPos()` never terminates for a block larger than `MAX_BLOCKFILE_SIZE`, allocating until OOM
+
+### What happens
+
+```cpp
+// src/validation.h:97
+static const unsigned int MAX_BLOCKFILE_SIZE = 0x8000000;   // 128 MiB
+
+// src/validation.cpp:3770-3775
+while (vinfoBlockFile[nFile].nSize + nAddSize >= MAX_BLOCKFILE_SIZE) {
+    nFile++;
+    if (vinfoBlockFile.size() <= nFile) {
+        vinfoBlockFile.resize(nFile + 1);
+    }
+}
+```
+
+The loop looks for a block file with room for a block of `nAddSize`. If `nAddSize` is
+itself `>= MAX_BLOCKFILE_SIZE`, no file can ever satisfy it — including a fresh empty one,
+where `0 + nAddSize >= MAX_BLOCKFILE_SIZE` still holds. The loop increments `nFile`
+without bound and resizes `vinfoBlockFile` once per iteration.
+
+There is no error, no log line and no exception. The node allocates silently until the
+kernel kills it, and on a shared machine the OOM killer may choose a different process.
+
+### Measured
+
+With `MAX_DIP0001_BLOCK_SIZE` raised for testing (regtest, `-blockmaxsize` varied):
+
+| block | serialised bytes | result |
+|---|---|---|
+| 63,999,073 | under the limit | connects normally, 4.87 s, peak RSS 0.85 GB |
+| 127,999,015 | under by 6 MiB | connects normally, 10.0 s, peak RSS 1.30 GB |
+| ~192,000,000 | over | never completes, RSS grows 0.47 GB/s |
+| 254,999,843 | over | `Error: Out of memory. Terminating.`, `signal=ABRT`, >60 GB |
+
+`perf record --call-graph dwarf` during the runaway, while RSS went 4.00 GB → 37.24 GB in
+25 seconds:
+
+```
+14.93%  std::vector<CBlockFileInfo>::_M_default_append(unsigned long)
+ 2.22%  SaveBlockToDisk(CBlock const&, int, CChainParams const&, FlatFilePos const*)
+```
+
+### Reachability
+
+**Not reachable at the shipped 2 MB block size**, so this is not a live vulnerability. It
+is latent, and it detonates the moment any block can exceed 128 MiB. The same code and the
+same constant are in Bitcoin Core, equally unreachable there.
+
+It is worth fixing pre-emptively because the failure mode is silent and total, and because
+any future block-size work would trip over it with no diagnostic pointing at the cause.
+
+### Possible directions
+
+Either raise `MAX_BLOCKFILE_SIZE` alongside any block-size increase, or let a block file
+hold a single oversized block — e.g. accept the position when the file is empty regardless
+of `nAddSize`. A guard that errors instead of looping would at least make it diagnosable.
+
+### The broader fix: assert the invariants at compile time
+
+Three relationships govern whether a block can exist at all, and none is stated anywhere
+in the source. All four constants are compile-time `static const unsigned int`, so the
+compiler can enforce them:
+
+```cpp
+// A block must fit inside one block file, or FindBlockPos() cannot terminate.
+static_assert(MAX_DIP0001_BLOCK_SIZE < MAX_BLOCKFILE_SIZE,
+              "block size must be below MAX_BLOCKFILE_SIZE or FindBlockPos() loops forever");
+
+// A block must fit inside one p2p message.
+static_assert(MAX_DIP0001_BLOCK_SIZE < MAX_PROTOCOL_MESSAGE_LENGTH,
+              "block size must be below MAX_PROTOCOL_MESSAGE_LENGTH or blocks cannot be relayed");
+
+// A block's transaction vector must be deserialisable.
+static_assert(MAX_DIP0001_BLOCK_SIZE <= MAX_SIZE,
+              "block size must be within MAX_SIZE or ReadCompactSize() rejects the block");
+```
+
+All three hold at the shipped values (2 MB against 128 MiB, 3 MB and 32 MB), so they are
+silent today and fire only when someone raises the block size without the accompanying
+limits. That is exactly the mistake this report documents, and it was made three separate
+times while producing these measurements — each constraint discovered by crashing into it
+rather than by reading, because nothing in the code says the constants are related.
+
+A runtime check at startup would also work, but compile-time is strictly better here: the
+values cannot change at runtime, and a build failure cannot be ignored.
+
+---
+
 ## Corrections made after review
 
 Recorded so the reasoning is auditable:
 
-- Issue 2 was written as a novel finding. It is fixed upstream; verified that
-  `cb6afcbe5f` exists, is dated 2026-06-29, carries that subject, adds
-  `HasUnpausedReceivableNode()` plus a unit test, and that v23.1.8 is a real tag.
+- Issue 2 was written as a novel finding. It is fixed upstream; verified against the
+  GitHub API that `cb6afcbe5f` exists, is dated 2026-06-29, carries that subject, touches
+  `net.cpp`/`net.h`/`net_tests.cpp`, and adds `HasUnpausedReceivableNode()`. The review
+  said it shipped in v23.1.8; comparing the commit against the tags shows it is contained
+  in **v23.1.7 (2026-07-01)** and absent from v23.1.5, so v23.1.8 was a month late.
 - Issue 1 claimed the map "scales without bound". It does not — entries are erased at six
   confirmations, so it is bounded by `-maxmempool`, and at stock settings the walk is
   ~105 ms rather than seconds. The default-config table was added and the severity

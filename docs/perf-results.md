@@ -318,6 +318,339 @@ instruments reading the same `/proc` data in the same run, disagreeing 2,085% ag
 
 `collect.py` now measures the interval between the CPU reads themselves.
 
+## 10. Block template assembly: flat in mempool, but it is a full block validation
+
+`getblocktemplate` timed every 10 s during a fill from an empty mempool to 1,852,790
+entries, at the shipped 2 MB block size. Sixty samples.
+
+| mempool | assembly |
+|---|---|
+| 23,003 | 180.9 ms |
+| 321,246 | 176.7 ms |
+| 739,229 | 207.6 ms |
+| 1,224,795 | 230.8 ms |
+| 1,845,150 | 309.7 ms |
+
+Excluding lock-stalled samples: **median 254 ms, max 318 ms**. An eightyfold larger pool
+costs perhaps 50% more. `BlockAssembler` walks the fee-ordered index and stops when the
+block is full, touching ~5,400 entries regardless of how many are behind them. Assembly
+scales with the **block**, not the pool.
+
+### What the 254 ms actually is
+
+Not selection. `CreateNewBlock` ends with:
+
+```cpp
+// miner.cpp:262
+if (!TestBlockValidity(state, chainparams, *pblock, pindexPrev, false, false)) {
+```
+
+and `TestBlockValidity` asserts `cs_main` held and calls `ContextualCheckBlockHeader`,
+`CheckBlock`, `ContextualCheckBlock` and then **`ConnectBlock`** on the candidate. Every
+template is a complete block validation of 5,378 transactions, performed under `cs_main`.
+
+That has a consequence the RPC's name hides: **a polling pool spends the node's acceptance
+budget.** `cs_main` is the same lock the message handler needs, so template production and
+transaction acceptance are in direct competition on it.
+
+### What it cost acceptance
+
+| | no template polling | polling every 10 s, one peer |
+|---|---|---|
+| effective acceptance | 4,884 tx/s | **3,194 tx/s** |
+| offer refused by the node | ~1% | **18.7%** |
+
+A 35% drop. Template lock time accounts for about 2.5% (254 ms per 10 s) and the six
+observed stalls for perhaps another 2.6%, so roughly 5% is attributable and **the rest is
+not explained**. A controlled A/B — the same fill with and without polling, peer count
+held constant — would separate template cost from peer cost. Not yet run.
+
+### The stalls are lock waits, not assembly
+
+Six samples ran long, and in five of them `getmempoolinfo` — which reads three counters
+and has a median of 1.3 ms — stalled in the same iteration:
+
+| mempool | assembly | `getmempoolinfo` |
+|---|---|---|
+| 604,525 | 975 ms | 663 ms |
+| 1,327,170 | 2,118 ms | 1,740 ms |
+| 1,631,327 | 4,726 ms | 1,830 ms |
+| 1,792,489 | 2,802 ms | 839 ms |
+
+A trivial call taking 1.8 seconds is blocked, not working. Both calls were waiting on the
+same holder, and the wait grows with mempool size. This is the first **measured** evidence
+for §5's stall — previously inferred from lock scope — and it arrived by accident, on the
+clean build, via RPC latency. Magnitudes run about 2.3× the measured ChainLocks walk, so
+either that walk is slower here or there is a second O(mempool) holder. Not attributed.
+
+### For decoupling
+
+Assembly cost follows block contents. A block committing to 600,000 transactions rather
+than 5,400 makes each template call roughly a hundred times more expensive — unless
+commitments are validated differently from bodies, which is a design requirement rather
+than an optimisation.
+
+### PARKED: template production over RPC needs replacing before any throughput increase
+
+Measured at two block sizes, same node:
+
+| block | transactions | `getblocktemplate` |
+|---|---|---|
+| 2 MB | 5,374 | 0.21 s |
+| 32 MB | 85,624 | **2.7–3.5 s** |
+
+Two separable costs, and both scale with block contents:
+
+1. **Redundant revalidation.** `CreateNewBlock` ends in `TestBlockValidity` → `ConnectBlock`
+   (`miner.cpp:262`), a full validation of transactions that were *already validated* when
+   they entered this node's mempool. Warm-cache cost is 0.002 ms/txin, so ~350 ms at
+   85,624 transactions and several seconds at 600,000. It holds `cs_main` throughout, so it
+   competes directly with acceptance.
+2. **JSON marshalling.** The RPC returns every transaction as hex — roughly 64 MB of JSON
+   for a 32 MB block, doubling the payload. Pools poll this continuously.
+
+At 5,000 tx/s (600,000 transactions per block) both become untenable: seconds of `cs_main`
+per poll, and hundreds of megabytes of JSON per poll.
+
+**Directions, in rough order of leverage:**
+
+- **Stratum V2's Template Distribution Protocol.** Replaces polling with the node *pushing*
+  a template carrying the coinbase and a merkle path rather than transaction bodies. Removes
+  the marshalling cost entirely and the polling with it. Note a Raptoreum-specific
+  complication: the coinbase carries a `CCbTx` payload with smartnode-list merkle roots, so
+  this is a port rather than a drop-in. SV2's mining and job-declaration protocols are
+  pool-side and do **not** help with any of this.
+- **Incremental templates** — maintain a running template updated as transactions arrive,
+  rather than rebuilding per call. Selection is already cheap; revalidation is not.
+- **Reduce the revalidation** to the coinbase and special-transaction payload. Its purpose is
+  to stop a miner wasting hashpower on an invalid template; for transactions drawn from the
+  node's own mempool it re-proves what was already proven.
+
+Not a blocker at 2 MB — 0.21 s per poll is tolerable. It becomes one well before 5,000 tx/s.
+**Parked, not scheduled.**
+
+## 11. Mempool convergence across nodes
+
+The question the decoupling design rests on: does the network converge on a shared pending
+set? A block that commits to transaction identifiers is reconstructable only by a peer
+that already holds those bodies.
+
+**Setup.** Four nodes in a star — three peers each connected to a hub. Transactions
+originate at *all four*, using disjoint lineage shards of the same corpus (`--shard N/M`;
+lineages are linear, so transaction `j` of generation `k` spends the outputs of
+transaction `j` of generation `k-1`, and taking every Mth lineage yields a self-contained
+set). 250 tx/s per node, 1,000 aggregate. `getrawmempool` on every node every 20 s,
+compared against the union.
+
+A star is the friendliest topology — every node is two hops from every other — so it is a
+floor, not a typical case.
+
+### The first run was invalid
+
+It reported a flat 75% of the union missing from every peer, which looked like total
+failure to converge. It was not. The peers were restored from a snapshot with an old tip
+and were latched in initial block download, and during IBD the node requests **only**
+sporks:
+
+```cpp
+// net_processing.cpp:2840
+static std::set<int> allowWhileInIBDObjs = { MSG_SPORK };
+```
+
+The hub announced faithfully and the peers ignored every announcement. Diagnosed from the
+per-message counters, which were flatly incompatible with "relay is slow":
+
+```
+hub -> peer:  sent_inv = 283,057 bytes    sent_tx = 0
+hub <- peer:  recv_getdata = 0
+```
+
+Fix: `maxtipage=999999999` on every node, now in the rig scripts. Mining a block works too
+but changes chain state between runs.
+
+### The valid run
+
+With all four nodes out of IBD, `sent_tx` and `recv_getdata` are both non-zero and the
+hub delivers to each peer at **~79 tx/s** — the trickle cap, exactly.
+
+| | |
+|---|---|
+| each peer must learn | ~750 tx/s (the other three nodes' output) |
+| each peer can be told | ~79 tx/s |
+| shortfall | **~670 tx/s, accumulating** |
+
+Worst-node missing: 10,810 → 25,010 → 38,082 → 52,010 → 66,181 → 77,148. About 650 per
+second, without bound.
+
+### After the input stops
+
+The informative part. With no new transactions, the union froze at 113,659 and the nodes
+drained:
+
+| node | holds | of union |
+|---|---|---|
+| hub | 110,688 | 97% |
+| peer 1 | 42,548 | 37% |
+| peer 2 | 38,198 | 34% |
+| peer 3 | 36,563 | 32% |
+
+Peers caught up at 42 tx/s falling to 28 tx/s — **roughly thirty minutes to converge on
+six minutes of traffic**. Convergence is not impossible, it is about five times slower
+than the traffic that created it. On a two-minute block interval a node would be ~15
+blocks behind knowing what the current block commits to.
+
+The peers also diverged from *each other* once input stopped (42,548 vs 36,563), which
+they did not while it flowed. In a star every leaf is equidistant, so that spread is the
+trickle's randomisation — reconstruction success would vary per node under identical
+conditions.
+
+### The control: at the design point it converges
+
+1,000 tx/s is twenty-two times the ~45 tx/s a 2 MB block carries, so that run says the cap
+binds — not whether the design is coherent. Repeating it at the **design point**, 45 tx/s
+aggregate across the same four nodes, same star, same cap:
+
+```
+worst-node missing:  402 (57.0%)  <- startup
+                     174 (10.8%)
+                     423 (16.9%)
+                     123 ( 3.6%)
+                     192 ( 4.5%)
+                     587 (11.3%)
+                     212 ( 3.5%)
+```
+
+Bounded, oscillating between ~120 and ~590 — a few seconds of in-flight traffic — with no
+trend across seven samples. At one point the **peers held more than the hub** (4,113 /
+4,125 / 4,155 against 4,116), which is what genuine convergence looks like: everyone has
+everything except what is in flight, and whoever is momentarily ahead is arbitrary.
+
+| offered | vs 2 MB capacity | outcome |
+|---|---|---|
+| 45 tx/s | 1x | **converges**, gap ~4 s of traffic, stable |
+| 1,000 tx/s | 22x | diverges, gap grows ~650/s without bound |
+
+And the drain phase is the sharpest contrast of all. With input stopped:
+
+| | at 45 tx/s | at 1,000 tx/s |
+|---|---|---|
+| steady-state gap | ~4 s of traffic, bounded | grows ~650/s, unbounded |
+| once input stops | converged within seconds | ~30 min for 6 min of traffic |
+| final worst node | **0.7% missing** | 65% missing, still falling |
+
+At the design point a peer repeatedly held the *entire* union while the hub was one sample
+behind — convergence complete, and which node leads is arbitrary.
+
+**So the coupled design is self-consistent.** `INVENTORY_BROADCAST_MAX_PER_1MB_BLOCK *
+MaxBlockSize()/1e6` is provisioned against the block with roughly 2.3x headroom, and
+Raptoreum as shipped converges comfortably at the throughput it actually supports. There
+is no defect in the relay configuration.
+
+### What this means for decoupling
+
+The proportionality survives any block size **because block size is a proxy for how many
+transactions must propagate**. That proxy holds only while blocks carry bodies.
+
+A decoupled block committing to 600,000 transactions at 32 bytes is 19.2 MB, against the
+224 MB those bodies occupy — twelve times smaller. The relay cap it indexes falls by
+twelve while the propagation requirement does not fall at all. Everything else in the
+relay design carries over unchanged; this is the single place it breaks, and it is now a
+specific measured claim rather than an assertion.
+
+### An untested assumption, flagged rather than measured
+
+Convergence requires a node's inbound learning to cover what the rest of the network
+produces:
+
+```
+peers x per-peer rate  >=  offered rate x (N-1)/N
+```
+
+With the measured 79 tx/s per peer that gives 1 peer at 45 tx/s (which matched), ~13 at
+1,000 tx/s, and ~63 at 5,000 tx/s.
+
+**The formula assumes the per-peer rate is independent of peer count, and that is not
+established.** The sender rebuilds and heapifies its entire un-announced backlog *per peer
+per trickle*, with a mempool lookup per comparison (§8), and a single peer was measured to
+cost about a third of sustained acceptance. If that work degrades with peer count, a node
+with sixty peers does not relay at 60 x 79 tx/s and the peer-count requirement is worse
+than the formula says.
+
+Testing it is small — one node, peers attached at 1, 2, 4, 8, per-peer delivery rate
+recorded at each step — but it only matters once a design leans on high peer counts. Not
+run, and noted here so the formula is not quoted as though it were measured end to end.
+
+Also still unrun: the same convergence test at a raised block size with the offered rate
+held at that block's capacity, which would confirm the invariant holds across block sizes
+rather than only at 2 MB.
+
+## 12. A latent infinite loop at 128 MiB of block
+
+Raising `MAX_DIP0001_BLOCK_SIZE` to test large blocks found a hard failure with no error
+message: the node allocates without bound until the machine dies.
+
+### The measurements
+
+| block | serialised bytes | vs 134,217,728 | result |
+|---|---|---|---|
+| 64 MB | 63,999,073 | under | works, 4.87 s, peak RSS 0.85 GB |
+| 128 MB | 127,999,015 | **under, by 6 MiB** | works, 10.0 s, peak RSS 1.30 GB |
+| 192 MB | ~192,000,000 | over | never completes, 0.47 GB/s until OOM |
+| 255 MB | 254,999,843 | over | OOM, >60 GB, `signal=ABRT` |
+
+Assembly always succeeded and was logged; the hang is after `CreateNewBlock` returns.
+`-debug=bench` recorded **zero** completed connections at the failing sizes.
+
+### The cause
+
+Found with `perf record --call-graph dwarf` during the runaway (RSS 4.00 GB → 37.24 GB
+across the 25 s profile):
+
+```
+14.93%  std::vector<CBlockFileInfo>::_M_default_append(unsigned long)
+ 2.22%  SaveBlockToDisk(CBlock const&, int, CChainParams const&, FlatFilePos const*)
+```
+
+```cpp
+// src/validation.h:97
+static const unsigned int MAX_BLOCKFILE_SIZE = 0x8000000;   // 128 MiB
+
+// src/validation.cpp:3770-3775, FindBlockPos()
+while (vinfoBlockFile[nFile].nSize + nAddSize >= MAX_BLOCKFILE_SIZE) {
+    nFile++;
+    if (vinfoBlockFile.size() <= nFile) {
+        vinfoBlockFile.resize(nFile + 1);
+    }
+}
+```
+
+The loop looks for a block file with room for the block. **If the block is itself larger
+than `MAX_BLOCKFILE_SIZE`, no file can ever have room — including a fresh empty one, where
+`0 + nAddSize >= MAX_BLOCKFILE_SIZE` still holds.** It increments `nFile` forever, resizing
+`vinfoBlockFile` by one element per iteration, which is the `_M_default_append` in the
+profile.
+
+### Why it matters, and why it has never been seen
+
+This is inherited Bitcoin Core code and is unreachable at any shipped block size, in
+Bitcoin or in Raptoreum. It is a **latent landmine that detonates the moment a block
+exceeds 128 MiB** — and it fails in the worst possible way: no error, no log line, no
+exception, just silent unbounded allocation until the kernel intervenes. On a machine
+running anything else, the OOM killer may take the other process.
+
+Any block-size increase past 128 MiB must raise `MAX_BLOCKFILE_SIZE` with it, or change
+the loop to allow a block file to hold a single oversized block.
+
+For decoupling: a commitment block of 19.2 MB is nowhere near this. The "build whole,
+split after" variant in `transaction-decoupling.md` §15 moves ~224 MB blocks and would hit
+it immediately.
+
+### What the bisect actually found
+
+The threshold is **128 MiB of serialised block**, not a transaction count. The apparent
+cliff "between 343,327 and 515,000 transactions" was an artefact of testing at decimal
+128 MB, which is 122 MiB — under the limit by six mebibytes.
+
 ## Rig notes
 
 Three rig defects were found by accounting rather than by failure, each of which would

@@ -95,11 +95,25 @@ def main():
     ap.add_argument("--duration", type=float, default=0.0, help="seconds; 0 = until corpus ends")
     ap.add_argument("--queue-cap", type=int, default=4 << 20, help="bytes buffered per socket before we count a shortfall")
     ap.add_argument("--linger", type=float, default=30.0, help="seconds to hold the connection open after the offer ends")
+    ap.add_argument("--shard", default="", help="N/M: send only lineages where lineage %% M == N")
+    ap.add_argument("--lineages", type=int, default=600000, help="lineages per generation in the corpus")
     a = ap.parse_args()
 
     limit = a.count if a.count else 1 << 30
     records = load(os.path.join(a.corpus, "txs.bin"), limit)
     txids = open(os.path.join(a.corpus, "txids.txt")).read().split()[:len(records)]
+
+    if a.shard:
+        # Lineages are linear: transaction j of generation k spends the outputs of
+        # transaction j of generation k-1, so index // lineages is the generation and
+        # index % lineages is the lineage. Taking every Mth lineage gives a set whose
+        # parents are all inside it, and ascending order keeps parents first.
+        n, m = (int(x) for x in a.shard.split("/"))
+        keep = [i for i in range(len(records)) if (i % a.lineages) % m == n]
+        records = [records[i] for i in keep]
+        txids = [txids[i] for i in keep]
+        print("shard %d/%d: %d records" % (n, m, len(records)))
+
     print("loaded %d records, %.1f MB" % (len(records), sum(map(len, records)) / 1e6))
 
     port = null_sink() if a.null else a.port
