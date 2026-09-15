@@ -366,6 +366,22 @@ static void BLS_RecoverThreshold(size_t threshold, benchmark::Bench &bench, uint
     });
 }
 
+static void BLS_Recover_2(benchmark::Bench &bench) {
+    BLS_RecoverThreshold(2, bench, 200);   // llmq3_60, the default regtest quorum
+}
+
+static void BLS_Recover_3(benchmark::Bench &bench) {
+    BLS_RecoverThreshold(3, bench, 200);
+}
+
+static void BLS_Recover_6(benchmark::Bench &bench) {
+    BLS_RecoverThreshold(6, bench, 100);
+}
+
+static void BLS_Recover_12(benchmark::Bench &bench) {
+    BLS_RecoverThreshold(12, bench, 50);
+}
+
 static void BLS_Recover_30(benchmark::Bench &bench) {
     BLS_RecoverThreshold(30, bench, 20);   // llmq50_60, InstantSend above 600 smartnodes
 }
@@ -388,5 +404,9 @@ BENCHMARK(BLS_Verify_LargeAggregatedBlock1000)
 BENCHMARK(BLS_Verify_LargeAggregatedBlock1000PreVerified)
 BENCHMARK(BLS_Verify_Batched)
 BENCHMARK(BLS_Verify_BatchedParallel)
+BENCHMARK(BLS_Recover_2)
+BENCHMARK(BLS_Recover_3)
+BENCHMARK(BLS_Recover_6)
+BENCHMARK(BLS_Recover_12)
 BENCHMARK(BLS_Recover_30)
 BENCHMARK(BLS_Recover_240)
