@@ -965,6 +965,82 @@ quantity disagreeing with the first.
   to dominate.
 - The quorum sizes tested are 5, 9 and 13 against a live size of 50.
 
+## 17. What a shorter validation path actually buys
+
+§15 and §16 priced the attestation. This prices what it would relieve.
+
+One binary, one corpus (v2, 2-in-2-out), one restored chain state, the same offered rate of
+25,000 tx/s. The only difference between arms is a runtime flag.
+
+| arm | median | p90 | peak | node CPU, median | node CPU, peak |
+|---|---|---|---|---|---|
+| **stock** | 5,269 tx/s | 5,550 | 5,779 | 119% | 361% |
+| **skipsigs** — signature verification removed | **15,842 tx/s** | 18,869 | 20,779 | 135% | 698% |
+| **parallel** — the same checks on the `CCheckQueue` | **4,721 tx/s** | 4,971 | 5,095 | **249%** | 386% |
+
+Each arm was proved to be what it claims before it was measured, using a transaction
+carrying a genuine signature over an unrelated digest — valid DER, low-S, wrong:
+
+| arm | that transaction | proves |
+|---|---|---|
+| stock | rejected, `mandatory-script-verify-flag-failed` | verification really runs on this corpus |
+| skipsigs | **accepted** | the flag genuinely removes verification |
+| parallel | rejected, `perf-parallel-script-failed` | the checks still run, and via the pooled path |
+
+### Signature verification is two thirds of the acceptance path
+
+Removing it **triples** the ceiling, from 5,269 to 15,842 tx/s. That settles the question
+§16's correction opened: a shorter validation path is not a rounding error at acceptance,
+it is most of it.
+
+This is an upper bound and a generous one. A real attested path still has to verify the
+attestation, and `skipsigs` removes the work entirely rather than replacing it with
+something cheaper.
+
+### But the free version of that saving does not work
+
+**Correction.** The previous revision of this document, and the advice given on it, said the
+same 3× was available with no trust assumption by running ATMP's script checks through the
+`CCheckQueue` the node already owns. Measured, that is false. The pooled arm is **10%
+slower than stock while using more than twice the CPU** — 4,721 tx/s at 249% against 5,269
+at 119%.
+
+The reason is granularity. `ConnectBlock` queues thousands of checks across thousands of
+transactions and waits once. ATMP handles one transaction at a time, so the pooled arm
+takes a `CCheckQueueControl`, enqueues **two** checks, wakes workers and waits — per
+transaction. At ~59 µs of actual verification per input, the synchronisation costs more
+than the work.
+
+So the 3× is real but it is not free, and it is not a flag. Getting it locally would mean
+batching script checks across transactions inside the acceptance path — pipelining several
+transactions' checks before waiting — which is a genuine piece of engineering with its own
+correctness questions about which transaction failed. That is untested here, and it is the
+honest comparator for any attestation proposal rather than the naive pooling that loses.
+
+### What it says about the buspool
+
+An attestation scheme's best case at acceptance is **3×**, on the one path that already had
+the most headroom: 5,269 tx/s against a 2 MB decoupled design point of ~520 tx/s, ten times
+over.
+
+Meanwhile relay delivers ~75 tx/s per peer (§8), which is **70 times below** even the
+`skipsigs` ceiling, and attestation does not touch it — bodies reach every node whether a
+quorum signed them or not. And the attestation layer that would deliver the 3× runs at
+~76 locks/s at a five-member quorum (§16), an order of magnitude below the design point it
+is supposed to serve.
+
+The 3× is therefore real and worth having at some future throughput, and it is not what
+decides anything at the throughputs actually in question.
+
+### Where the cost goes if it is skipped
+
+With verification removed the node's CPU peak rose from 361% to 698%, so the ceiling moved
+somewhere that parallelises. What does not move is block connection: §10's 1.1 s for 85,624
+transactions is a *warm* number, warm because ATMP verified those signatures first. Skip
+them at acceptance and connection pays them cold. Attestation relocates the cost unless
+block validation trusts the attestation too — a consensus change, and it has to be argued
+as one.
+
 ## Rig notes
 
 Three rig defects were found by accounting rather than by failure, each of which would
