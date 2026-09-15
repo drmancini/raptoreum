@@ -1615,21 +1615,63 @@ void CConnman::SocketEvents(std::set <SOCKET> &recv_set, std::set <SOCKET> &send
     }
 }
 
+bool CConnman::HasUnpausedReceivableNode() const {
+    AssertLockHeld(cs_vNodes);
+    for (const auto &p: mapReceivableNodes) {
+        // This must match, exactly, the test that decides which receivable nodes
+        // are actually read below. A node admitted here but rejected there is
+        // work this loop claims it can do and then does not, and the zero-timeout
+        // poll that follows turns into a spin. Checking only fPauseRecv leaves a
+        // node with queued outbound data counted but never read.
+        if (!p.second->fPauseRecv && p.second->nSendMsgSize == 0 && !p.second->fDisconnect) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void CConnman::SocketHandler() {
     bool fOnlyPoll = false;
+    int fPollReason = 0;
     {
         // check if we have work to do and thus should avoid waiting for events
         LOCK2(cs_vNodes, cs_mapNodesWithDataToSend);
-        if (!mapReceivableNodes.empty()) {
+        // Only skip the wait if there is a receivable node we will actually read
+        // from. A paused node stays in mapReceivableNodes with data on its socket
+        // but is skipped below, so testing the map for emptiness keeps fOnlyPoll
+        // set while no progress is possible: SocketEvents then polls with a zero
+        // timeout, this thread spins on a full core, and because it never drains
+        // anything the pause never lifts. Under sustained load that is a livelock,
+        // not a slow path.
+        if (HasUnpausedReceivableNode()) {
             fOnlyPoll = true;
+            fPollReason = 1;
         } else if (!mapSendableNodes.empty() && !mapNodesWithDataToSend.empty()) {
             // we must check if at least one of the nodes with pending messages is also sendable, as otherwise a single
             // node would be able to make the network thread busy with polling
             for (auto &p: mapNodesWithDataToSend) {
                 if (mapSendableNodes.count(p.first)) {
                     fOnlyPoll = true;
+                    fPollReason = 2;
                     break;
                 }
+            }
+        }
+        // Test-only: a zero-timeout poll that never makes progress is a spin, and
+        // the two branches above are indistinguishable from outside. Report which
+        // one is keeping the loop hot, once a second.
+        if (LogAcceptCategory(BCLog::NET)) {
+            static int64_t lastReport = 0;
+            static uint64_t spins = 0;
+            spins++;
+            int64_t now = GetTimeMillis();
+            if (now - lastReport > 1000) {
+                LogPrint(BCLog::NET, "SocketHandler -- iterations=%d reason=%d receivable=%d sendable=%d "
+                                     "withdata=%d\n",
+                         (int) spins, fPollReason, (int) mapReceivableNodes.size(),
+                         (int) mapSendableNodes.size(), (int) mapNodesWithDataToSend.size());
+                lastReport = now;
+                spins = 0;
             }
         }
     }

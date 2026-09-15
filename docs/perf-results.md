@@ -1041,6 +1041,90 @@ them at acceptance and connection pays them cold. Attestation relocates the cost
 block validation trusts the attestation too — a consensus change, and it has to be argued
 as one.
 
+## 18. A livelock in the socket handler, and what it invalidated
+
+Every high-throughput relay run in this document stalled at the same kind of point, and
+for most of a working day that stall was reported as a capacity ceiling. It was a bug.
+
+### The defect
+
+`CConnman::SocketHandler` decides whether to skip waiting for socket events using a
+different test from the one that decides which work actually gets done.
+
+The skip-wait test was `!mapReceivableNodes.empty()` (`net.cpp:1623`). The do-work test,
+forty lines later, admits a node only if **all three** of these hold (`net.cpp:1718`):
+
+```cpp
+!it->second->fPauseRecv && it->second->nSendMsgSize == 0 && !it->second->fDisconnect
+```
+
+A node satisfying the first but not the second is phantom work. The loop skips its wait,
+finds nothing it is willing to do, and immediately goes round again — `SocketEvents` polls
+with a zero timeout every time. Under sustained load, where a peer routinely has both
+readable data and queued outbound data, this never resolves on its own.
+
+Measured, with the decision instrumented to report which branch kept the poll hot:
+
+| | before | after |
+|---|---|---|
+| `SocketHandler` iterations/second | **1,446,199** | **2** |
+| `rtm-net` CPU | 100% of a core, indefinitely | 0% |
+
+The node froze with its mempool, bytes received and bytes sent all static while burning a
+full core, and recovered only when the peer disconnected. That is the "socket thread burns
+a full core spinning on a socket it has paused" line in §16.4 — filed there as a curiosity,
+and actually this.
+
+### The fix
+
+Make the predicate match the admission test exactly, and say so in the code so it stays
+matched. The name upstream uses for this — `HasUnpausedReceivableNode` — describes only the
+pause condition, and implementing the name rather than the requirement is precisely the
+mistake that produced a half-fix here: checking only `fPauseRecv` moved the stall from 30
+seconds to 72 and raised delivery 67%, while leaving the spin in place.
+
+### What it invalidated, and what survived
+
+Every relay measurement in this document was taken on a node carrying this defect,
+including §8's 74.7 tx/s. The low-cap runs never trigger it — no backpressure, no spin —
+but that needed checking rather than assuming.
+
+Re-measured on the fixed binary, offering 5,000 tx/s for 150 s with `maxmempool=8000`:
+
+| cap | accept | relay | withheld |
+|---|---|---|---|
+| shipped (280) | 3,848 tx/s | **44 tx/s** | 0% |
+| 4,000 | 4,391 tx/s | 435 tx/s | 0% |
+| 50,000 | 4,584 tx/s | 2,838 tx/s | 71.7%, stalls at 30 s |
+
+**The baseline reproduces**: 44 tx/s against the 45–48 measured before the fix. §8's
+low-cap relay results stand.
+
+### Retracted: the "fixed thread budget"
+
+An earlier revision of this document reported that the message handler had a work budget of
+roughly 5,000 operations per second, divided between accepting and relaying, on the
+evidence that accept + relay stayed near 5,000 across a cap sweep. That is withdrawn. The
+sweep was run on the buggy binary; on the fixed one, cap 50,000 does 4,584 accept **plus**
+2,838 relay — 7,422, well past the supposed budget. The conserved-looking sum was an
+artefact of every high-cap case dying in the same livelock.
+
+Two other hypotheses were tested and refuted rather than reasoned away. The relay path's
+fee ordering is genuinely expensive — `make_heap` over the whole pending set per trickle,
+with a mempool lookup per comparison, measured at over 40% of the message handler under a
+300,010-transaction backlog (`SipHashUint256` 30.75%, `CompareDepthAndScore` 9.75%). But
+disabling it changed relay throughput by nothing measurable (3,560 → 3,464 at cap 50,000;
+45 → 48 at the shipped cap) and did not prevent the collapse. A large profile share does
+not make something the bottleneck when the thread is about to livelock regardless.
+
+### Still open
+
+At cap 50,000 the run still stalls after about 30 seconds with 71.7% of the offer
+withheld — but the node now **sleeps** rather than spins, and both nodes go to 0% CPU with
+work outstanding on each side. That is a different failure from the one fixed here and its
+cause is not established. It is not the load generator failing to drain its sockets: the
+generator runs a per-socket drain thread. No further claim is made about it.
+
 ## Rig notes
 
 Three rig defects were found by accounting rather than by failure, each of which would

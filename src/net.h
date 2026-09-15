@@ -570,6 +570,13 @@ private:
     void SocketEvents(std::set <SOCKET> &recv_set, std::set <SOCKET> &send_set, std::set <SOCKET> &error_set,
                       bool fOnlyPoll);
 
+    /** Is any node with readable data one we are actually willing to read from?
+     *
+     *  A peer that has hit fPauseRecv stays in mapReceivableNodes, because its
+     *  socket still has data. SocketHandler then refuses to read it. Testing the
+     *  map for emptiness therefore reports work that cannot be done. */
+    bool HasUnpausedReceivableNode() const EXCLUSIVE_LOCKS_REQUIRED(cs_vNodes);
+
     void SocketHandler();
 
     void ThreadSocketHandler();
