@@ -19,11 +19,19 @@ from test_framework.messages import COIN                  # noqa: E402
 from test_framework.authproxy import AuthServiceProxy     # noqa: E402
 
 
-def rpc(datadir, chain="regtest", wallet=None):
+def rpc(datadir, chain="regtest", wallet=None, port=None):
+    """Connect to a node by datadir.
+
+    The port defaults to the chain's, which is only right for one node on a
+    box. A second node has its own rpcport, and connecting to the first with
+    the second's cookie fails as 401 Unauthorized -- which reads as a broken
+    node rather than a misaddressed client.
+    """
     cookie = os.path.join(datadir, chain, ".cookie")
     with open(cookie) as f:
         auth = f.read().strip()
-    port = {"regtest": 19898, "testnet3": 10229, "main": 10226}[chain]
+    if port is None:
+        port = {"regtest": 19898, "testnet3": 10229, "main": 10226}[chain]
     url = "http://%s@127.0.0.1:%d" % (auth, port)
     if wallet is not None:
         url += "/wallet/" + wallet

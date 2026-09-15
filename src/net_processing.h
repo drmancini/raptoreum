@@ -140,4 +140,10 @@ EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 /** Relay transaction to every node */
 void RelayTransaction(const uint256 &, const CConnman &connman);
 
+
+/** Test-only relay trickle overrides; see net_processing.cpp. 0 = shipped behaviour. */
+extern unsigned int g_perf_inv_max;
+extern unsigned int g_perf_inv_interval;
+extern bool g_perf_inv_nosort;
+
 #endif // BITCOIN_NET_PROCESSING_H

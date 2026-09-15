@@ -162,6 +162,45 @@ static const unsigned int INVENTORY_BROADCAST_INTERVAL = 5;
  *  We have 4 times smaller block times in Raptoreum, so we need to push 4 times more invs per 1MB. */
 static constexpr unsigned int INVENTORY_BROADCAST_MAX_PER_1MB_BLOCK = 4 * 7 * INVENTORY_BROADCAST_INTERVAL;
 
+/** Test-only overrides for the transaction-relay trickle (-perfinvmax, -perfinvinterval).
+ *
+ *  Relay is capped at INVENTORY_BROADCAST_MAX_PER_1MB_BLOCK * MaxBlockSize()/1e6
+ *  announcements per trickle, drained on a Poisson timer of
+ *  INVENTORY_BROADCAST_INTERVAL seconds. Both terms set the delivered rate, and
+ *  indexing the cap to block size is what breaks under decoupling, where block
+ *  size stops tracking how much has to propagate.
+ *
+ *  These separate the two so the burst size and the interval can be moved
+ *  independently of each other and of the block size. Zero means "use the
+ *  shipped behaviour". */
+unsigned int g_perf_inv_max{0};
+unsigned int g_perf_inv_interval{0};
+
+/** Test-only: skip the fee ordering of pending announcements (-perfinvnosort).
+ *
+ *  Each trickle copies the whole pending inventory set into a vector and heaps
+ *  it, then sends only InvBroadcastMax() items off the top. make_heap is O(n)
+ *  over the entire set however few are sent, and the comparator does a mempool
+ *  lookup per comparison, so the cost scales with the backlog rather than with
+ *  the work. This removes the ordering so that cost can be measured against a
+ *  run that keeps it. It is a measurement, not a proposal: dropping fee order
+ *  would break the alignment between what a peer is told and what a miner
+ *  selects (see perf-results.md section 13). */
+bool g_perf_inv_nosort{false};
+
+/** The effective per-trickle announcement cap. */
+static inline unsigned int InvBroadcastMax() {
+    if (g_perf_inv_max != 0) {
+        return g_perf_inv_max;
+    }
+    return INVENTORY_BROADCAST_MAX_PER_1MB_BLOCK * MaxBlockSize() / 1000000;
+}
+
+/** The effective trickle interval, in seconds. */
+static inline unsigned int InvBroadcastInterval() {
+    return g_perf_inv_interval != 0 ? g_perf_inv_interval : INVENTORY_BROADCAST_INTERVAL;
+}
+
 // Internal stuff
 namespace {
     /** Number of nodes with fSyncStarted. */
@@ -4488,8 +4527,7 @@ bool PeerLogicValidation::SendMessages(CNode *pto) {
         {
             LOCK2(mempool.cs, pto->cs_inventory);
 
-            size_t reserve = std::min<size_t>(pto->setInventoryTxToSend.size(),
-                                              INVENTORY_BROADCAST_MAX_PER_1MB_BLOCK * MaxBlockSize() / 1000000);
+            size_t reserve = std::min<size_t>(pto->setInventoryTxToSend.size(), InvBroadcastMax());
             reserve = std::max<size_t>(reserve, pto->vInventoryBlockToSend.size());
             reserve = std::min<size_t>(reserve, MAX_INV_SZ);
             vInv.reserve(reserve);
@@ -4512,12 +4550,12 @@ bool PeerLogicValidation::SendMessages(CNode *pto) {
                 fSendTrickle = true;
                 if (pto->fInbound) {
                     pto->nNextInvSend = std::chrono::microseconds{
-                            connman->PoissonNextSendInbound(current_time.count(), INVENTORY_BROADCAST_INTERVAL)};
+                            connman->PoissonNextSendInbound(current_time.count(), InvBroadcastInterval())};
                 } else {
                     // Use half the delay for regular outbound peers, as there is less privacy concern for them.
                     // and quarter the delay for Smartnode outbound peers, as there is even less privacy concern in this case.
                     pto->nNextInvSend = PoissonNextSend(current_time, std::chrono::seconds{
-                            INVENTORY_BROADCAST_INTERVAL >> 1 >> !pto->GetVerifiedProRegTxHash().IsNull()});
+                            InvBroadcastInterval() >> 1 >> !pto->GetVerifiedProRegTxHash().IsNull()});
                 }
             }
 
@@ -4586,15 +4624,19 @@ bool PeerLogicValidation::SendMessages(CNode *pto) {
                 // Topologically and fee-rate sort the inventory we send for privacy and priority reasons.
                 // A heap is used so that not all items need sorting if only a few are being sent.
                 CompareInvMempoolOrder compareInvMempoolOrder(&mempool);
-                std::make_heap(vInvTx.begin(), vInvTx.end(), compareInvMempoolOrder);
+                if (!g_perf_inv_nosort) {
+                    std::make_heap(vInvTx.begin(), vInvTx.end(), compareInvMempoolOrder);
+                }
                 // No reason to drain out at many times the network's capacity,
                 // especially since we have many peers and some will draw much shorter delays.
                 unsigned int nRelayedTransactions = 0;
                 LOCK(pto->cs_filter);
                 while (!vInvTx.empty() &&
-                       nRelayedTransactions < INVENTORY_BROADCAST_MAX_PER_1MB_BLOCK * MaxBlockSize() / 1000000) {
+                       nRelayedTransactions < InvBroadcastMax()) {
                     // Fetch the top element from the heap
-                    std::pop_heap(vInvTx.begin(), vInvTx.end(), compareInvMempoolOrder);
+                    if (!g_perf_inv_nosort) {
+                        std::pop_heap(vInvTx.begin(), vInvTx.end(), compareInvMempoolOrder);
+                    }
                     std::set<uint256>::iterator it = vInvTx.back();
                     vInvTx.pop_back();
                     uint256 hash = *it;
