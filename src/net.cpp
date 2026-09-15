@@ -1615,6 +1615,9 @@ void CConnman::SocketEvents(std::set <SOCKET> &recv_set, std::set <SOCKET> &send
     }
 }
 
+/** Test-only: ignore the latched send-readiness flag (-perfalwaystrysend). */
+bool g_perf_always_try_send{false};
+
 bool CConnman::HasUnpausedReceivableNode() const {
     AssertLockHeld(cs_vNodes);
     for (const auto &p: mapReceivableNodes) {
@@ -1670,6 +1673,17 @@ void CConnman::SocketHandler() {
                                      "withdata=%d\n",
                          (int) spins, fPollReason, (int) mapReceivableNodes.size(),
                          (int) mapSendableNodes.size(), (int) mapNodesWithDataToSend.size());
+                // Per-node state, so a stall can be attributed to the condition that
+                // is actually stuck rather than to whichever one looks guilty.
+                for (CNode *pnode: vNodes) {
+                    LogPrint(BCLog::NET, "SocketHandler --   node=%d pauseRecv=%d pauseSend=%d "
+                                         "sendMsgSize=%d processQueue=%d hasRecvData=%d canSendData=%d "
+                                         "disconnect=%d\n",
+                             (int) pnode->GetId(), (int) pnode->fPauseRecv, (int) pnode->fPauseSend,
+                             (int) pnode->nSendMsgSize, (int) pnode->nProcessQueueSize,
+                             (int) pnode->fHasRecvData, (int) pnode->fCanSendData,
+                             (int) pnode->fDisconnect);
+                }
                 lastReport = now;
                 spins = 0;
             }
@@ -1776,7 +1790,14 @@ void CConnman::SocketHandler() {
                 it->second->Release();
                 it = mapNodesWithDataToSend.erase(it);
             } else {
-                if (it->second->fCanSendData) {
+                // fCanSendData is set only by an EPOLLOUT event, and the sockets are
+                // registered edge-triggered. If it latches false while bytes are still
+                // queued, this node can no longer send -- and because reads require an
+                // empty send queue, it can no longer receive either. -perfalwaystrysend
+                // attempts the write regardless, to test whether that latch is what
+                // wedges the connection. mapSendableNodes is unaffected, so this does
+                // not reintroduce the zero-timeout poll.
+                if (it->second->fCanSendData || g_perf_always_try_send) {
                     it->second->AddRef();
                     vSendableNodes.emplace_back(it->second);
                 }

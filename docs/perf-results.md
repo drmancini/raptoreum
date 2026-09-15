@@ -1117,13 +1117,44 @@ disabling it changed relay throughput by nothing measurable (3,560 → 3,464 at 
 45 → 48 at the shipped cap) and did not prevent the collapse. A large profile share does
 not make something the bottleneck when the thread is about to livelock regardless.
 
-### Still open
+### A second stall: a connection wedged in both directions at once
 
-At cap 50,000 the run still stalls after about 30 seconds with 71.7% of the offer
-withheld — but the node now **sleeps** rather than spins, and both nodes go to 0% CPU with
-work outstanding on each side. That is a different failure from the one fixed here and its
-cause is not established. It is not the load generator failing to drain its sockets: the
-generator runs a per-socket drain thread. No further claim is made about it.
+With the livelock fixed the high-cap runs still stall, but differently: the node now
+**sleeps** instead of spinning. `wchan` shows `rtm-net` in `ep_poll` and `rtm-msghand` in
+`futex_wait_queue` — both correctly parked, waiting for events that never arrive.
+
+Instrumenting every condition that gates progress, the state at the stall is unambiguous.
+All four load connections:
+
+```
+node=1 pauseRecv=0 pauseSend=0 sendMsgSize=5 processQueue=0 hasRecvData=1 canSendData=0
+node=2 pauseRecv=0 pauseSend=0 sendMsgSize=5 processQueue=0 hasRecvData=1 canSendData=0
+node=3 pauseRecv=0 pauseSend=0 sendMsgSize=5 processQueue=0 hasRecvData=1 canSendData=0
+node=4 pauseRecv=0 pauseSend=0 sendMsgSize=5 processQueue=0 hasRecvData=1 canSendData=0
+```
+
+Nothing paused, nothing queued for processing, data waiting to be read on every
+connection — and **five bytes** stuck in each send queue.
+
+Two rules combine to close the connection in both directions:
+
+- **Reads** require an empty send queue (`net.cpp:1718`) — drain what you owe the peer
+  before taking more, which is correct TCP flow-control etiquette.
+- **Writes** require `fCanSendData` (`:1791`), which is cleared on a short write or
+  `EWOULDBLOCK` (`:824`, `:852`) and re-set **only** by an epoll `EPOLLOUT` event
+  (`:1753`) — on sockets registered edge-triggered (`EPOLLET`, `:3818`).
+
+So if that flag latches false while bytes remain queued, the node can no longer send, and
+because it cannot send it will no longer read. Each rule is defensible alone; together they
+deadlock on five bytes.
+
+**Partially tested.** `-perfalwaystrysend` attempts the write regardless of the flag. With
+it, the stall moved from 120,620 transactions to 181,260 — roughly 50% further, but still a
+stall. Against a baseline that itself varied between runs (120,620 and 139,000), one
+observation is suggestive and not conclusive: the latch is *a* cause and not the only one.
+
+It is not the load generator failing to drain: it runs a per-socket drain thread, which was
+checked rather than assumed. No claim is made about the remaining cause.
 
 ## Rig notes
 

@@ -149,6 +149,8 @@ struct CSerializedNetMsg {
 
 class NetEventsInterface;
 
+extern bool g_perf_always_try_send;
+
 class CConnman {
     friend class CNode;
 
