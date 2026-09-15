@@ -2051,6 +2051,12 @@ announce/inventory/request/share exchange that `CSigSharesManager::SendMessages`
 most once per 100 ms. Parallelising BLS verification addresses the half that is already
 fast.
 
+**Full coverage holds only to about 60 tx/s at the smallest quorum tested.** Paced offers
+at 5 of 3: 20, 40 and 60 tx/s all lock 100%, 80 tx/s locks 98.5%, 100 tx/s locks 87.8%. The
+achieved rate pins at ~76 locks/s and does not rise, so past the ceiling the excess is lost
+rather than delayed. That ceiling agrees with the burst measurement, and it is at a quorum a
+tenth the size of the live one.
+
 **Saturation loses work rather than queueing it.** Above capacity, sessions are purged 60
 seconds after their last new share (`quorums_signing_shares.cpp:1317-1357`), and nothing
 retries them: `pendingRetryTxs` is only ever populated with the *children of a transaction
