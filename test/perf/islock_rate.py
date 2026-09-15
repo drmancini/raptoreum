@@ -22,6 +22,7 @@ __init__, before options are parsed:
     ISLOCK_SIZE       quorum size                  (default 5)
     ISLOCK_THRESHOLD  quorum threshold             (default 3)
     ISLOCK_COUNT      transactions to submit       (default 200)
+    ISLOCK_RATE       offered rate in tx/s, 0 = burst (default 0)
     ISLOCK_OUT        write the result as JSON here
 """
 import json
@@ -29,7 +30,7 @@ import os
 import re
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from test_framework.authproxy import AuthServiceProxy
@@ -40,6 +41,7 @@ MNS = int(os.environ.get("ISLOCK_MNS", "5"))
 SIZE = int(os.environ.get("ISLOCK_SIZE", "5"))
 THRESHOLD = int(os.environ.get("ISLOCK_THRESHOLD", "3"))
 COUNT = int(os.environ.get("ISLOCK_COUNT", "200"))
+RATE = float(os.environ.get("ISLOCK_RATE", "0"))   # transactions/s; 0 submits as fast as possible
 OUT = os.environ.get("ISLOCK_OUT", "")
 
 # Outputs per fan-out transaction. More than this exceeds MAX_STANDARD_TX_SIZE.
@@ -140,13 +142,14 @@ class ISLockRateTest(RaptoreumTestFramework):
             smartnodes=MNS, quorum_size=SIZE, quorum_threshold=THRESHOLD,
             transactions=len(txids),
             locked=len(locked_at),
+            offered_rate=RATE or None,
             submit_seconds=round(t_submitted - t0, 2),
             total_seconds=round(elapsed, 2),
             locks_per_second=round(len(locked_at) / elapsed, 1) if elapsed > 0 else None,
             sessions_per_second=round(sessions / elapsed, 1) if elapsed > 0 else None,
             recovery_ms=self._recovery_stats(recoveries),
             per_node_sessions=self._session_rates(recoveries, t0),
-            sigshares_cpu_pct=sampler.summary(),
+            sigshares_cpu_pct=sampler.summary(until=t_last),
         )
         self.log.info(json.dumps(result, indent=2))
         if OUT:
@@ -159,15 +162,21 @@ class ISLockRateTest(RaptoreumTestFramework):
         # an AuthServiceProxy holds one HTTP connection and is not shareable
         # across threads.
         conns = [AuthServiceProxy(n.url, timeout=60) for n in self.nodes]
-        t = self.mocktime
+        base, started = self.mocktime, time.time()
         while not stop.is_set():
-            t += 1
+            # Track real time exactly. Running the mocked clock faster shortens
+            # every LLMQ timeout in proportion: at twice real time the 60 s
+            # SESSION_NEW_SHARES_TIMEOUT fires after 30 real seconds, which is
+            # less than a large backlog takes to drain, and sessions are purged
+            # mid-flight. That stalls the run and looks exactly like a node
+            # defect.
+            t = base + int(time.time() - started)
             for c in conns:
                 try:
                     c.setmocktime(t)
                 except Exception:
                     pass
-            stop.wait(0.5)
+            stop.wait(1.0)
 
     def _submit(self, raws, workers=8):
         """Submit every transaction to every node.
@@ -179,9 +188,21 @@ class ISLockRateTest(RaptoreumTestFramework):
         txids = [None] * len(raws)
         errors = []
 
+        # A paced offer answers a different question from a burst. A burst finds
+        # how long a fixed amount of work takes; a paced offer finds the rate at
+        # which the quorum stops keeping up, which is where sessions start timing
+        # out and their transactions stop locking altogether.
+        started = time.time()
+
         def send(node_url, idxs, record):
             conn = AuthServiceProxy(node_url, timeout=120)
             for i in idxs:
+                if RATE > 0:
+                    # i is the global index, so every shard and every node paces
+                    # against the same schedule.
+                    delay = started + i / RATE - time.time()
+                    if delay > 0:
+                        time.sleep(delay)
                 try:
                     txid = conn.sendrawtransaction(raws[i])
                     if record:
@@ -244,8 +265,11 @@ class ISLockRateTest(RaptoreumTestFramework):
                     for line in fh:
                         m = RECOVERED.match(line)
                         if m:
+                            # The log stamps UTC; a naive datetime would be read
+                            # as local and land hours away from time.time().
                             ts = datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S.%f")
-                            rows.append((ts.timestamp(), int(m.group(2))))
+                            rows.append((ts.replace(tzinfo=timezone.utc).timestamp(),
+                                         int(m.group(2))))
             except FileNotFoundError:
                 pass
             out[i] = rows
@@ -313,15 +337,24 @@ class CpuSampler(threading.Thread):
                 if i in prev:
                     p_ticks, p_t = prev[i]
                     dt = max(1e-3, now - p_t)
-                    self.samples.setdefault(i, []).append((ticks - p_ticks) / os.sysconf("SC_CLK_TCK") * 100 / dt)
+                    pct = (ticks - p_ticks) / os.sysconf("SC_CLK_TCK") * 100 / dt
+                    self.samples.setdefault(i, []).append((now, pct))
                 prev[i] = (ticks, now)
             self.stop.wait(self.interval)
 
-    def summary(self):
+    def summary(self, until=None):
+        """Mean and peak over the active window.
+
+        A run that ends with transactions that never lock spends the rest of its
+        timeout idle, and averaging over that reports a busy thread as a quiet
+        one.
+        """
         out = {}
         for i, vals in self.samples.items():
-            if vals:
-                out[i] = dict(mean=round(sum(vals) / len(vals), 1), max=round(max(vals), 1))
+            v = [p for t, p in vals if until is None or t <= until]
+            if v:
+                out[i] = dict(mean=round(sum(v) / len(v), 1), max=round(max(v), 1),
+                              samples=len(v))
         return out
 
 
