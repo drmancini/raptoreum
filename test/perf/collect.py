@@ -30,13 +30,15 @@ def proc_cpu(pid):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--datadir", required=True)
+    ap.add_argument("--rpcport", type=int, default=None,
+                    help="the node's rpcport; needed for any node but the first on a box")
     ap.add_argument("--wallet", default="perf")
     ap.add_argument("--out", required=True)
     ap.add_argument("--seconds", type=int, default=120)
     ap.add_argument("--interval", type=float, default=1.0)
     a = ap.parse_args()
 
-    node = rpc(a.datadir, wallet=a.wallet)
+    node = rpc(a.datadir, wallet=a.wallet, port=a.rpcport)
     pid = int(open(os.path.join(a.datadir, "regtest", "raptoreumd.pid")).read().strip())
 
     prev_size = None

@@ -761,6 +761,18 @@ void SetupServerArgs() {
                          "Do a full consistency check for the block tree, setBlockIndexCandidates, ::ChainActive() and mapBlocksUnlinked occasionally. (default: %u)",
                          defaultChainParams->DefaultConsistencyChecks()), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY,
                  OptionsCategory::DEBUG_TEST);
+    gArgs.AddArg("-perfinvmax=<n>",
+                 "Test-only: announcements per transaction-relay trickle, replacing the "
+                 "block-size-indexed cap. 0 uses the shipped behaviour. (default: 0)",
+                 ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    gArgs.AddArg("-perfinvinterval=<n>",
+                 "Test-only: mean seconds between transaction-relay trickles. "
+                 "0 uses the shipped behaviour. (default: 0)",
+                 ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    gArgs.AddArg("-perfinvnosort",
+                 "Test-only: skip the fee ordering of pending relay announcements, whose cost "
+                 "scales with the backlog rather than with what is sent. (default: 0)",
+                 ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     gArgs.AddArg("-perfskipsigs",
                  "Test-only: skip ECDSA signature verification entirely. The node will accept "
                  "transactions with invalid signatures. Performance measurement only. (default: 0)",
@@ -1592,6 +1604,13 @@ bool AppInitParameterInteraction() {
         }
     }
 
+    g_perf_inv_max = (unsigned int) std::max<int64_t>(0, gArgs.GetArg("-perfinvmax", 0));
+    g_perf_inv_interval = (unsigned int) std::max<int64_t>(0, gArgs.GetArg("-perfinvinterval", 0));
+    if (g_perf_inv_max || g_perf_inv_interval) {
+        LogPrintf("PERF: relay trickle overridden (max=%u, interval=%u; 0 = shipped)\n",
+                  g_perf_inv_max, g_perf_inv_interval);
+    }
+    g_perf_inv_nosort = gArgs.GetBoolArg("-perfinvnosort", false);
     g_perf_skip_sigs = gArgs.GetBoolArg("-perfskipsigs", false);
     g_perf_parallel_atmp = gArgs.GetBoolArg("-perfparallelatmp", false);
     if (g_perf_skip_sigs) {
