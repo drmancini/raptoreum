@@ -42,6 +42,7 @@ SIZE = int(os.environ.get("ISLOCK_SIZE", "5"))
 THRESHOLD = int(os.environ.get("ISLOCK_THRESHOLD", "3"))
 COUNT = int(os.environ.get("ISLOCK_COUNT", "200"))
 RATE = float(os.environ.get("ISLOCK_RATE", "0"))   # transactions/s; 0 submits as fast as possible
+EXTRA_DEBUG = [c for c in os.environ.get("ISLOCK_DEBUG", "").split(",") if c]
 OUT = os.environ.get("ISLOCK_OUT", "")
 
 # Outputs per fan-out transaction. More than this exceeds MAX_STANDARD_TX_SIZE.
@@ -61,6 +62,10 @@ class ISLockRateTest(RaptoreumTestFramework):
         # being measured, so turn it all off and re-enable only the one category
         # the rate is read from. Later arguments win.
         debug = ["-nodebug", "-debug=llmq-sigs"]
+        # Extra categories for diagnosis rather than timing. They write a line
+        # per share inside the path being measured, so a run that uses them is
+        # not a rate measurement.
+        debug += ["-debug=%s" % c for c in EXTRA_DEBUG if c]
         self.set_raptoreum_test_params(MNS + 1, MNS, extra_args=[debug] * (MNS + 1),
                                        fast_dip3_enforcement=True)
         self.set_raptoreum_llmq_test_params(SIZE, THRESHOLD)
