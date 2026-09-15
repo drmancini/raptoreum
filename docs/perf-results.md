@@ -866,6 +866,30 @@ which is what the linear-in-size fit is measuring.
 section 15 — addresses the half that is already fast. The cadence and the session state
 machine are where the time actually goes.
 
+### Where the cliff is
+
+A burst measures how long a fixed amount of work takes. A paced offer measures the rate at
+which the quorum stops keeping up, which is the number that matters because the failure is
+not graceful. Quorum 5 of 3, 90 seconds at each rate:
+
+| offered | locked | achieved |
+|---|---|---|
+| 20 tx/s | 1,800 / 1,800 | 19.8 locks/s |
+| 40 tx/s | 3,600 / 3,600 | 39.3 locks/s |
+| 60 tx/s | 5,400 / 5,400 | 58.1 locks/s |
+| 80 tx/s | **7,093 / 7,200** | 75.5 locks/s |
+| 100 tx/s | **7,906 / 9,000** | 76.2 locks/s |
+
+**Full coverage holds to 60 tx/s and the ceiling is ~76 locks/s.** Past it the achieved rate
+does not rise — it pins at 76 while coverage falls, so the excess is lost rather than
+delayed. At 100 offered, 1,094 transactions never received a lock.
+
+The ceiling agrees with the burst measurement of 74.2 locks/s above, which is a useful
+cross-check: two different offer patterns, the same limit.
+
+This is at the **smallest** quorum tested. The live InstantSend quorum is ten times larger,
+and §16's size scaling says capacity falls roughly as one over quorum size.
+
 ### Past capacity it loses transactions rather than slowing down
 
 The 9 of 6 and 13 of 8 rows above are not merely slower. They are **short**: 76 and 227
