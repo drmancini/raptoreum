@@ -769,6 +769,10 @@ void SetupServerArgs() {
                  "Test-only: mean seconds between transaction-relay trickles. "
                  "0 uses the shipped behaviour. (default: 0)",
                  ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    gArgs.AddArg("-perfalwaystrysend",
+                 "Test-only: attempt socket writes even when the epoll send-readiness flag is "
+                 "false, to test whether that flag latching wedges a connection. (default: 0)",
+                 ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     gArgs.AddArg("-perfinvnosort",
                  "Test-only: skip the fee ordering of pending relay announcements, whose cost "
                  "scales with the backlog rather than with what is sent. (default: 0)",
@@ -1610,6 +1614,7 @@ bool AppInitParameterInteraction() {
         LogPrintf("PERF: relay trickle overridden (max=%u, interval=%u; 0 = shipped)\n",
                   g_perf_inv_max, g_perf_inv_interval);
     }
+    g_perf_always_try_send = gArgs.GetBoolArg("-perfalwaystrysend", false);
     g_perf_inv_nosort = gArgs.GetBoolArg("-perfinvnosort", false);
     g_perf_skip_sigs = gArgs.GetBoolArg("-perfskipsigs", false);
     g_perf_parallel_atmp = gArgs.GetBoolArg("-perfparallelatmp", false);
