@@ -817,6 +817,130 @@ The measurement is raw crypto cost on bowser, whose CPU governor was `schedutil`
 enabled (nanobench warned). A typical smartnode is weaker than this machine, not stronger,
 so these are optimistic figures.
 
+## 16. InstantSend end to end: the attestation path measured
+
+Section 15 costs the cryptography in isolation. This is the assembled pipeline, on
+regtest, with real smartnodes forming a real quorum: `test/perf/islock_rate.py`.
+
+Transactions are handed to every node over RPC rather than relayed, so relay (section 8) is
+not in the measurement. They are pre-signed before the clock starts, so the wallet is not
+either. The rate is read from the nodes' own `recovered signature` log lines, which are
+written by the thread doing the work.
+
+### What it reaches
+
+Three thousand transactions, one input and one output each, so two signing sessions per
+transaction — one input lock and the islock.
+
+| quorum | locked | locks/s | per-node sessions/s | wall ms per session | recovery, benched |
+|---|---|---|---|---|---|
+| 5 of 3 | **3,000 / 3,000** | 74.2 | 55.4 | 18.1 | 0.90 ms |
+| 9 of 6 | 2,924 / 3,000 | 41.2 | 23.0 | 43.5 | 1.85 ms |
+| 13 of 8 | 2,773 / 3,000 | 32.5 | 13.9 | 71.9 | ~2.5 ms |
+
+The cost per session fits **≈ 6.7 × quorum size − 15 ms** across all three points. It is
+linear in the number of *members* and nearly independent of the threshold — recovery, the
+expensive cryptography of section 15, is 3 to 5 per cent of it.
+
+That is the opposite of what section 15's crypto-only model assumed. The model's conclusion
+was pessimistic enough, but its reasoning was wrong: the cost is not the signing, it is
+everything each member does with every other member.
+
+### It is not compute-bound
+
+At 5 of 3 the signing thread uses **9.1 ms of CPU per session against 18.1 ms of wall
+clock** — a duty cycle of about one half. The thread is idle as often as it is busy.
+
+A profile of one smartnode under load puts 78.8% of the process's CPU in `rtm-sigshares`
+and 17.5% in `rtm-isman`, with the leaf symbols almost entirely GMP and relic field
+arithmetic and `bls::LegacySchemeMPL::AggregateVerify` above them. So the busy half is
+genuinely cryptography — there is just not very much of it, and the thread spends the other
+half waiting.
+
+What it waits on is round trips. `CSigSharesManager::SendMessages` runs at most once per
+100 ms (`quorums_signing_shares.cpp:1461`), and a session needs an announce, an inventory,
+a request and the shares themselves. The number of those exchanges grows with the quorum,
+which is what the linear-in-size fit is measuring.
+
+**This matters for what to fix.** Parallelising BLS verification — the obvious reading of
+section 15 — addresses the half that is already fast. The cadence and the session state
+machine are where the time actually goes.
+
+### Past capacity it loses transactions rather than slowing down
+
+The 9 of 6 and 13 of 8 rows above are not merely slower. They are **short**: 76 and 227
+transactions never received an InstantSend lock at all, and the runs ended with the node
+idle and the transactions still sitting in the mempool.
+
+The chain of events is verified rather than inferred:
+
+1. **Sessions are purged on a timeout.** `CSigSharesManager::Cleanup` drops any session
+   whose last new share arrived `SESSION_NEW_SHARES_TIMEOUT` = 60 seconds ago
+   (`quorums_signing_shares.cpp:1317-1357`). Measured: 237 sessions timed out on one node
+   in a single 9-of-6 run, the log recording `sigShareCount=4` against a threshold of 6.
+
+2. **Nothing retries them.** `pendingRetryTxs` is only ever populated with the *children of
+   a transaction that just locked* (`quorums_instantsend.cpp:1239-1245`). A transaction
+   whose own session timed out is never queued, so `ProcessPendingRetryLockTxs` never
+   considers it. Measured: that same run logged **zero** `retrying to lock` lines while 85
+   transactions went unlocked.
+
+3. **The only way back is a block.** `CInstantSendManager::BlockConnected` calls
+   `ProcessTx(tx, true, ...)` for unlocked transactions in the block
+   (`quorums_instantsend.cpp:1176`), and only that retroactive path sets `allowReSign` so
+   `AsyncSignIfMember` will vote a second time (`quorums_signing.cpp:920`). By then the
+   transaction is mined and the lock adds nothing.
+
+So the failure above capacity is silent. There is no error, no backpressure, and no
+degraded-but-working mode: InstantSend simply stops applying to the excess, and on a live
+chain the transactions wait for an ordinary confirmation while the RPC still reports them
+as unlocked.
+
+### What it says about attestation as a scaling mechanism
+
+The largest quorum tested here is 13 members. **The live InstantSend quorum is 50**
+(section 15). The fit extrapolates to roughly 320 ms per session per node at that size,
+about 3 sessions per second — but that is four times beyond the measured range and is not
+claimed as a number. The measured direction is the point: capacity falls roughly as one
+over quorum size, and the network's real quorum is an order of magnitude larger than
+anything measured here.
+
+Any design that routes transaction volume through quorum attestation inherits all three of
+these properties: a per-session cost that grows with quorum size, a pipeline that is
+round-trip-bound rather than compute-bound, and a saturation behaviour that discards work
+instead of queueing it.
+
+### Instrument defects found on the way
+
+Each of these produced a plausible wrong answer first, and each was caught by a second
+quantity disagreeing with the first.
+
+- The fan-out transaction stayed in the mempool, because `IsTxSafeForMining` refuses a
+  transaction that is neither islocked nor `WAIT_FOR_ISLOCK_TIMEOUT` old. Its children were
+  then all descendants of one entry and everything past the 25th was rejected. The submit
+  path swallowed the errors and reported a clean rate for the 25 that got through.
+- The mocked clock ran at twice real time, which shortens every LLMQ timeout in proportion:
+  the 60-second session timeout fired after 30 real seconds and a 6,000-transaction run
+  stalled at a quarter of the work. That is indistinguishable from the genuine stall
+  described above, and had to be removed before the genuine one could be claimed.
+- The framework starts nodes with `-debug`, meaning every category, writing a line per sig
+  share inside the timed path.
+- The log stamps UTC and `strptime` returns a naive datetime, so the per-node window filter
+  compared timestamps two hours apart and reported zero sessions for a run that plainly
+  worked.
+- The CPU average covered the lock-wait timeout as well as the load, so a run that ends with
+  unlocked transactions spends ten minutes idle and reports a half-busy thread at 4.5%.
+
+### Not established here
+
+- Whether `SPORK_2_INSTANTSEND_ENABLED` is 0 on mainnet. Mempool signing only runs when it
+  is exactly that (`quorums_instantsend.cpp:1700`) and the compiled default is off. It is 0
+  on regtest, which is why these transactions lock. If mainnet has it off, this measures
+  what an attestation layer would cost rather than what InstantSend costs today.
+- Everything is loopback on one machine, which flatters the round-trip cost that turns out
+  to dominate.
+- The quorum sizes tested are 5, 9 and 13 against a live size of 50.
+
 ## Rig notes
 
 Three rig defects were found by accounting rather than by failure, each of which would
