@@ -1,6 +1,7 @@
 # Transaction Decoupling on Raptoreum Core
 
-**Version 3.** Supersedes v2.
+**Version 7.** Supersedes v6. The header was left at "Version 3" through several
+revisions; the content is what the revision number tracks, not this line.
 
 **What this is.** Not an argument for decoupling. A description of what decoupling
 *would be* in this tree, at the level of files, structures and states.
@@ -31,6 +32,15 @@ special-transaction field throughout `src/evo` and `src/assets`.
 - v2 named sync-against-retention as the remaining structural obstacle. **Version 3
   removes it** by owner decision: Smartnodes hold everything, miners hold what they need
   to mine, and retention mechanisms are deferred. See §8.
+- v6 reasoned about the Smartnode attestation path from the cost of the cryptography.
+  **Measured, the cryptography is 3 to 5 per cent of it** and the path is round-trip-bound
+  rather than compute-bound. The conclusion — that it is far too slow to carry transaction
+  volume — survives; the reasoning behind it does not. See §16.5.
+- v6 treated the relay re-index as a consequence of raising the block size. **It is a
+  prerequisite of decoupling at any block size, including 2 MB.** See §16.3 and §16.8.
+- v6 listed InstantSend as "marginal" at the 2 MB design point on a modelled figure of
+  ~800 tx/s network-wide. The measured figure is an order of magnitude lower. It is a
+  blocker, not a margin. See §16.5 and §16.8.
 
 ---
 
@@ -1493,8 +1503,18 @@ mining and ordinary tiers of §0 cannot exist without it.
 - **Build the DIP8 signing-attempts process** (`llmq/quorums_chainlocks.cpp:268-271`).
   **F depends on this** — §3A.6 and §3A.7: the fetch protocol is what makes a quorum split
   schedulable, and this is the only thing that lets a quorum converge afterwards.
+- **Sign batches, not transactions** — §16.5. One threshold signature over a Merkle root of
+  N transaction hashes. Cost is per session and per-session cost grows with quorum size, so
+  this is the only change here that scales rather than moving a constant.
+- **One session per transaction instead of inputs + 1** — a free 2× to 3×, measured, and
+  independent of the batching work.
+- **Give a saturated quorum a way to fail loudly.** Sessions are purged on timeout and
+  nothing re-queues them, so above capacity InstantSend silently stops applying. Whatever
+  the throughput fix, the absence of backpressure is its own defect.
 
-**Ships alone.** Gates any throughput increase whether or not decoupling happens.
+**Ships alone.** Gates any throughput increase whether or not decoupling happens — and
+§16.5 promotes it from "independently useful" to a blocker at the 2 MB design point, not
+only at 10 MB.
 
 ### C. Block format and serialization
 
@@ -1597,6 +1617,13 @@ the data it says decides the cutover.
 Not components, but they must ship before activation because changing them afterwards is itself a
 hard fork: **intra-block asset state visibility** (B8) and **asset undo keyed per transaction**
 (B9). Plus the signing-attempts process folded into B above.
+
+And four constants or mechanisms that block testing rather than activation, all measured
+rather than reasoned — see §16.6 for the numbers: the **relay cap re-index** (required at
+2 MB, not only at 10 MB), **`maxmempool`**, **`MAX_PROTOCOL_MESSAGE_LENGTH`**, and
+**template production**. The relay re-index is the one that is a design requirement rather
+than a tuning change, because reconstruction from identifiers is only possible against a
+pending set that has actually converged.
 
 ### Dependency shape
 
@@ -1905,7 +1932,7 @@ already pay for themselves.
 
 ---
 
-## 16. Measured inputs (2026-09-13)
+## 16. Measured inputs (2026-09-13, extended 2026-09-15)
 
 Everything above reasoned about throughput qualitatively. These numbers are measured on
 a real node — Raptoreum Core 2.0.4.1, `develop` plus the functional-test series, on a
@@ -1960,6 +1987,29 @@ the constant must be re-indexed to something that still tracks transaction volum
 committed transaction count — rather than to the size of a block that no longer carries
 them. That is a required change, not an optimisation.
 
+**More peers do not help.** `CompareDepthAndScore` is a single global ordering over the
+mempool, evaluated the same way on every peer link, so each link announces its own prefix
+of the same sequence. The subsets peers hold are nested, not complementary. Measured: the
+union across all peers contributed nothing over the best single peer. A node missing a
+transaction cannot route around it, because every peer it could ask is missing the same
+one. The fix is necessarily the rate constant or the ordering, and can never be topology.
+
+**And it is not deferrable to the 10 MB stage.** The cap is indexed to block *bytes*, and
+under decoupling block bytes are 32 × transaction count whatever the block size limit is.
+So a 2 MB decoupled block commits to ~62,500 transactions — a throughput of ~520 tx/s —
+while the relay cap stays at the 2 MB figure of ~75 tx/s. Coverage falls from about 170%
+today to about 14%. Keeping the block size at 2 MB is a sound staging choice for every
+other reason, but it does not let the relay constant stay as it is.
+
+**Fee ordering does not rescue this, though it rescues compact blocks.** §13 of
+`perf-results.md` measures a peer holding 1.5% of the hub's mempool filling an entire
+block with nothing to fetch, because relay announces in fee order and the miner selects in
+fee order, so the slice a peer has been told about *is* the slice the block takes. That
+alignment is exactly what decoupling removes: a commitment block does not take the top
+slice by fee, it commits to everything that arrived up to the payload cap. There is no top
+slice for relay to align with, every node needs every transaction, and convergence has to
+be full. Relay rate must be greater than or equal to arrival rate, with no shortcut.
+
 ### 16.4 Two node defects found on the way
 
 Neither is caused by decoupling; both get worse under it, because both scale with
@@ -1971,3 +2021,125 @@ mempool size and decoupling exists to make the mempool large.
   **1.9 seconds of total stall every 30 seconds at 3 million entries.**
 - The socket thread burns a full core spinning on a socket it has paused, so falling
   behind costs an extra core precisely when there is least to spare.
+
+### 16.5 The Smartnode attestation path, measured
+
+§3A reasoned about what a quorum attestation can carry. This is what producing one costs.
+Measured end to end on regtest with real Smartnodes forming a real quorum; full method in
+`perf-results.md` §15 and §16.
+
+**Correction to v6.** v6 costed this from the cryptography — 9.41 ms of threshold recovery
+per signing session — and concluded the path was far too slow. The conclusion holds. The
+reasoning does not: recovery is **3 to 5 per cent** of the measured cost.
+
+| quorum | locked | locks/s | per-node sessions/s | ms per session |
+|---|---|---|---|---|
+| 5 of 3 | 3,000 / 3,000 | 74.2 | 55.4 | 18.1 |
+| 9 of 6 | 2,924 / 3,000 | 41.2 | 23.0 | 43.5 |
+| 13 of 8 | 2,773 / 3,000 | 32.5 | 13.9 | 71.9 |
+
+Three properties, each of which any attestation-based design inherits:
+
+**Cost is linear in quorum size, not threshold.** The fit is ≈ 6.7 × quorum size − 15 ms
+across all three points. The live InstantSend quorum is **50** — `UpdateLLMQParams` resolves
+`LLMQ_50_60` to `llmq50_60` above 600 Smartnodes (`chainparams.cpp:1101`), not the size-3
+test quorum. That is an order of magnitude past anything measured here.
+
+**It is round-trip-bound, not compute-bound.** At 5 of 3 the signing thread spends 9.1 ms
+of CPU against 18.1 ms of wall clock — idle half the time, waiting on the
+announce/inventory/request/share exchange that `CSigSharesManager::SendMessages` ships at
+most once per 100 ms. Parallelising BLS verification addresses the half that is already
+fast.
+
+**Saturation loses work rather than queueing it.** Above capacity, sessions are purged 60
+seconds after their last new share (`quorums_signing_shares.cpp:1317-1357`), and nothing
+retries them: `pendingRetryTxs` is only ever populated with the *children of a transaction
+that just locked* (`quorums_instantsend.cpp:1239-1245`), so a transaction whose own session
+timed out is never re-queued. Measured: a run with 237 timed-out sessions and 85 unlocked
+transactions logged **zero** `retrying to lock` lines. The only way back is
+`BlockConnected`'s retroactive path (`quorums_instantsend.cpp:1176`), which re-signs once
+the transaction is mined — by which point the lock is worthless. There is no error, no
+backpressure, and no degraded-but-working mode.
+
+**And the unit is wrong.** InstantSend signs each input separately and then the lock
+(`quorums_instantsend.cpp:548-561`, `:724`). Measured: 5,845 distinct signing sessions for
+2,915 locked one-input transactions — sessions = inputs + 1, confirmed. A two-input
+transaction costs three threshold signatures.
+
+#### What this settles about the buspool proposal
+
+A design in which Smartnodes pre-attest transactions so they can take a shorter validation
+path is optimising the wrong side of the wrong bottleneck. §16.1 shows validation is not a
+constraint — acceptance runs at ~5,600 tx/s. The attestation path runs at a small fraction
+of that and gets slower as the quorum grows. It **adds** work to the slowest thread in the
+system in order to **remove** work from a path that has an order of magnitude of headroom
+at the 2 MB design point. And it leaves relay untouched: bodies still have to reach every
+node whether or not a quorum signed them first.
+
+#### What this settles about InstantSend as it exists today
+
+This is a finding about the current chain, not about decoupling.
+
+If threshold signing caps where these numbers say it does, **InstantSend as built cannot
+cover transactions at any throughput near the design point.** Either most transactions go
+unlocked — which changes what `IsTxSafeForMining`'s wait check is actually doing, since it
+falls through to the ten-minute age rule — or InstantSend has to sign batches rather than
+transactions.
+
+Batching is the only fix here that scales, and for a sharper reason than "fewer
+signatures". Cost is **per session**, and per-session cost grows with quorum size. One
+threshold signature over a Merkle root of N transaction hashes divides the whole cost by N
+— the round trips as well as the cryptography. Every other available fix moves a constant:
+one session per transaction instead of inputs + 1 is a free 2× to 3×, and worth doing, but
+it does not change the shape.
+
+That is also the salvageable form of the buspool instinct. "Smartnodes attest before
+mining" is the right shape; the purpose is finality and double-spend protection rather than
+a validation shortcut, and the unit has to be a batch.
+
+### 16.6 Prerequisites in existing code, found by measurement
+
+None of these is a design question. Each is a constant or a mechanism that must change
+before anything can be tested, and each would have been an expensive discovery on testnet.
+
+| | current | why it blocks |
+|---|---|---|
+| `MAX_PROTOCOL_MESSAGE_LENGTH` | 3 MB | a 10 MB commitment block cannot cross the wire at all |
+| `maxmempool` default | 300 MB | ~876 MB needed per two-minute interval at 5,000 tx/s; 41 seconds of headroom at the default |
+| `getblocktemplate` | full `ConnectBlock` per call | seconds of `cs_main` per poll at 600,000 commitments, in direct competition with acceptance |
+| `MAX_BLOCKFILE_SIZE` | 128 MiB | `FindBlockPos` loops forever on a block larger than one block file — silent, unbounded allocation until the OOM killer intervenes (`perf-results.md` §12) |
+
+The block-file loop is avoided by the separate body store, since commitment blocks stay far
+under 128 MiB. It is recorded here so that no variant drifts back towards writing bodies
+into block files, where it detonates immediately and fatally.
+
+Mempool growth is also lumpy rather than smooth — hash-table doubling means a node at 90%
+of the cap crosses it in one step — so the default is a footgun at any throughput increase,
+decoupling or not.
+
+Template production is the one that becomes a design requirement rather than an
+optimisation: under decoupling, commitments must not be revalidated as bodies. Stratum V2's
+Template Distribution Protocol is the right direction — the node pushes a template with the
+coinbase and a Merkle path, with no polling and no JSON marshalling of 600,000 identifiers
+— subject to the `CCbTx` complication in §7.
+
+### 16.7 What the staging choice actually costs
+
+Holding the block size at 2 MB isolates the problems well. It does not sidestep the relay
+one.
+
+| | 2 MB decoupled | 10 MB decoupled |
+|---|---|---|
+| throughput implied | ~520 tx/s | ~2,600 tx/s |
+| relay re-index (§16.3) | **required** | **required** |
+| InstantSend coverage (§16.5) | **blocker** | **blocker, needs batching** |
+| `maxmempool` | ~91 MB/interval, inside the default but tight | ~455 MB/interval, must raise |
+| `MAX_PROTOCOL_MESSAGE_LENGTH` | under 3 MB, fine | must raise |
+| template production | tolerable | must replace |
+| message handler (~5,600 tx/s) | 10× headroom | 2× headroom |
+| body propagation | ~23 MB/block, ~195 KB/s, trivial | ~115 MB/block |
+
+So the 2 MB stage has **two** blockers, not one. v6 recorded InstantSend as marginal at
+this point against a modelled ~800 tx/s network-wide; the measured figure is an order of
+magnitude below that, at a quorum a tenth the live size. The rest of the 10 MB list is then
+a known set of prerequisites rather than a set of discoveries.
