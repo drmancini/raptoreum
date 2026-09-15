@@ -51,6 +51,14 @@ public:
                          const uint256 &sighash) const override;
 };
 
+/** Test-only: skip ECDSA verification entirely (-perfskipsigs).
+ *
+ * Measures an upper bound on what any scheme that removes per-input signature
+ * checking from AcceptToMemoryPool could save. Never set outside a performance
+ * rig: with this on the node accepts transactions with invalid signatures.
+ */
+extern bool g_perf_skip_sigs;
+
 void InitSignatureCache();
 
 #endif // BITCOIN_SCRIPT_SIGCACHE_H

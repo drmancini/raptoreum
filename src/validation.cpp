@@ -110,6 +110,21 @@ Mutex g_best_block_mutex;
 std::condition_variable g_best_block_cv;
 uint256 g_best_block;
 bool g_parallel_script_checks{false};
+
+/** The script-check thread pool. Declared here rather than beside
+ *  StartScriptCheckWorkerThreads so AcceptToMemoryPool can reach it under
+ *  -perfparallelatmp below. */
+static CCheckQueue <CScriptCheck> scriptcheckqueue(128);
+
+/** Test-only: run AcceptToMemoryPool's script checks on the pool above
+ *  (-perfparallelatmp), the way ConnectBlock already does.
+ *
+ *  ATMP calls CheckInputs with no pvChecks vector, so every input is verified
+ *  inline on the calling thread — which is rtm-msghand, the single thread that
+ *  sets the acceptance ceiling, while the rest of the machine is idle. This
+ *  measures what that ceiling becomes when the same work is spread, with no
+ *  change to what is checked and no trust assumption. */
+bool g_perf_parallel_atmp{false};
 std::atomic_bool fImporting(false);
 std::atomic_bool fReindex(false);
 std::atomic_bool fProcessingHeaders(false);
@@ -793,8 +808,17 @@ static bool AcceptToMemoryPoolWorker(const CChainParams &chainparams, CTxMemPool
         // Check against previous transactions
         // This is done last to help prevent CPU exhaustion denial-of-service attacks.
         PrecomputedTransactionData txdata(tx);
-        if (!CheckInputs(tx, state, view, true, scriptVerifyFlags, true, false, txdata))
+        if (g_perf_parallel_atmp) {
+            std::vector <CScriptCheck> vChecks;
+            CCheckQueueControl <CScriptCheck> control(&scriptcheckqueue);
+            if (!CheckInputs(tx, state, view, true, scriptVerifyFlags, true, false, txdata, &vChecks))
+                return false; // state filled in by CheckInputs
+            control.Add(vChecks);
+            if (!control.Wait())
+                return state.DoS(0, false, REJECT_NONSTANDARD, "perf-parallel-script-failed");
+        } else if (!CheckInputs(tx, state, view, true, scriptVerifyFlags, true, false, txdata)) {
             return false; // state filled in by CheckInputs
+        }
 
         // Check again against the current block tip's script verification
         // flags to cache our script execution flags. This is, of course,
@@ -1978,8 +2002,6 @@ static bool WriteUndoDataForBlock(const CBlockUndo &blockundo, CValidationState 
 
     return true;
 }
-
-static CCheckQueue <CScriptCheck> scriptcheckqueue(128);
 
 void StartScriptCheckWorkerThreads(int threads_num) {
     scriptcheckqueue.StartWorkerThreads(threads_num);

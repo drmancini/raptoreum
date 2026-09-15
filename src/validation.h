@@ -190,6 +190,11 @@ extern bool fSpentIndex;
  * False indicates all script checking is done on the main threadMessageHandler thread.
  */
 extern bool g_parallel_script_checks;
+
+/** Test-only: run AcceptToMemoryPool's script checks on the script-check thread
+ *  pool rather than inline on the calling thread (-perfparallelatmp). See the
+ *  definition in validation.cpp. */
+extern bool g_perf_parallel_atmp;
 extern bool fAddressIndex;
 extern bool fAssetIndex;
 extern bool fTimestampIndex;

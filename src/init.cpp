@@ -761,6 +761,14 @@ void SetupServerArgs() {
                          "Do a full consistency check for the block tree, setBlockIndexCandidates, ::ChainActive() and mapBlocksUnlinked occasionally. (default: %u)",
                          defaultChainParams->DefaultConsistencyChecks()), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY,
                  OptionsCategory::DEBUG_TEST);
+    gArgs.AddArg("-perfskipsigs",
+                 "Test-only: skip ECDSA signature verification entirely. The node will accept "
+                 "transactions with invalid signatures. Performance measurement only. (default: 0)",
+                 ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    gArgs.AddArg("-perfparallelatmp",
+                 "Test-only: run mempool-acceptance script checks on the script-check thread pool "
+                 "instead of inline on the message handler. (default: 0)",
+                 ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     gArgs.AddArg("-checkblocks=<n>",
                  strprintf("How many blocks to check at startup (default: %u, 0 = all)", DEFAULT_CHECKBLOCKS),
                  ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
@@ -1582,6 +1590,16 @@ bool AppInitParameterInteraction() {
         if (!LogInstance().DisableCategory(cat)) {
             InitWarning(strprintf(_("Unsupported logging category %s=%s."), "-debugexclude", cat));
         }
+    }
+
+    g_perf_skip_sigs = gArgs.GetBoolArg("-perfskipsigs", false);
+    g_perf_parallel_atmp = gArgs.GetBoolArg("-perfparallelatmp", false);
+    if (g_perf_skip_sigs) {
+        LogPrintf("PERF: signature verification DISABLED (-perfskipsigs). "
+                  "This node accepts invalid transactions.\n");
+    }
+    if (g_perf_parallel_atmp) {
+        LogPrintf("PERF: mempool script checks run on the script-check pool (-perfparallelatmp)\n");
     }
 
     // Checkmempool and checkblockindex default to true in regtest mode
