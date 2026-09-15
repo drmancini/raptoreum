@@ -82,9 +82,14 @@ void InitSignatureCache() {
               (nElems * sizeof(uint256)) >> 20, (nMaxCacheSize * 2) >> 20, nElems);
 }
 
+bool g_perf_skip_sigs{false};
+
 bool
 CachingTransactionSignatureChecker::VerifySignature(const std::vector<unsigned char> &vchSig, const CPubKey &pubkey,
                                                     const uint256 &sighash) const {
+    if (g_perf_skip_sigs) {
+        return true;
+    }
     uint256 entry;
     signatureCache.ComputeEntry(entry, sighash, vchSig, pubkey);
     if (signatureCache.Get(entry, !store))
