@@ -390,6 +390,40 @@ static void BLS_Recover_240(benchmark::Bench &bench) {
     BLS_RecoverThreshold(240, bench, 5);   // llmq400_60, ChainLocks
 }
 
+
+static void BLS_DeserializeSignature(benchmark::Bench &bench) {
+    // Every sig share received from another member arrives as bytes and has to
+    // become a curve point before anything can be done with it. CBLSLazySignature
+    // defers that, but not past the first use. A node receives one share per
+    // member per signing session, so this cost is paid O(quorum size) times per
+    // session.
+    CBLSSecretKey sk;
+    sk.MakeNewKey();
+    CBLSSignature sig = sk.Sign(GetRandHash());
+    std::vector <uint8_t> buf = sig.ToByteVector();
+
+    // Benchmark.
+    bench.minEpochIterations(100).run([&] {
+        CBLSSignature s;
+        s.SetByteVector(buf);
+        s.IsValid();
+    });
+}
+
+static void BLS_DeserializePubKey(benchmark::Bench &bench) {
+    CBLSSecretKey sk;
+    sk.MakeNewKey();
+    CBLSPublicKey pk = sk.GetPublicKey();
+    std::vector <uint8_t> buf = pk.ToByteVector();
+
+    // Benchmark.
+    bench.minEpochIterations(100).run([&] {
+        CBLSPublicKey p;
+        p.SetByteVector(buf);
+        p.IsValid();
+    });
+}
+
 BENCHMARK(BLS_PubKeyAggregate_Normal)
 BENCHMARK(BLS_SecKeyAggregate_Normal)
 BENCHMARK(BLS_SignatureAggregate_Normal)
@@ -404,6 +438,8 @@ BENCHMARK(BLS_Verify_LargeAggregatedBlock1000)
 BENCHMARK(BLS_Verify_LargeAggregatedBlock1000PreVerified)
 BENCHMARK(BLS_Verify_Batched)
 BENCHMARK(BLS_Verify_BatchedParallel)
+BENCHMARK(BLS_DeserializeSignature)
+BENCHMARK(BLS_DeserializePubKey)
 BENCHMARK(BLS_Recover_2)
 BENCHMARK(BLS_Recover_3)
 BENCHMARK(BLS_Recover_6)
