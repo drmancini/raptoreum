@@ -1615,12 +1615,26 @@ void CConnman::SocketEvents(std::set <SOCKET> &recv_set, std::set <SOCKET> &send
     }
 }
 
+bool HasUnpausedReceivableNode(const std::unordered_map<NodeId, CNode *> &receivable_nodes) {
+    for (const auto &entry: receivable_nodes) {
+        // Keep this in exact agreement with the receive path in ThreadSocketHandler(),
+        // which drains a node only when all three hold. A node counted here but skipped
+        // there is work this loop claims and then does not do, and the zero-timeout poll
+        // below turns into a spin.
+        if (!entry.second->fPauseRecv && entry.second->nSendMsgSize == 0 &&
+            !entry.second->fDisconnect) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void CConnman::SocketHandler() {
     bool fOnlyPoll = false;
     {
         // check if we have work to do and thus should avoid waiting for events
         LOCK2(cs_vNodes, cs_mapNodesWithDataToSend);
-        if (!mapReceivableNodes.empty()) {
+        if (HasUnpausedReceivableNode(mapReceivableNodes)) {
             fOnlyPoll = true;
         } else if (!mapSendableNodes.empty() && !mapNodesWithDataToSend.empty()) {
             // we must check if at least one of the nodes with pending messages is also sendable, as otherwise a single
