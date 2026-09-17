@@ -42,7 +42,7 @@ set, same mempool accounting, same fees, same ancestor structure.
 
 | arm | change | what it measures |
 |---|---|---|
-| **stock** | none | today's ceiling (~5,600 tx/s on corpus v3) |
+| **stock** | none | today's ceiling (~4,400-4,500 tx/s sustained; see `throughput-bottleneck.md`) |
 | **skip** | test-only flag that makes `CachingTransactionSignatureChecker::VerifySignature` (`sigcache.cpp:85-97`) return true without calling the base verifier | the ceiling with **all** per-input signature work removed |
 | **parallel** | ATMP passes a `pvChecks` vector and drains it through `CCheckQueue`, as `ConnectBlock` does | the same saving with **no** trust assumption |
 
@@ -150,8 +150,14 @@ to the number of assets, paid by payments as much as by asset transactions.
 The measurement: confirm K assets for K in {0, 100, 1,000, 2,500, 10,000}, then measure the
 **payment** corpus ceiling at each K — once without restarting (maps uncapped) and once
 after a restart (2,500 cap), with and without `-assetindex`. If this bites, RTM's mainnet
-acceptance ceiling is not 5,600 tx/s and the reason is neither validation nor the message
-handler.
+acceptance ceiling is far below the rig figure and the reason is neither validation nor the
+message handler.
+
+**Measured 2026-09-16 — this bites, and hard.** On a rig chain carrying 3,500 confirmed
+assets (mainnet holds 3,439): unfixed **695 tx/s**, fixed **4,460 tx/s**, with an unfixed
+zero-asset control at 4,502 tx/s. The copy costs **6.5x throughput**. Fixed in
+`validation.cpp` by constructing the working copy only for the three asset tx types; see
+`docs/asset-cache-drag.md`.
 
 ## Rig settings
 
