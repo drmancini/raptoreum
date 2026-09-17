@@ -39,7 +39,32 @@ git fetch upstream ft/breaking-up && git log --oneline upstream/develop..FETCH_H
 
 | change | branch | PR | state |
 |---|---|---|---|
-| Functional test suite (9-part stacked series) | `ft/01-ghostrider-hash` … `ft/09-run-by-default` | replaces #470 | submitted |
+| Functional test suite (9-part stacked series) | `ft/01-ghostrider-hash` … `ft/09-run-by-default` | #471-#479 on `develop`, #482-#490 on `ft/breaking-up` | submitted |
+
+> **Each change is now proposed twice, deliberately** (2026-09-17). The eleven PRs against
+> `develop` stay as they were; an identical set was opened against trí's `ft/breaking-up` so
+> the decoupling work can build on them without waiting for `develop` review. Diffs were
+> verified byte-identical pair by pair.
+>
+> | head branch | on `develop` | on `ft/breaking-up` |
+> |---|---|---|
+> | ft/01-ghostrider-hash | #471 | #482 |
+> | ft/02-prune-dead-tests | #472 | #483 |
+> | ft/03-regtest-quorums | #473 | #484 |
+> | ft/04-test-harness | #474 | #485 |
+> | ft/05-repair-suite | #475 | #486 |
+> | ft/06-rpc-and-llmq-fixes | #476 | #487 |
+> | ft/07-new-coverage | #477 | #488 |
+> | ft/08-wallet-and-rpc-fixes | #478 | #489 |
+> | ft/09-run-by-default | #479 | #490 |
+> | fix/socket-handler-busy-loop | #480 | #491 |
+> | fix/asset-cache-atmp-copy | #481 | #492 |
+>
+> If one of a pair merges, close the other rather than letting it go stale. Two `gh` traps
+> worth remembering: `gh pr edit --base` fails silently on this repo (deprecated
+> Projects-classic GraphQL field) -- use `gh api -X PATCH .../pulls/N -f base=X`; and the
+> topic branches live on the `drmancini` fork, so `gh pr create` needs `--head drmancini:<branch>`
+> or it reports "No commits between", which reads like a branch problem rather than a lookup one.
 
 > **Open issue on the ft series (found 2026-09-16):** `feature_llmq_is_cl_conflicts.py`
 > fails 3/3 standalone on `ft/09` at line 174 (`getrawtransaction` on rawtx1 → `-5 No such
