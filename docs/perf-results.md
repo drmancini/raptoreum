@@ -1466,3 +1466,20 @@ node's own log, so this is not the shipped 56 tx/s cap. Single run.
 **Next, and it is cheap:** `-perfinvinterval` already exists. Re-run at the same offered rate
 with the trickle set below the default and see whether S moves. If S is set by the trickle
 schedule, it will; if S is set by message handling, it will not.
+
+**Scope limit on every swarm number so far: no smartnode features are active.** Verified on
+the running network, not assumed: `smartnode count` returns 0 total / 0 enabled, `quorum list`
+returns empty sets for both `llmq_test` and `llmq_test_v17`, and the node logs contain zero
+islock and zero chainlock lines. So InstantSend, ChainLocks and LLMQ signing contribute
+nothing to these measurements.
+
+That makes all of them optimistic by an unmeasured margin. On mainnet each transaction also
+drives an InstantSend lock attempt -- signature shares relayed, a recovered signature
+relayed, then the islock itself -- which is a second high-rate message stream sharing the
+relay path measured here at ~936 tx/s. ChainLocks add periodic signing plus the O(mempool)
+`Cleanup` walk. The relay ceiling should therefore be read as an upper bound, and the
+`rtm-cl-schdlr` idleness observed today says nothing about its cost on a network that has
+quorums.
+
+Bringing smartnodes up on the swarm is its own piece of work (ProTx registrations, DKG,
+quorum formation) and has not been attempted.
