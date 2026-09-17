@@ -58,18 +58,17 @@ The INV trickle cap bounds per-peer relay **by schedule, not by CPU**:
 `INVENTORY_BROADCAST_MAX_PER_1MB_BLOCK * MaxBlockSize()/1e6` announcements per trickle, with
 `INVENTORY_BROADCAST_INTERVAL = 5` seconds.
 
-- stock cap → **50–65 tx/s per peer** measured. No v1 target is reachable, regardless of
-  threading. **Caveat:** these runs used the rig binary, where `MAX_DIP0001_BLOCK_SIZE` is
-  locally raised to 8 MB, so the *default* cap they ran with was 1,120/trickle — not the 280
-  upstream ships. The cap was therefore not the binding constraint in those particular runs
-  (they achieved ~47–65 tx/s against a 224 tx/s allowance), so what limits per-peer relay at
-  the default is **not established**. Upstream's 280/trickle arithmetic gives ~56 tx/s
-  inbound, which brackets the measured range, but by a different mechanism. An independent
-  review pointed at the getdata servicing cadence — one getdata per message-handler pass —
-  rather than the announcement cap. Treat "lifting the cap raises relay by more than an order
-  of magnitude" as measured, and the *reason* as open.
-- cap 7,500 → schedule-bound at 1,500/s per peer; peers averaged 1,241/s and lagged ~34k.
-- cap 50,000 → 1,500 tx/s to 8 peers converges with lag ≤ one trickle.
+- stock cap → **56 tx/s per peer**, and this is fully explained. `InvBroadcastMax()` =
+  `140 x MaxBlockSize()/1e6` = 140 x 2 = **280 entries per trickle**, drained on a Poisson
+  timer averaging 5 s, so 280/5 = 56 tx/s. Directly confirmed: every inv payload on the link
+  measured exactly **10,083 B = 3 + 280x36**. The 47-65 spread across runs is Poisson
+  trickle-count noise (~±18% at 1 sigma over a 150 s window), not a second mechanism. No v1
+  target is reachable at this cap regardless of threading.
+
+  *(An earlier revision of this file claimed the mechanism was unexplained. That was my
+  error: I read `MAX_DIP0001_BLOCK_SIZE` from mario's `perf/throughput-rig` checkout, where
+  commit `e55f029d6` raises it to 8 MB, and applied it to measurements taken on the rig host,
+  whose tree is `ft/09-run-by-default` at 2 MB. There was never a discrepancy.)*
 
 So the cap re-index is **required**, and 7,500 (target x interval) is too tight — it leaves no
 margin for the Poisson jitter in the trickle. Size it well above the arithmetic minimum.

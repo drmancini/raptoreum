@@ -6,7 +6,7 @@
 >
 > | constant | upstream | rig tree | effect |
 > |---|---|---|---|
-> | `MAX_DIP0001_BLOCK_SIZE` | **2,000,000** | **8,000,000** | block capacity, and the relay cap derived from it (`140 x MaxBlockSize()/1e6`): 280/trickle upstream vs 1,120 on the rig |
+> | `MAX_DIP0001_BLOCK_SIZE` | **2,000,000** | 8,000,000 **on mario's `perf/throughput-rig` only** (commit `e55f029d6`) | The measurement host's tree (`ft/09-run-by-default`) is **2 MB**, so every measurement in `perf-results.md` reflects the upstream cap of **280/trickle**. Confusing the two checkouts already produced one wrong conclusion. |
 >
 > Check `git diff upstream/develop -- src/consensus/consensus.h` before quoting any
 > consensus constant from this tree. Full divergence list: `upstream-ledger.md`.
