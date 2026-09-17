@@ -4001,6 +4001,7 @@ bool PeerLogicValidation::ProcessMessages(CNode *pfrom, std::atomic<bool> &inter
         return false;
 
     std::list <CNetMessage> msgs;
+    bool wake_select = false;
     {
         LOCK(pfrom->cs_vProcessMsg);
         if (pfrom->vProcessMsg.empty())
@@ -4008,8 +4009,20 @@ bool PeerLogicValidation::ProcessMessages(CNode *pfrom, std::atomic<bool> &inter
         // Just take one message
         msgs.splice(msgs.begin(), pfrom->vProcessMsg, pfrom->vProcessMsg.begin());
         pfrom->nProcessQueueSize -= msgs.front().vRecv.size() + CMessageHeader::HEADER_SIZE;
+        const bool was_paused = pfrom->fPauseRecv;
         pfrom->fPauseRecv = pfrom->nProcessQueueSize > connman->GetReceiveFloodSize();
+        if (was_paused && !pfrom->fPauseRecv) {
+            // This peer has just become drainable again. The socket thread skips a paused
+            // peer, so it has no reason to look at this one until its next wakeup, and
+            // nothing else wakes it for this transition. That wait is up to
+            // SELECT_TIMEOUT_MILLISECONDS, and the sockets are edge-triggered, so data
+            // already buffered raises no fresh event to cut it short.
+            wake_select = true;
+        }
         fMoreWork = !pfrom->vProcessMsg.empty();
+    }
+    if (wake_select) {
+        connman->WakeSelect();
     }
     CNetMessage &msg(msgs.front());
 
