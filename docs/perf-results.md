@@ -1360,3 +1360,40 @@ run and missed the first transactions, giving it 8,710 rejects and leaving it be
 propagation figures are therefore suspect, though it is not an outlier in the final mempool
 spread. Single run, not repeated. The two visible mempool clusters (~140k and ~72-97k) are
 consistent with a lagging group rather than eviction — no node reached its maxmempool.
+
+### 2026-09-17 — the absorption hypothesis is WRONG (same swarm, absorbing cadence)
+
+The entry above concluded that the cascade is entered at the absorption gap. **That is
+refuted by the next run and the claim should not be used.** Same 1500 tx/s, same corpus,
+same miner, only the cadence changed: 15 s -> 3 s blocks, which at 5,357 tx/block absorbs
+1,786 tx/s, comfortably above the offered rate.
+
+| | 1500 @ 15 s (4.5x over) | 1500 @ 3 s (absorbing) |
+|---|---|---|
+| acceptance | 96.8% | **100%** |
+| mempool | grows without bound | **bounded**; drained 30,963 -> ~2,000 mid-run |
+| final mempool spread | 1.97x | **1.27x** |
+| blocks needing GETBLOCKTXN | 91.7% | **96.2%** (worse) |
+| txn requested per block | up to 5,206 | up to 4,233 |
+| convergence, median | 34,591 ms | **35,444 ms** (unchanged) |
+
+Absorption fixed precisely what it should — acceptance and mempool growth — and did nothing
+at all for propagation. So mempool growth is a *symptom*, not the cause.
+
+**What the data actually says.** Nodes held 33,000-41,000 transactions and matched only
+144-1,552 of a 5,357-transaction block. They are not short of transactions; they are short
+of *those* transactions. The suspect is `INVENTORY_BROADCAST_INTERVAL = 5` seconds
+(net_processing.cpp:159): a transaction waits a Poisson-mean 5 s before being announced to
+any given peer. With a 3 s block interval the trickle is **slower than block production**,
+so every block is built largely from transactions the miner has and its peers have not yet
+been told about. At 1500 tx/s, 5 s of arrivals is 7,500 transactions in flight — the right
+order of magnitude for the 4,000 missing per block that we see.
+
+This also explains the 240 tx/s run without any appeal to absorption: 5 s of arrivals there
+is 1,200 transactions, of which only the fraction selected into a block is missed, and the
+observed miss was 22-51.
+
+**Directly testable** with the existing `-perfinvinterval` flag, which overrides the constant
+(net_processing.cpp:201). Next run: absorbing cadence with the trickle set below the block
+interval. Until that is measured, no causal claim should be made about the propagation
+collapse, and the decoupling argument must not lean on one.
