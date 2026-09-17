@@ -1,3 +1,0 @@
-loaded 50000 tx, 18.6 MB
-offered 1801 in 90.0s = 20 tx/s | accepted 1601 | rejected 200
-  reject    200  Transaction already in block chain
