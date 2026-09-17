@@ -109,13 +109,24 @@ queued to a peer whose socket also has data waiting. More transactions in flight
 announcements queued per peer, more of the time. A condition that is already easy to reach
 becomes close to permanent.
 
-**It burns a core, and can mislead capacity work.** A node in this state stops making
-progress on that connection for reasons that have nothing to do with its capacity, while
-still looking busy — full CPU, no errors, no log output. How much it costs depends on the
-host: measured against a build with the fix reverted, on a 24-thread machine the socket
-thread went from 12% to 84% while ingestion was unchanged, because the spin is on a
-different thread from the bottleneck. On a core-constrained node it contends with the
-message handler instead, and there is nothing in the symptoms to say which case you are in.
+**It burns a core, and how much that costs depends on the host.** A node in this state stops
+making progress on that connection for reasons that have nothing to do with its capacity,
+while still looking busy — full CPU, no errors, no log output.
+
+I have since measured this against a build with the fix reverted, on the same 24-thread
+machine as the table above, under a saturating transaction load:
+
+| | `rtm-net` | `rtm-msghand` | ingested |
+|---|---|---|---|
+| with the fix | 12.2% (peak 74.8) | 91.5% | 636,480 |
+| reverted | **83.6%** (peak 99.7) | 90.6% | 608,720 |
+
+A whole core goes to the spin, but throughput is unchanged, because the spin is on the socket
+thread while the bottleneck is the message handler and this host has cores to spare. On a
+core-constrained node the two contend instead, and there is nothing in the symptoms to say
+which case you are in. I mention it because an earlier revision of this description claimed
+any throughput ceiling measured on an affected node is a measurement of this bug; that is
+too strong, and the measurement above is what replaced it.
 
 ## One thing to expect
 
