@@ -100,6 +100,18 @@ These only make sense *with* decoupling and ship as part of it.
   So the decoupled block cannot cross the wire without this. A block-format prerequisite,
   part of the decoupling implementation, not a standalone pre-step.
 
+## Measured as NOT needed for v1
+
+Each of these was on the earlier list as required or primary. All were disproven:
+
+| item | why it is off the list |
+|---|---|
+| **parallel validation / MemPoolAccept port** | acceptance sustains ~4,400 tx/s against a 1,500 target — 3× headroom. The earlier "primary rate wall" framing was wrong. |
+| **relay ordering rewrite** (O(backlog) heap) | `-perfinvnosort` moved throughput **<1%** at the v1 point. The "~40% of msghand" figure was measured at a 300k backlog with cap 50k-100k, a regime v1 never reaches. |
+| **`getblocktemplate`** full `ConnectBlock` per poll | deferred: decoupling *dissolves* the hard part (a commitment block's bodies were validated at acceptance). Trigger to revisit is sustained mining at scale. |
+| **message-size raises** (`MAX_INV_SZ`, `MAX_PROTOCOL_MESSAGE_LENGTH`) | the send loop already chunks at `MAX_INV_SZ`; no splitting work needed. |
+| **`dbcache` / `maxsigcachesize`** | swept at saturation: no effect (13× and 16× raises, application confirmed in the node log). The ceiling is real compute. |
+
 ## Parked for v2 (higher throughput)
 
 - Parallel validation + the Dash `MemPoolAccept` port (the big one).
