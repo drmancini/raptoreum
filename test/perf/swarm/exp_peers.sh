@@ -24,6 +24,9 @@ deploy() {
       timeout 60 ssh -o BatchMode=yes "$t" "cat > $b/data/raptoreum.conf" < conf/$a.conf 2>/dev/null
       timeout 60 ssh -o BatchMode=yes "$t" "$b/bin/raptoreum-cli -regtest -datadir=$b/data -rpcport=19898 -rpcuser=swarm -rpcpassword=$PW stop" >/dev/null 2>&1
       sleep 12
+      # peers.dat remembers every peer ever seen and the node redials them on
+      # startup, which silently restores a full mesh however few we configure.
+      timeout 30 ssh -o BatchMode=yes "$t" "rm -f $b/data/regtest/peers.dat" >/dev/null 2>&1
       timeout 90 ssh -o BatchMode=yes "$t" "$b/bin/raptoreumd -regtest -datadir=$b/data -conf=$b/data/raptoreum.conf -daemon" >/dev/null 2>&1 ) &
   done; wait
   sleep 40
@@ -58,6 +61,8 @@ run_one() {   # run_one <tag> <peers>
   grep -E 'accepted .* of|ABORT|LOW ACCEPT' "/tmp/$1.out" | sed 's/^/  /'
 }
 
-run_one peers11 11
-run_one peers3  3
+# CONDITIONS lets a single condition be re-run without repeating the other.
+for spec in ${CONDITIONS:-"peers11:11 peers3:3"}; do
+  run_one "${spec%%:*}" "${spec##*:}"
+done
 echo "=== done ==="

@@ -91,7 +91,12 @@ for r in rows:
         "rpcbind=127.0.0.1",
         "rpcport=19898",
         "rpcallowip=127.0.0.1",
-    ] + ["addnode=%s:19899" % p for p in peers]
+    ] + [
+        # addnode ADDS peers; it does not restrict them. A node still fills its
+        # outbound slots from peers.dat, so limiting addnode leaves the mesh
+        # unchanged. connect= disables automatic outbound entirely, which is the
+        # only way to actually pin the peer count. listen=1 above keeps inbound.
+        ("connect=%s:19899" if a.peers else "addnode=%s:19899") % p for p in peers]
     open(os.path.join(a.out, "%s.conf" % r["alias"]), "w").write("\n".join(conf) + "\n")
 
 open(os.path.join(a.out, ".rpcpassword"), "w").write(pw + "\n")
