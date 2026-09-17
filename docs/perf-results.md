@@ -1242,6 +1242,12 @@ Bench: `BLS_Recover_ParallelScaling` in `src/bench/bls.cpp`.
 
 ## 2026-09-17 — Phase 1 on a 12-node WAN swarm: compact blocks do not survive sustained load
 
+> **Read with the relay finding below.** The numbers here hold, and so does the mechanism
+> (missing per block tracks arrival rate x propagation delay). What was not known when
+> this was written is *why* the propagation delay is what it is: relay services ~936 tx/s
+> against 1500 offered, so the delay is a queue, not a constant. The title overstates it --
+> compact blocks are not the failing component, they are reporting the relay shortfall.
+
 First measurement of block propagation on real geography rather than loopback. Twelve
 regtest nodes: eleven VPSs across three continents plus bowser, RTT 10-240 ms, full mesh.
 Rig at `test/perf/swarm`; every node offers load from its own disjoint corpus shard, so
