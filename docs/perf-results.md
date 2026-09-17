@@ -1603,3 +1603,32 @@ lock, the bloom filter) rather than the per-transaction path.
 **Next experiment, before profiling:** sweep peer count at fixed offered rate and see whether
 S moves. That separates the two and says which path to attack. Profiling with `perf` on
 bowser then confirms the attribution -- the binary there is now unstripped for that purpose.
+
+### 2026-09-17 — a note on knobs that look applied and are not
+
+Three settings this rig has now been caught on, all with the same shape: the configuration
+is accepted, the node starts, the run completes, and the knob did nothing.
+
+1. **Network options outside a `[regtest]` section.** `rpcbind`, `rpcport`, `bind`, `listen`
+   and `addnode` are ignored at conf top level. The node prints a warning and carries on with
+   defaults, so a wrong port looks like it worked -- ours happened to match the default.
+
+2. **`maxtipage` and initial block download.** A seed chain whose tip predates `nMaxTipAge`
+   leaves every node in IBD, where it refuses to serve headers and ignores transaction
+   announcements while still accepting everything offered locally over RPC. Six of twelve
+   nodes once ran a whole experiment in that state, reporting 100% acceptance while holding
+   only their own transactions. The preflight gate in `run_phase1.sh` now refuses to start
+   unless every node is out of IBD and on the same height.
+
+3. **`addnode` does not limit peers.** It *adds* peers; the node independently fills its
+   outbound slots from `peers.dat`, which persists across restarts and is rewritten
+   immediately after a chain wipe. Configuring three peers per node left the mesh at 19-21
+   connections, indistinguishable from the full mesh. Only reading `getconnectioncount` back
+   showed it. Pinning the count needs `connect=` (which disables automatic outbound) *and*
+   deleting `peers.dat`.
+
+The pattern is that none of these fail loudly, and each produces a plausible-looking result.
+The defence that actually works is reading the applied value back out of the running node --
+`getconnectioncount`, `getblockchaininfo`, the `PERF: relay trickle overridden` log line --
+rather than trusting that the config was written. Every experiment script here now does that
+before it measures anything.
