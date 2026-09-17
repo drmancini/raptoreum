@@ -107,6 +107,23 @@ Three things therefore have to be decided in the design rather than discovered l
 
 None of this is measured yet. It is the first thing the architecture session should price.
 
+## Carried into the design session — state these before quoting any number
+
+**Every throughput figure here is an upper bound.** The swarm runs with no smartnode
+features at all: `smartnode count` returns 0, both `llmq_test` quorum sets are empty, and
+the node logs contain zero islock and zero chainlock lines. On mainnet each transaction also
+drives an InstantSend lock attempt -- signature shares relayed, a recovered signature
+relayed, then the islock -- which is a second high-rate stream on the same relay path that
+is already the constraint. Nothing here says what that costs.
+
+**Open measurement, not yet usable.** `test/perf/swarm/bench_inputs.py` was written to test
+the O(N^2) sighash claim directly and produced nothing usable: every row was rejected, first
+on a flat fee below the size-scaled minimum relay fee, then `txn-mempool-conflict`, then
+`bad-txns-oversize` past 100 kB. A rejected transaction short-circuits before signature
+checking, so the timings measured rejection paths. It needs a size-scaled fee,
+non-overlapping UTXOs, and a ceiling of ~675 inputs. **Until it runs, the quadratic claim in
+Tier 0 is source-read, not measured.**
+
 ## Tier 1 — must precede decoupling (protects the work)
 
 These are not throughput fixes; they are the safety net that makes every later change safe.
