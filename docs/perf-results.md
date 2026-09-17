@@ -1237,3 +1237,61 @@ a latency floor that local validation does not have, and it makes the fast path 
 smartnode liveness. Those objections hold regardless of how fast recovery runs.
 
 Bench: `BLS_Recover_ParallelScaling` in `src/bench/bls.cpp`.
+
+---
+
+## 2026-09-17 — Phase 1 on a 12-node WAN swarm: compact blocks do not survive sustained load
+
+First measurement of block propagation on real geography rather than loopback. Twelve
+regtest nodes: eleven VPSs across three continents plus bowser, RTT 10-240 ms, full mesh.
+Rig at `test/perf/swarm`; every node offers load from its own disjoint corpus shard, so
+transactions originate everywhere rather than at one point.
+
+**Setup.** Corpus v3 (600k tx, 397 B mean, variable fees), split 12 ways. Load offered over
+RPC, not P2P — a P2P generator is itself a peer, so the node announces back to it and a full
+send queue stops the node reading, which measures the generator. Timestamps corrected with
+a per-run SNTP offset pass (worst host +10.6 ms, and before chrony one host sat at -14.8 ms,
+enough to make a 10 ms europe->dev hop measure *negative*).
+
+**Condition.** 240 tx/s network-wide, block every 15 s, 90 s. Deliberately *below* absorption
+(a 2 MB block holds ~5,035 of these transactions, so 15 s blocks absorb ~336 tx/s): the
+mempool stays bounded and nothing is evicted, so this is the benign case.
+
+**Result — compact-block reconstruction fails on essentially every loaded block.**
+
+| | miner also offers load | miner offers no load |
+|---|---|---|
+| loaded blocks needing GETBLOCKTXN | 55/55 (100%) | 53/55 (96%) |
+| tx missing per block (median) | 99-147 (2.6-4.6%) | 22-51 (0.6-1.3%) |
+| full-mesh convergence, median | 1006 ms | 873 ms |
+| convergence, worst | 1226 ms | 1299 ms |
+
+The empty block (coinbase only) reconstructed cleanly at 11/11 nodes in both runs, which is
+the control that says the rig is measuring what it claims.
+
+**The confound was tested and is not the explanation.** A miner that also submits load mines
+transactions it created milliseconds earlier, which no peer can possibly hold. Removing the
+miner from the load set cut the missing count ~3x (117-147 -> 22-51) but barely moved the
+incidence (100% -> 96%), because a single missing transaction forces the round trip.
+
+**Mechanism.** Missing count tracks arrival rate x propagation delay, not block size. At
+240 tx/s, 22-51 missing per block is roughly 0.1-0.2 s of arrivals — precisely the
+transactions still in flight when the block was mined. Scaling to the 1500 tx/s v1 target
+predicts ~140-320 missing per block at the same cadence, each fetch costing up to 2xRTT on
+the Asia links.
+
+**Consequence for decoupling.** Compact blocks are not a mitigation at sustained throughput,
+and the shortfall is not bandwidth — a 3,700-tx block is ~1.4 MB and the links carry it
+easily. What costs is the round trip for the fraction still in flight. A commitment block
+naming txids inherits exactly this property: the receiver still needs bodies it does not
+have. The decoupling gain is therefore *not* "the block is smaller so reconstruction gets
+easier" — that claim would be wrong. The gain is that bodies propagate continuously and
+independently of block cadence, so the in-flight fraction is the only thing the block waits
+on, rather than the whole body set. This needs its own measurement before it is claimed.
+
+**Also measured.** ConnectBlock on ~3,700-tx blocks: 33-57 ms on the 6-12 thread hosts
+(cor 33, bow 38, dev 44, eur 57), 111-157 ms on the 4-thread hosts, worst case 352 ms.
+Roughly linear in transaction count, consistent with the 2-4 ms seen for 200-tx blocks.
+
+**Not yet measured:** behaviour above absorption (mempool growing, eviction active), the
+1500 tx/s operating point, and whether faster blocks trade round trips for orphan risk.

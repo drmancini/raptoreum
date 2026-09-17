@@ -1,0 +1,12 @@
+bow bowser +0.55
+eur europe.raptoreum.zone +1.01
+c4 rtm-c4 +1.01
+c2 rtm-c2 +0.25
+dev dev.raptoreum.zone +1.95
+cor core.raptoreum.zone +2.35
+use usa-east.raptoreum.zone +0.09
+c3 rtm-c3 +0.33
+asw asia-west.raptoreum.zone +10.68
+c1 rtm-c1 +1.68
+usw usa-west.raptoreum.zone -0.01
+ase asia-east.raptoreum.zone -3.36

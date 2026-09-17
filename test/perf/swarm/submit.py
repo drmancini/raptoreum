@@ -12,7 +12,7 @@ Writes one line per submission to --log: monotonic_ns, wall_ns, txid, status.
 import argparse, base64, http.client, json, os, struct, sys, threading, time
 from queue import Queue, Empty
 
-def load(path, limit):
+def load(path, limit, skip=0):
     """Read the corpus and return raw transactions.
 
     Each corpus record is a complete P2P message, not a bare transaction: a
@@ -22,6 +22,7 @@ def load(path, limit):
     assuming a fixed offset.
     """
     recs = []
+    skipped = [0]
     with open(path, "rb") as f:
         while True:
             head = f.read(4)
@@ -37,6 +38,10 @@ def load(path, limit):
                 raise SystemExit("corpus record %d is not a tx message "
                                  "(command=%r, payload=%d, record=%d)"
                                  % (len(recs), cmd, plen, n))
+            seen = len(recs) + skipped[0]
+            if skipped[0] < skip:
+                skipped[0] += 1
+                continue
             recs.append(rec[24:])
             if limit and len(recs) >= limit:
                 break
@@ -74,12 +79,15 @@ def main():
     ap.add_argument("--rate", type=float, required=True, help="offered tx/s")
     ap.add_argument("--duration", type=float, default=0.0, help="seconds; 0 = whole shard")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--skip", type=int, default=0,
+                    help="skip this many transactions; successive runs must not "
+                         "re-offer transactions an earlier run already spent")
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--log", default="")
     a = ap.parse_args()
 
-    recs = load(a.shard, a.limit)
-    print("loaded %d tx, %.1f MB" % (len(recs), sum(map(len, recs)) / 1e6), flush=True)
+    recs = load(a.shard, a.limit, a.skip)
+    print("loaded %d tx, %.1f MB (skipped %d)" % (len(recs), sum(map(len, recs)) / 1e6, a.skip), flush=True)
 
     q = Queue(maxsize=20000)
     stats = {"ok": 0, "err": 0}
@@ -135,4 +143,5 @@ def main():
     for r, c in sorted(reasons.items(), key=lambda kv: -kv[1])[:5]:
         print("  reject %6d  %s" % (c, r), flush=True)
 
-main()
+if __name__ == "__main__":
+    main()
