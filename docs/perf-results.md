@@ -1645,11 +1645,29 @@ deleting `peers.dat` is what actually pins it.
 | full mesh | 21/16/19/11 | 89.3% | 90.3% | 44.2% | 30.1% |
 | sparse | 5/6/6/3 | 78.2% | 85.8% | 46.2% | 28.9% |
 
-A roughly fourfold cut in connections moved msghand by 5-12%, and on one node not at all.
-**Relay cost is per-transaction, not per-peer.** The `ForEachNode` -> `PushInventory` loop
-is therefore not where the ~930 tx/s goes, despite doing a lock, a bloom lookup and a
-`std::set` insert per peer. It also means **930 tx/s is not pessimistic for a realistic
-topology** -- a node with fewer peers does not do better.
+Comparing msghand percentages alone says the cut moved little. **That comparison is wrong**,
+and was published here before being corrected: the two conditions did not carry the same
+delivered load, so CPU percentages are not comparable. Both accepted 100% of what was
+offered, but relay *delivery* differed sharply.
+
+| condition | connections | relay delivery S | us of msghand per delivered tx (c4 / ase) |
+|---|---|---|---|
+| full mesh | ~21 | **824 tx/s** | **1,084 / 1,096** |
+| sparse | ~5 | **1,221 tx/s** | **640 / 703** |
+
+Cutting connections roughly fourfold delivered **48% more throughput at lower CPU**, and
+per-transaction msghand cost fell **41% (c4) and 36% (ase)**.
+
+**So peer count does drive relay cost, and substantially.** Roughly 40% of msghand time is
+per-peer work -- consistent with `ForEachNode` -> `PushInventory` doing a `cs_inventory`
+lock, a rolling-bloom lookup and a `std::set<uint256>` insert for every peer on every
+transaction. It also means the swarm's full mesh **understates** what a mainnet node with
+fewer connections would achieve, so ~930 tx/s measured at 21 connections is pessimistic
+rather than representative.
+
+The methodological lesson is the one this metric existed to prevent: normalise by work
+delivered before comparing CPU. Percentages measured under different throughputs say
+nothing on their own.
 
 **Correction: `MAX_STANDARD_TX_SIZE` is consensus, not policy.** An earlier entry claimed
 the 100 kB cap bound only relay and that the block path was limited only by block size,

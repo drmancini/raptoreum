@@ -18,6 +18,7 @@ across three continents at 1,500 tx/s offered:
 | relay delivery | **~930 tx/s**, confirmed four independent ways |
 | deficit | ~570 tx/s, accumulating as backlog |
 | schedule-bound? | **no** -- cutting the trickle interval 5x moved it 1.4% |
+| peer-count-bound? | **yes, ~40%** -- 21 connections give 824 tx/s, 5 give 1,221 |
 | mempool-size dependent? | **no** -- 864 tx/s empty vs 876 tx/s at 133k entries |
 
 Every downstream symptom follows from this: mempools diverge, compact blocks match
