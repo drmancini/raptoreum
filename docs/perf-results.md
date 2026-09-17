@@ -1565,3 +1565,41 @@ which bodies must cross the network.
 **Caveats.** Single runs, one per condition, 37 sample rounds each. No smartnode features, so the true ceiling on
 a mainnet-like network is lower. `-debug=mempool` was off for both, and no log streaming was
 running.
+
+### 2026-09-17 — where the relay cost is, from source (hypotheses, not yet measured)
+
+Reading the path each accepted transaction takes through `msghand`, before pointing a
+profiler at it. Nothing here is measured yet.
+
+`RelayTransaction` (net_processing.cpp) does, per transaction:
+
+```
+CInv inv(CCoinJoin::GetDSTX(txid) ? MSG_DSTX : MSG_TX, txid);
+connman.ForEachNode([&inv](CNode *pnode) { pnode->PushInventory(inv); });
+```
+
+1. **`CCoinJoin::GetDSTX`** takes `cs_mapdstx`, looks up `mapDSTX`, and returns a
+   `CCoinJoinBroadcastTx` **by value** -- constructing an object solely to be tested as a
+   bool. Runs on every relayed transaction regardless of whether the chain has any CoinJoin
+   activity.
+
+2. **`PushInventory` per peer**, each taking `LOCK(cs_inventory)`, a
+   `CRollingBloomFilter::contains`, and a `std::set<uint256>::insert` -- an ordered tree
+   insert with an allocation, not a hash set (net.h:1077).
+
+With the swarm's 22 connections per node that is 23 lock acquisitions and 22 tree inserts
+per transaction: roughly 21,000 locks/s and 20,000 allocations/s at the measured 930 tx/s,
+before `SendMessages` does any batching, sorting or message construction.
+
+`LogPrint` inside `PushInventory` short-circuits on the category (logging.h:208) and is free
+with NET logging off, so it is not a suspect.
+
+**What this predicts, and why it matters for the number.** The dominant term scales with
+*peer count*, and the swarm runs a full mesh -- 11 outbound plus 11 inbound. A mainnet node
+carries fewer. If relay cost is per-peer rather than per-transaction, **930 tx/s is
+pessimistic for a realistic topology**, and the fix targets the per-peer path (the set, the
+lock, the bloom filter) rather than the per-transaction path.
+
+**Next experiment, before profiling:** sweep peer count at fixed offered rate and see whether
+S moves. That separates the two and says which path to attack. Profiling with `perf` on
+bowser then confirms the attribution -- the binary there is now unstripped for that purpose.
