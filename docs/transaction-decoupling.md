@@ -1943,7 +1943,7 @@ in `perf-results.md`.
 
 | | |
 |---|---|
-| mempool acceptance ceiling | **~5,600 tx/s** |
+| mempool acceptance ceiling | **~4,400-4,500 tx/s sustained** (per-second peaks ~5,200 early, decaying as the mempool grows; an earlier ~5,600 figure divided by a fixed duration while acceptance ran on past the offer) |
 | sustained 10 minutes at 5,000 offered | 4,884 tx/s, no eviction |
 | holding a 3,000,000-transaction backlog | **4.07 GB** mempool, 4.54 GB RSS |
 | cost per 373-byte transaction | 1,471 bytes accounted, 1,641 resident |
@@ -2076,7 +2076,7 @@ transaction costs three threshold signatures.
 
 A design in which Smartnodes pre-attest transactions so they can take a shorter validation
 path is optimising the wrong side of the wrong bottleneck. §16.1 shows validation is not a
-constraint — acceptance runs at ~5,600 tx/s. The attestation path runs at a small fraction
+constraint — acceptance runs at ~4,400 tx/s sustained. The attestation path runs at a small fraction
 of that and gets slower as the quorum grows. It **adds** work to the slowest thread in the
 system in order to **remove** work from a path that has an order of magnitude of headroom
 at the 2 MB design point. And it leaves relay untouched: bodies still have to reach every
@@ -2142,7 +2142,7 @@ one.
 | `maxmempool` | ~91 MB/interval, inside the default but tight | ~455 MB/interval, must raise |
 | `MAX_PROTOCOL_MESSAGE_LENGTH` | under 3 MB, fine | must raise |
 | template production | tolerable | must replace |
-| message handler (~5,600 tx/s) | 10× headroom | 2× headroom |
+| message handler (~4,400 tx/s sustained) | 10× headroom | 2× headroom |
 | body propagation | ~23 MB/block, ~195 KB/s, trivial | ~115 MB/block |
 
 So the 2 MB stage has **two** blockers, not one. v6 recorded InstantSend as marginal at

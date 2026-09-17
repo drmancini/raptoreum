@@ -1,5 +1,20 @@
 # Raptoreum throughput — measured results
 
+> **Corrections (2026-09-16).** This file is a chronological log; entries below stand as what
+> was measured *at the time*, but three conclusions drawn from them were later overturned.
+> The current picture is `docs/throughput-bottleneck.md`.
+>
+> * **The ~5,600 tx/s ceiling is high.** Rates were computed over a fixed duration while
+>   acceptance ran on past the offer (still accepting 3,088 tx/s at t=130s, 640 at t=147s).
+>   Sustained is **~4,400-4,500 tx/s**; per-second peaks near 5,200 occur early and decay as
+>   the mempool grows. Confirmed as real compute — raising `dbcache` 13x and
+>   `maxsigcachesize` 16x changed nothing.
+> * **Relay ordering at "over 40% of the message handler"** was measured at a 300k backlog
+>   with the cap at 50k-100k. At the v1 operating point `-perfinvnosort` moves throughput
+>   **<1%**, and the backlog never exceeds one trickle. It is not a v1 concern.
+> * **Parallel validation is not the primary wall.** Acceptance has ~3x headroom over the
+>   1,500 tx/s target; the binding constraint is the relay cap, a scheduling constant.
+
 Node: `/Raptoreum Core:2.0.4.1/`, protocol 70220, built from `develop` plus the
 functional-test series (`ft/09-run-by-default`), depends-pinned Boost 1.84.
 
@@ -1117,44 +1132,45 @@ disabling it changed relay throughput by nothing measurable (3,560 → 3,464 at 
 45 → 48 at the shipped cap) and did not prevent the collapse. A large profile share does
 not make something the bottleneck when the thread is about to livelock regardless.
 
-### A second stall: a connection wedged in both directions at once
+### A second stall — and why it is NOT a real defect (corrected 2026-09-16)
 
-With the livelock fixed the high-cap runs still stall, but differently: the node now
-**sleeps** instead of spinning. `wchan` shows `rtm-net` in `ep_poll` and `rtm-msghand` in
-`futex_wait_queue` — both correctly parked, waiting for events that never arrive.
+With the livelock fixed, the high-cap runs still stalled, but differently: the node slept
+(`rtm-net` in `ep_poll`) instead of spinning. Kernel `/proc/net/tcp` at the stall showed the
+send buffers full to the ceiling (~2.5 MB) in **both** directions on the load connections,
+with both nodes idle — the shape of a mutual flow-control deadlock, arising from two rules
+that are each correct alone: reads require an empty send queue (`net.cpp:1774`), and writes
+require `fCanSendData`, which only re-arms on an epoll `EPOLLOUT` edge on edge-triggered
+sockets. Two peers both applying "drain before read" with pending sends can lock in both
+directions.
 
-Instrumenting every condition that gates progress, the state at the stall is unambiguous.
-All four load connections:
+**This was a rig artifact, not a real-node defect.** The wedge always sat on the
+SUT↔load-generator connections. The generator is a Python flood tool running eight threads
+under the GIL, and it under-reads — that is what fills the node's send buffer and triggers
+the read-refusal. The SUT↔peer link between two *real* raptoreumd nodes was never
+deadlocked in the diagnosis, only starved.
 
-```
-node=1 pauseRecv=0 pauseSend=0 sendMsgSize=5 processQueue=0 hasRecvData=1 canSendData=0
-node=2 pauseRecv=0 pauseSend=0 sendMsgSize=5 processQueue=0 hasRecvData=1 canSendData=0
-node=3 pauseRecv=0 pauseSend=0 sendMsgSize=5 processQueue=0 hasRecvData=1 canSendData=0
-node=4 pauseRecv=0 pauseSend=0 sendMsgSize=5 processQueue=0 hasRecvData=1 canSendData=0
-```
+Tested directly: two real nodes, connected, each loaded with half the corpus so both relay
+to the other at cap 50,000 — pure bidirectional real-node relay, no generator in the path.
+They converge cleanly to the union and never freeze:
 
-Nothing paused, nothing queued for processing, data waiting to be read on every
-connection — and **five bytes** stuck in each send queue.
+| | own shard | converged to | node CPU |
+|---|---|---|---|
+| node A | ~121,000 | **271,877** | busy throughout, never 0% |
+| node B | ~144,000 | **268,010** | busy throughout |
 
-Two rules combine to close the connection in both directions:
+Run **without** any fix (a candidate read-rule relaxation was tried and reverted — it was
+unnecessary and slightly *lowered* the converged totals). Real peers drain their sockets
+promptly, so the send buffers never fill, so the read-refusal never fires. Honest nodes do
+not reach this state.
 
-- **Reads** require an empty send queue (`net.cpp:1718`) — drain what you owe the peer
-  before taking more, which is correct TCP flow-control etiquette.
-- **Writes** require `fCanSendData` (`:1791`), which is cleared on a short write or
-  `EWOULDBLOCK` (`:824`, `:852`) and re-set **only** by an epoll `EPOLLOUT` event
-  (`:1753`) — on sockets registered edge-triggered (`EPOLLET`, `:3818`).
+The mechanism remains latent in the code: a peer that *deliberately* under-reads can wedge
+its own connection, but that harms only that one connection, which the node clears on its
+inactivity timeout — not a node-wide DoS like §18's livelock. No fix is warranted.
 
-So if that flag latches false while bytes remain queued, the node can no longer send, and
-because it cannot send it will no longer read. Each rule is defensible alone; together they
-deadlock on five bytes.
-
-**Partially tested.** `-perfalwaystrysend` attempts the write regardless of the flag. With
-it, the stall moved from 120,620 transactions to 181,260 — roughly 50% further, but still a
-stall. Against a baseline that itself varied between runs (120,620 and 139,000), one
-observation is suggestive and not conclusive: the latch is *a* cause and not the only one.
-
-It is not the load generator failing to drain: it runs a per-socket drain thread, which was
-checked rather than assumed. No claim is made about the remaining cause.
+**Retraction.** Earlier revisions of this section reported this as a real "connection wedged
+in both directions" defect and the high-cap relay stalls as a genuine ceiling. Both are
+withdrawn: the stalls were the generator under-reading, and the true relay ceiling on real
+nodes is set by rate, not by any deadlock.
 
 ## Rig notes
 
