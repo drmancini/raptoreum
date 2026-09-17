@@ -8,6 +8,11 @@ ap.add_argument("--ips", default="swarm-ips.txt")
 ap.add_argument("--out", default="conf")
 ap.add_argument("--password", default="")
 ap.add_argument("--invmax", type=int, default=50000)
+ap.add_argument("--invinterval", type=int, default=0,
+                help="0 = shipped INVENTORY_BROADCAST_INTERVAL (5s)")
+ap.add_argument("--debug-mempool", action="store_true",
+                help="per-tx arrival logging; ~1500 lines/s/node at 1500 tx/s, "
+                     "so only enable when measuring propagation directly")
 a = ap.parse_args()
 
 rows = []
@@ -39,6 +44,13 @@ for r in rows:
         "rpcworkqueue=512",
         "dnsseed=0",
         "",
+        "# The seed chain's tip is older than nMaxTipAge, so every node would start",
+        "# in initial block download -- where it refuses to serve headers and ignores",
+        "# transaction announcements, while still accepting everything offered locally",
+        "# over RPC. With all nodes in that state nobody serves and nobody requests,",
+        "# and the mesh deadlocks. IBD has no purpose on a snapshot test chain.",
+        "maxtipage=999999999",
+        "",
         "# regtest re-validates the whole mempool on every accept unless this is off",
         "# (fDefaultConsistencyChecks=true) -- a ~60x understatement of throughput.",
         "checkmempool=0",
@@ -52,14 +64,15 @@ for r in rows:
         "# shipped relay cap is block-indexed (280/trickle = 56 tx/s) and cannot",
         "# carry the v1 operating point; dev-build flag only, never upstream.",
         "perfinvmax=%d" % a.invmax,
+        "perfinvinterval=%d" % a.invinterval,
         "",
         "debug=bench",
         "debug=cmpctblock",
-        # Per-transaction arrival times. AcceptToMemoryPool logs one line per
-        # accepted tx under this category; with logtimemicros that gives each
-        # node's arrival time for every txid, which is the only way to measure
-        # true propagation latency -- getrawmempool's "time" is whole seconds.
+    ] + ([
+        # Per-transaction arrival times. One line per accepted tx; at 1500 tx/s
+        # that is ~1500 lines/s per node, so it is opt-in.
         "debug=mempool",
+    ] if a.debug_mempool else []) + [
         "logtimemicros=1",
         "",
         "[regtest]",
