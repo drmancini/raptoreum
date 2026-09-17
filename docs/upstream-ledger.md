@@ -31,6 +31,32 @@ topic branches onto a moved `develop` stays cheap.
 > before or alongside the ft merge — the RTM team will hit it if they run the suite.
 | Socket-handler busy-loop / DoS fix (+ wakeup) | `fix/socket-handler-busy-loop` | open | submitted, awaiting review |
 
+> **What the wakeup half actually does** (net_processing.cpp, `ProcessMessages`). The socket
+> thread skips any peer with `fPauseRecv` set, so when a peer is unpaused -- the moment
+> `nProcessQueueSize` drops back under `GetReceiveFloodSize()` after a message is spliced off
+> `vProcessMsg` -- nothing tells the socket thread to look at it again:
+>
+> ```cpp
+> const bool was_paused = pfrom->fPauseRecv;
+> pfrom->fPauseRecv = pfrom->nProcessQueueSize > connman->GetReceiveFloodSize();
+> if (was_paused && !pfrom->fPauseRecv) {
+>     wake_select = true;      // acted on after the lock is released
+> }
+> ...
+> if (wake_select) connman->WakeSelect();
+> ```
+>
+> The wait is up to `SELECT_TIMEOUT_MILLISECONDS`, and it is not cut short by traffic,
+> because the sockets are edge-triggered: bytes already sitting in the kernel buffer raise no
+> fresh readable event. `WakeSelect()` writes one byte to `wakeupPipe[1]` (net.cpp:1951),
+> which is in the select set, so the thread returns immediately and re-reads the peer.
+> `WakeSelect` is called after `cs_vProcessMsg` is released, deliberately -- signalling while
+> holding it would invert the lock order against the socket thread.
+>
+> This is carried on `perf/throughput-rig` as well (commit 970c095cd), so the rig keeps it
+> even if the PR is revised. Same mechanism, and the rig copy additionally sits alongside
+> local diagnostic instrumentation the PR does not carry.
+
 ## Not a bug — withdrawn (2026-09-16)
 
 | item | resolution |
