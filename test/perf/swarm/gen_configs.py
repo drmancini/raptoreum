@@ -8,6 +8,10 @@ ap.add_argument("--ips", default="swarm-ips.txt")
 ap.add_argument("--out", default="conf")
 ap.add_argument("--password", default="")
 ap.add_argument("--invmax", type=int, default=50000)
+ap.add_argument("--peers", type=int, default=0,
+                help="outbound peers per node; 0 = full mesh. Uses a circulant "
+                     "topology (each node dials the next N in ring order), which "
+                     "stays connected for any N>=1 and is deterministic.")
 ap.add_argument("--invinterval", type=int, default=0,
                 help="0 = shipped INVENTORY_BROADCAST_INTERVAL (5s)")
 ap.add_argument("--debug-mempool", action="store_true",
@@ -33,7 +37,13 @@ os.makedirs(a.out, exist_ok=True)
 for r in rows:
     # Full mesh: every node dials every other. bowser is behind NAT, so it only
     # ever completes outbound connections -- which is enough to be a full peer.
-    peers = [x["ip"] for x in rows if x["alias"] != r["alias"]]
+    # With --peers N, dial the next N in ring order instead: a circulant graph,
+    # connected for any N>=1, and identical from run to run.
+    if a.peers and a.peers < len(rows) - 1:
+        i = rows.index(r)
+        peers = [rows[(i + k) % len(rows)]["ip"] for k in range(1, a.peers + 1)]
+    else:
+        peers = [x["ip"] for x in rows if x["alias"] != r["alias"]]
     conf = [
         "# rtm swarm node %s (%s, %s) -- regtest" % (r["alias"], r["ssh"], r["region"]),
         "# Network-specific options MUST live under [regtest]; at top level the node",
