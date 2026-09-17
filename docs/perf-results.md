@@ -1295,3 +1295,68 @@ Roughly linear in transaction count, consistent with the 2-4 ms seen for 200-tx 
 
 **Not yet measured:** behaviour above absorption (mempool growing, eviction active), the
 1500 tx/s operating point, and whether faster blocks trade round trips for orphan risk.
+
+### 2026-09-17 — the same swarm at the v1 target (1500 tx/s): cascade failure
+
+Identical to the run above in every respect except offered rate: 240 -> 1500 tx/s, block
+every 15 s, 180 s, miner offers no load. A 2 MB block holds ~5,035 of these transactions, so
+15 s blocks absorb ~336 tx/s: this run is deliberately **4.5x above absorption**.
+
+**Acceptance is not the problem.** 261,296 of 270,006 offered were accepted (96.8%), every
+node sustaining its full 136 tx/s with zero rejections (the one exception, usw, had been
+rebooted mid-run — see caveats). Per-thread CPU measured from `/proc/<tid>/stat` deltas:
+
+| host | rtm-msghand | all threads |
+|---|---|---|
+| bowser (24 thr) | 20.5% | 26% |
+| core (12 thr) | 27.7% | 33% |
+| rtm-c4 (4 thr) | 61.2% | 77% |
+| asia-east (4 thr, also runs a production mainnet node) | 71.7% | 94% |
+
+**This answers the open question in the checklist** ("single-thread acceptance on
+representative smartnode hardware"): a 4-thread VPS carries 1500 tx/s with msghand at
+61-72% of one core. Parallel validation stays parked. Note `rtm-cl-schdlr` never exceeded
+0.5% — the ChainLocks Cleanup walk is *not* hot at this mempool size, contrary to an earlier
+reading taken with `top -b -n1`, whose first sample is computed from process start and is
+not an instantaneous figure.
+
+**Everything downstream of acceptance collapses.**
+
+| | 240 tx/s (absorbing) | 1500 tx/s (4.5x over) |
+|---|---|---|
+| blocks needing GETBLOCKTXN | 53/55 (96%) | 111/121 (92%) |
+| txn requested per block | 22-51 | **up to 5,206** (~the whole block) |
+| matched from mempool | ~3,700 | **150-375** |
+| full-mesh convergence, median | 873 ms | **34,591 ms** |
+| convergence, worst | 1,299 ms | **66,637 ms** |
+| final mempool spread across nodes | identical | **1.97x** (72,008 .. 141,542) |
+| ConnectBlock, median | 33-157 ms | 77-498 ms |
+
+Convergence (34.6 s) is **more than twice the block interval (15 s)**, so the network never
+reaches a common state: each block arrives while the previous is still propagating.
+
+**Mechanism — a positive feedback loop, entered at the absorption gap.**
+
+    1500 tx/s in, 336 tx/s out
+      -> mempool grows without bound
+      -> relay backlog, and nodes fall out of step
+      -> mempools diverge (1.97x here)
+      -> compact blocks match almost nothing (150-375 of ~5,035)
+      -> each node pulls ~2 MB per block via GETBLOCKTXN instead of ~20 kB
+      -> that traffic competes with transaction relay
+      -> divergence worsens
+
+**Consequence for decoupling — and this is a stronger argument than the one we had.** The
+earlier framing, "commitment blocks are smaller so propagation is cheaper", is not the point
+and on its own is wrong: at 240 tx/s the block was only ~1.4 MB and propagated fine. What
+breaks the network is the *absorption gap*, the first link in the chain. A commitment block
+at 15 s carrying 22,500 txids is 720 kB — smaller than the 2 MB full block it replaces, and
+it absorbs the entire arrival rate, so the mempool does not grow, nodes do not drift apart,
+and none of the rest of the cascade starts. Decoupling is worth arguing for because it
+removes the *cause*, not because it makes block bodies smaller.
+
+**Caveats.** usw was rebooted (by the operator, unrelated to the test) shortly before this
+run and missed the first transactions, giving it 8,710 rejects and leaving it behind; its
+propagation figures are therefore suspect, though it is not an outlier in the final mempool
+spread. Single run, not repeated. The two visible mempool clusters (~140k and ~72-97k) are
+consistent with a lagging group rather than eviction — no node reached its maxmempool.
