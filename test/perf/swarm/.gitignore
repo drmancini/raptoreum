@@ -1,3 +1,7 @@
 # Generated per-deployment: contains the RPC credential and the mesh addnode
 # list. Regenerate with gen_configs.py; never commit.
 conf/
+
+# Run artifacts: debug logs, poll samples, per-node submit logs. Hundreds of MB
+# per run and reproducible from the harness -- never commit them.
+runs/

@@ -1,3 +1,0 @@
-loaded 48199 tx, 18.0 MB (skipped 1801)
-offered 1965 in 90.0s = 22 tx/s | accepted 1801 | rejected 164
-  reject    164  Transaction already in block chain
