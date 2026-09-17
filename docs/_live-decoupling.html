@@ -1,0 +1,1969 @@
+<title>Raptoreum Decoupling Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Serif:ital,wght@0,400;0,500;1,400&display=swap">
+<style>
+:root{
+  --paper:#F1F3F5; --surface:#FFFFFF; --surface-2:#E9ECEF;
+  --ink:#131A22; --ink-2:#3D4854; --muted:#67727F; --rule:#D6DBE1;
+  --new:#A9501C; --new-soft:#F4E7DE;
+  --keep:#1B6560; --keep-soft:#DFEDEB;
+  --risk:#7E6110; --risk-soft:#F3EBD6;
+  --shadow:0 1px 2px rgba(19,26,34,.06), 0 8px 24px -16px rgba(19,26,34,.28);
+  --sans:"IBM Plex Sans Condensed",ui-sans-serif,system-ui,"Segoe UI",sans-serif;
+  --serif:"IBM Plex Serif",Georgia,"Times New Roman",serif;
+  --mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --paper:#0E141A; --surface:#151D25; --surface-2:#1C262F;
+    --ink:#E3E9EE; --ink-2:#BAC5CF; --muted:#8794A1; --rule:#27323D;
+    --new:#E28B54; --new-soft:#2C1F16;
+    --keep:#57B7B0; --keep-soft:#122725;
+    --risk:#CBA43A; --risk-soft:#26200F;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -18px rgba(0,0,0,.8);
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0E141A; --surface:#151D25; --surface-2:#1C262F;
+  --ink:#E3E9EE; --ink-2:#BAC5CF; --muted:#8794A1; --rule:#27323D;
+  --new:#E28B54; --new-soft:#2C1F16;
+  --keep:#57B7B0; --keep-soft:#122725;
+  --risk:#CBA43A; --risk-soft:#26200F;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -18px rgba(0,0,0,.8);
+}
+*{box-sizing:border-box}
+body{background:var(--paper);color:var(--ink);font-family:var(--serif);
+  font-size:17px;line-height:1.62;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1120px;margin:0 auto;padding:0 28px 96px}
+
+/* ---------- masthead ---------- */
+.mast{padding:64px 0 34px;border-bottom:2px solid var(--ink);margin-bottom:8px}
+.eyebrow{font-family:var(--sans);font-size:12.5px;font-weight:600;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--new);margin:0 0 14px}
+h1{font-family:var(--sans);font-weight:700;font-size:clamp(2.4rem,6vw,3.9rem);
+  line-height:1.02;letter-spacing:-.02em;margin:0;text-wrap:balance}
+.standfirst{font-size:1.16rem;color:var(--ink-2);margin:18px 0 0;max-width:60ch;font-style:italic}
+.meta{display:flex;flex-wrap:wrap;gap:0 30px;margin-top:26px;
+  font-family:var(--mono);font-size:12.5px;color:var(--muted)}
+.meta b{font-weight:500;color:var(--ink-2)}
+
+/* ---------- layout ---------- */
+.cols{display:grid;grid-template-columns:1fr;gap:0}
+@media(min-width:1000px){.cols{grid-template-columns:184px minmax(0,1fr);gap:48px;align-items:start}}
+nav.toc{display:none}
+@media(min-width:1000px){
+  nav.toc{display:block;position:sticky;top:24px;padding-top:44px;
+    font-family:var(--sans);font-size:13.5px;line-height:1.45}
+  nav.toc ol{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:11px}
+  nav.toc a{color:var(--muted);text-decoration:none;display:flex;gap:9px;border-left:2px solid var(--rule);
+    padding-left:11px;transition:color .15s,border-color .15s}
+  nav.toc a:hover,nav.toc a:focus-visible{color:var(--new);border-color:var(--new)}
+  nav.toc .n{font-family:var(--mono);font-size:11.5px;padding-top:1px}
+  nav.toc li.grp{font-size:10.5px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;
+    color:var(--new);margin-top:12px;padding-left:13px}
+  nav.toc li.grp:first-child{margin-top:0}
+}
+main{min-width:0;padding-top:40px}
+section{margin-bottom:64px;scroll-margin-top:20px}
+h2{font-family:var(--sans);font-weight:700;font-size:1.72rem;letter-spacing:-.01em;
+  margin:0 0 6px;text-wrap:balance;display:flex;align-items:baseline;gap:13px}
+h2 .num{font-family:var(--mono);font-size:.82rem;font-weight:400;color:var(--new);
+  letter-spacing:0;flex:none}
+h3{font-family:var(--sans);font-weight:600;font-size:1.16rem;margin:34px 0 8px;letter-spacing:.005em}
+.lede{color:var(--ink-2);max-width:66ch;margin:0 0 22px}
+p{max-width:66ch;margin:0 0 16px}
+code{font-family:var(--mono);font-size:.855em;background:var(--surface-2);
+  padding:.1em .38em;border-radius:3px;color:var(--ink-2)}
+strong{font-weight:500;color:var(--ink)}
+em.k{font-style:normal;color:var(--keep);font-weight:500}
+em.n{font-style:normal;color:var(--new);font-weight:500}
+
+/* ---------- tables ---------- */
+.tw{overflow-x:auto;margin:22px 0;border:1px solid var(--rule);border-radius:2px;background:var(--surface)}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14.5px}
+th{text-align:left;font-weight:600;font-size:11.5px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--muted);padding:12px 16px;border-bottom:1px solid var(--rule);white-space:nowrap}
+td{padding:12px 16px;border-bottom:1px solid var(--rule);vertical-align:top;color:var(--ink-2)}
+tr:last-child td{border-bottom:0}
+td:first-child{color:var(--ink);font-weight:600;white-space:nowrap}
+td.num{font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+
+/* ---------- figures ---------- */
+figure{margin:30px 0;padding:0}
+.fbox{overflow-x:auto;background:var(--surface);border:1px solid var(--rule);
+  border-radius:2px;padding:22px 20px;box-shadow:var(--shadow)}
+figure svg{display:block;width:100%;min-width:560px;height:auto;color:var(--ink-2)}
+figcaption{font-family:var(--sans);font-size:13px;color:var(--muted);margin-top:11px;
+  padding-left:13px;border-left:2px solid var(--new);max-width:72ch}
+
+/* ---------- process steps ---------- */
+.steps{list-style:none;margin:18px 0 0;padding:0;display:flex;flex-direction:column;gap:0}
+.steps li{display:grid;grid-template-columns:38px minmax(0,1fr);gap:16px;
+  padding:13px 0;border-top:1px solid var(--rule)}
+.steps li:last-child{border-bottom:1px solid var(--rule)}
+.steps .s{font-family:var(--mono);font-size:12px;color:var(--new);padding-top:4px;
+  font-variant-numeric:tabular-nums}
+.steps p{margin:0;max-width:64ch;font-size:16px}
+.steps .t{font-family:var(--sans);font-weight:600;font-size:15px;display:block;margin-bottom:2px;color:var(--ink)}
+
+/* ---------- callouts ---------- */
+.note{border-left:3px solid var(--keep);background:var(--keep-soft);padding:15px 18px;
+  margin:24px 0;border-radius:0 2px 2px 0}
+.note.risk{border-color:var(--risk);background:var(--risk-soft)}
+.note.new{border-color:var(--new);background:var(--new-soft)}
+.note p{margin:0;max-width:64ch;font-size:16px}
+.note p+p{margin-top:9px}
+.note .lbl{font-family:var(--sans);font-size:11px;font-weight:700;letter-spacing:.12em;
+  text-transform:uppercase;display:block;margin-bottom:5px;color:var(--keep)}
+.note.risk .lbl{color:var(--risk)} .note.new .lbl{color:var(--new)}
+
+/* ---------- change ledger ---------- */
+.ledger{display:grid;grid-template-columns:1fr;gap:20px;margin-top:22px}
+@media(min-width:720px){.ledger{grid-template-columns:1fr 1fr}}
+.led{background:var(--surface);border:1px solid var(--rule);border-radius:2px;padding:18px 20px 8px}
+.led h4{font-family:var(--sans);font-size:12px;font-weight:700;letter-spacing:.12em;
+  text-transform:uppercase;margin:0 0 3px}
+.led.keep h4{color:var(--keep)} .led.new h4{color:var(--new)}
+.led .sub{font-family:var(--sans);font-size:13px;color:var(--muted);margin:0 0 13px}
+.led ul{list-style:none;margin:0;padding:0}
+.led li{font-size:15.5px;padding:8px 0 8px 19px;border-top:1px solid var(--rule);position:relative;color:var(--ink-2)}
+.led li:before{content:"";position:absolute;left:0;top:16px;width:9px;height:1px;background:var(--keep)}
+.led.new li:before{background:var(--new)}
+.calc{overflow-x:auto;background:var(--surface);border:1px solid var(--rule);border-radius:2px;
+  padding:18px 20px;margin:22px 0;font-family:var(--mono);font-size:12.5px;line-height:1.6;
+  color:var(--ink-2);white-space:pre;box-shadow:var(--shadow)}
+.calc b{color:var(--new);font-weight:500}
+.calc i{color:var(--muted);font-style:normal}
+.calc u{color:var(--keep);text-decoration:none;font-weight:500}
+a{color:var(--new)}
+:focus-visible{outline:2px solid var(--new);outline-offset:3px}
+@media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+
+/* ---------- print / PDF ---------- */
+@media print{
+  :root, :root[data-theme="dark"], :root:not([data-theme="light"]){
+    --paper:#FFFFFF; --surface:#FFFFFF; --surface-2:#F2F4F6;
+    --ink:#111820; --ink-2:#2E3842; --muted:#5A6672; --rule:#C9D0D7;
+    --new:#8E4316; --new-soft:#FAF3EE;
+    --keep:#14514D; --keep-soft:#EFF6F5;
+    --risk:#6A5210; --risk-soft:#F8F3E6;
+    --shadow:none;
+  }
+  @page{ margin:17mm 15mm; }
+  body{background:#fff;font-size:10.2pt;line-height:1.48}
+  .wrap{max-width:none;padding:0}
+  nav.toc{display:none!important}
+  .cols{display:block!important}
+  main{padding-top:0}
+  .mast{padding-top:0;border-bottom:1.5pt solid var(--ink);break-after:avoid}
+  h1{font-size:24pt}
+  .standfirst{font-size:11pt}
+  .meta{font-size:8pt}
+  section{margin-bottom:20pt;break-inside:auto}
+  h2{font-size:14pt;break-after:avoid;margin-top:14pt}
+  h3,h4{break-after:avoid;font-size:11pt;margin-top:12pt}
+  p,li{orphans:3;widows:3}
+  p{max-width:none}
+  .lede{max-width:none}
+  .tw{overflow:visible;break-inside:avoid;box-shadow:none}
+  table{font-size:8.6pt}
+  th,td{padding:5pt 7pt}
+  figure{break-inside:avoid;margin:14pt 0}
+  .fbox{overflow:visible;box-shadow:none;padding:10pt}
+  figure svg{min-width:0;width:100%}
+  figcaption{font-size:8.6pt}
+  .calc{overflow:visible;white-space:pre-wrap;font-size:7.6pt;line-height:1.45;
+    break-inside:avoid;box-shadow:none;padding:9pt 11pt}
+  .note{break-inside:avoid;padding:9pt 12pt;margin:12pt 0}
+  .note p{font-size:9.8pt}
+  .steps li{break-inside:avoid;padding:7pt 0}
+  .steps p{font-size:9.8pt}
+  .ledger{display:block}
+  .led{break-inside:avoid;margin-bottom:12pt;box-shadow:none}
+  .led li{font-size:9.6pt}
+  a{color:var(--ink);text-decoration:none}
+  a[href^="http"]::after{content:" (" attr(href) ")";font-size:7.5pt;color:var(--muted);
+    word-break:break-all}
+}
+</style>
+
+<div class="wrap">
+
+<header class="mast">
+  <p class="eyebrow">Raptoreum Core &middot; design review</p>
+  <h1>Raptoreum Decoupling Architecture</h1>
+  <p class="standfirst">Blocks record what was ordered, not the data that was ordered. The transactions
+  themselves live with the Smartnode tier and are fetched back by position.</p>
+  <div class="meta">
+    <span><b>Basis</b> tag 2.0.3.01</span>
+    <span><b>Block interval</b> 2 min</span>
+    <span><b>Per transaction in a block</b> 32 bytes</span>
+    <span><b>Status</b> target architecture, not a plan</span>
+  </div>
+</header>
+
+<div class="cols">
+<nav class="toc" aria-label="Contents">
+  <ol>
+    <li class="grp">Architecture</li>
+    <li><a href="#model"><span class="n">01</span><span>The model</span></a></li>
+    <li><a href="#tiers"><span class="n">02</span><span>Who holds what</span></a></li>
+    <li><a href="#regimes"><span class="n">03</span><span>Two regimes</span></a></li>
+    <li><a href="#format"><span class="n">04</span><span>The block format</span></a></li>
+    <li><a href="#acceptance"><span class="n">05</span><span>Block acceptance</span></a></li>
+    <li><a href="#bodystore"><span class="n">06</span><span>The body store</span></a></li>
+    <li><a href="#stateroot"><span class="n">07</span><span>The state root</span></a></li>
+    <li class="grp">Operation</li>
+    <li><a href="#processes"><span class="n">08</span><span>Key processes</span></a></li>
+    <li><a href="#rpc"><span class="n">09</span><span>RPC surface</span></a></li>
+    <li><a href="#adversarial"><span class="n">10</span><span>Adversarial surface</span></a></li>
+    <li class="grp">Decisions</li>
+    <li><a href="#attest"><span class="n">11</span><span>The attestation</span></a></li>
+    <li><a href="#priorart"><span class="n">12</span><span>Prior art</span></a></li>
+    <li><a href="#ledger"><span class="n">13</span><span>Change ledger</span></a></li>
+    <li><a href="#breaks"><span class="n">14</span><span>What breaks</span></a></li>
+    <li class="grp">Building it</li>
+    <li><a href="#components"><span class="n">15</span><span>Components</span></a></li>
+    <li><a href="#questions"><span class="n">16</span><span>Open questions</span></a></li>
+    <li><a href="#risk"><span class="n">17</span><span>The bet</span></a></li>
+    <li class="grp">Security</li>
+    <li><a href="#security"><span class="n">18</span><span>Security review</span></a></li>
+    <li class="grp">Alternative</li>
+    <li><a href="#variant"><span class="n">19</span><span>Build whole, split after</span></a></li>
+  </ol>
+</nav>
+
+<main>
+
+<section id="model">
+  <h2><span class="num">01</span>The model</h2>
+  <p class="lede">Proof of work still orders transactions and still decides the chain. Nothing
+  about consensus changes. What changes is what a block carries.</p>
+
+  <p>A block records the coinbase in full and every other transaction as its 32-byte identifier.
+  The bodies are held by the Smartnode tier and fetched back on demand. Two commitments hold it
+  together: the <em class="k">merkle root</em>, which already exists and already commits to
+  identifiers, says what was ordered; a <em class="n">state root</em>, which does not exist yet,
+  says what the result was, so a node can begin from a verified snapshot instead of replaying
+  history it does not have.</p>
+
+  <p>Nothing binds an identifier to its body except the hash itself, and nothing needs to. A body
+  is correct exactly when it hashes to the identifier the chain already committed. That single
+  property is what makes every fetch self-verifying and every challenge checkable by anyone.</p>
+
+  <p>One qualification that sections 07 and 18 develop. The state root is the mechanism, but it is
+  <strong>not the anchor</strong>. A header chain proves work, and work is rentable. What a joining
+  node actually rests on is a ChainLock over the snapshot base &mdash; a signature by identified,
+  collateralised parties &mdash; which is why the Smartnode tier carries the trust here and the
+  miners do not.</p>
+
+  <figure>
+    <div class="fbox">
+      <svg viewBox="0 0 900 336" role="img" aria-label="A transaction relays into the mempool, then splits: its 32-byte identifier is mined into a commitment block held by every node forever, while its full body goes to the Smartnode tier. The two are bound because hashing the body reproduces the identifier.">
+        <defs>
+          <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,1 L9,5 L0,9 z" fill="currentColor"/>
+          </marker>
+          <marker id="arN" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,1 L9,5 L0,9 z" fill="#A9501C"/>
+          </marker>
+        </defs>
+
+        <rect x="16" y="140" width="132" height="56" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+        <text x="82" y="166" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="currentColor">Transaction</text>
+        <text x="82" y="182" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".72">~400 bytes</text>
+
+        <line x1="148" y1="168" x2="196" y2="168" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"/>
+        <text x="172" y="158" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="currentColor" opacity=".72">relay</text>
+
+        <rect x="200" y="140" width="140" height="56" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+        <text x="270" y="166" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="currentColor">Mempool</text>
+        <text x="270" y="182" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".72">every node</text>
+
+        <path d="M340 156 C372 156, 372 92, 402 92" fill="none" stroke="#A9501C" stroke-width="1.6" marker-end="url(#arN)"/>
+        <text x="374" y="72" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="#A9501C">identifier</text>
+        <path d="M340 180 C372 180, 372 250, 402 250" fill="none" stroke="#A9501C" stroke-width="1.6" marker-end="url(#arN)"/>
+        <text x="378" y="276" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="#A9501C">full body</text>
+
+        <rect x="406" y="64" width="192" height="56" rx="2" fill="none" stroke="#A9501C" stroke-width="1.6"/>
+        <text x="502" y="90" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="#A9501C">Commitment block</text>
+        <text x="502" y="106" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="#A9501C" opacity=".85">coinbase + 32-byte ids</text>
+
+        <rect x="406" y="222" width="192" height="56" rx="2" fill="none" stroke="#A9501C" stroke-width="1.6"/>
+        <text x="502" y="248" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="#A9501C">Body store</text>
+        <text x="502" y="264" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="#A9501C" opacity=".85">flat files, block order</text>
+
+        <line x1="598" y1="92" x2="650" y2="92" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"/>
+        <text x="624" y="82" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="currentColor" opacity=".72">mined</text>
+        <line x1="598" y1="250" x2="650" y2="250" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"/>
+        <text x="624" y="240" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="currentColor" opacity=".72">served</text>
+
+        <rect x="654" y="64" width="230" height="56" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+        <text x="769" y="90" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="currentColor">The chain</text>
+        <text x="769" y="106" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".72">every node, forever</text>
+
+        <rect x="654" y="222" width="230" height="56" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+        <text x="769" y="248" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="currentColor">Smartnode tier</text>
+        <text x="769" y="264" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".72">all bodies, forever</text>
+
+        <line x1="769" y1="124" x2="769" y2="216" stroke="#A9501C" stroke-width="1.3" stroke-dasharray="4 4"/>
+        <text x="783" y="166" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="#A9501C">hash(body)</text>
+        <text x="783" y="181" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="#A9501C">= identifier</text>
+
+        <text x="16" y="318" font-family="IBM Plex Mono, monospace" font-size="10" fill="currentColor" opacity=".55">Copper marks what this design adds. Plain outline marks what already exists.</text>
+      </svg>
+    </div>
+    <figcaption>The split and the thing that binds it. Identifier and body travel separately and
+    are reunited by hashing, so no index, registry or signature is needed to prove a body is the
+    right one.</figcaption>
+  </figure>
+</section>
+
+<section id="tiers">
+  <h2><span class="num">02</span>Who holds what</h2>
+  <p class="lede">Three roles, all of which this chain already has. The design gives a duty to a
+  tier that exists rather than inventing one.</p>
+
+  <div class="tw">
+  <table>
+    <thead><tr><th>Role</th><th>Holds</th><th>Provides</th></tr></thead>
+    <tbody>
+      <tr><td>Miners and pools</td><td>State, plus a recent window of bodies</td><td>Ordering and validity, under proof of work</td></tr>
+      <tr><td>Smartnodes</td><td>Everything, forever</td><td>Availability of history, alongside the locks and finality they already run</td></tr>
+      <tr><td>Ordinary nodes</td><td>State, a recent window, and whatever else they choose</td><td>Independent validation; may prune freely</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>Smartnodes are already identified, collateralised, addressable from the chain itself, and
+  organised into quorums. The chain publishes their addresses as consensus state, which means the
+  network already carries a directory of servers that can answer any request. No new registry, no
+  assignment scheme, no advertisement.</p>
+
+  <h3>The recent window</h3>
+  <p>Its floor is not the reorg depth. Raptoreum's round-voting mechanism reads a full round of
+  720 previous blocks and inspects their bodies for quorum commitments, and its result gates
+  consensus. At a two-minute interval that is roughly a day, and every other backward-looking
+  path &mdash; the disconnect pool, database verification, crash replay &mdash; sits well inside it.</p>
+
+  <h3>What full replication costs</h3>
+  <p>At roughly 400 bytes a transaction, each Smartnode's disk grows by about 12.6&nbsp;GB per year
+  for every sustained transaction per second.</p>
+
+  <div class="tw">
+  <table>
+    <thead><tr><th>Sustained throughput</th><th>Per Smartnode, per year</th><th>Assessment</th></tr></thead>
+    <tbody>
+      <tr><td class="num">10 tx/s</td><td class="num">126 GB</td><td>Irrelevant</td></tr>
+      <tr><td class="num">50 tx/s</td><td class="num">631 GB</td><td>Comfortable</td></tr>
+      <tr><td class="num">100 tx/s</td><td class="num">1.26 TB</td><td>A 4 TB box lasts about three years</td></tr>
+      <tr><td class="num">500 tx/s</td><td class="num">6.3 TB</td><td>Untenable</td></tr>
+      <tr><td class="num">2,600 tx/s</td><td class="num">32.8 TB</td><td>The tier empties</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="note risk">
+    <span class="lbl">The disguised risk</span>
+    <p>Full replication couples storage cost to consensus participation. Under partial retention an
+    operator short of disk drops data and keeps serving. Under full replication the same operator
+    drops out entirely, taking ChainLocks signing, InstantSend and quorum participation with it.</p>
+    <p>So the failure mode of storage becoming a problem is not a degraded archive you notice and
+    fix. It is a thinning Smartnode set. Watch throughput, which gives years of warning, not disk
+    complaints, which give weeks.</p>
+  </div>
+
+  <h3>When to act</h3>
+  <p>Partial retention is a protocol change plus an incentive change plus an activation window with
+  third parties in it. Call it a year from decision to live, with margin on top. So the trigger is
+  <strong>less than about two years of headroom on a commodity box</strong>, which is roughly where
+  annual growth crosses a terabyte per node. Not when disks fill.</p>
+
+  <div class="note risk">
+    <span class="lbl">An attacker can pull that trigger for you</span>
+    <p>The storage burden exists only because Smartnodes must retain bodies, which makes it a
+    weapon. Filling every block costs pocket change in transaction fees while imposing hundreds of
+    gigabytes a year of permanent storage on <strong>every</strong> Smartnode, and nothing
+    compensates it &mdash; rewards are round-robin with no service component.</p>
+    <p>So the throughput you are watching is not only organic demand. A few thousand RTM buys the
+    terabyte-a-year trigger outright, which moves the deferred incentive question up the list rather
+    than leaving it to be decided by adoption.</p>
+  </div>
+</section>
+
+<section id="regimes">
+  <h2><span class="num">03</span>Two regimes</h2>
+  <p class="lede">A block on the wire is the coinbase plus a list of hashes. To use it, a node
+  needs the actual transactions. The two regimes are the two very different answers to where
+  those come from, and which applies depends only on how old the block is.</p>
+
+  <h3>At the tip</h3>
+  <p>Consider what happened in the two minutes before the block appeared. The miner picked those
+  transactions out of its own mempool, and they arrived there by ordinary relay, exactly as today.
+  So by the time the block shows up, every node has already seen nearly all of them and is holding
+  them in memory. Your node reads the list of hashes and assembles the block out of what it was
+  already holding. That is not new machinery; it is what compact blocks do today.</p>
+
+  <p>Now the part that matters. <strong>The miner had to build a complete block in order to mine
+  it</strong>, so it held every transaction, and so did every node that assembled and connected the
+  block. Each of them keeps the recent window on disk, commitments and bodies alike, so any of them
+  can rebuild that complete block on demand. At the tip, complete blocks genuinely exist on many
+  machines. If assembly fails, there is a safety net: ask a peer for the whole block, and the peer
+  can send one.</p>
+
+  <h3>In history</h3>
+  <p>Now a node reads block 800,000 off its disk a year later. Same shape, just hashes. But those
+  transactions are in nobody's mempool. They were spent and forgotten long ago, and no node has
+  assembled that block recently.</p>
+
+  <p>Here is what is easy to miss. <strong>A complete block 800,000 does not exist anywhere, and
+  has not since the day it was mined.</strong> The miner built one in memory, once, and then it was
+  gone. Every node that connected it built one transiently too, then filed the commitments in one
+  place and the bodies in another. Nobody kept the assembled object. So the safety net is not merely
+  unavailable here. It has no possible answer. All you can do is ask a Smartnode for bodies by
+  position, a range at a time.</p>
+
+  <h3>Why the split earns its keep</h3>
+  <p><strong>It is a security decision first.</strong> Imagine a miner that publishes a block of
+  hashes and never gossips the transactions. Without the fallback, nobody could assemble that
+  block, so nobody could build on it, except the miner, which has the data. It would quietly
+  accumulate a private lead while honest miners were stuck on the parent. That attack costs
+  nothing. Because complete blocks do exist at the tip, and any peer that connected one can hand it
+  over, the miner is not the only possible source and the attack evaporates.</p>
+
+  <div class="note risk">
+    <span class="lbl">The fallback is necessary and not sufficient</span>
+    <p>"Every node that connected it can rebuild it" is <strong>circular</strong>. A node starved
+    of bodies cannot connect the block, so cannot become a source, and the attacker chooses who
+    connects first. Mine normally, relay the header widely because it is tiny, release bodies to a
+    chosen subset, and everyone else holds your block as most-work-but-unconnectable.</p>
+    <p>The fallback must be joined by a relay rule: <strong>never relay a commitment block you
+    cannot assemble yourself</strong>. Then a withheld block never propagates as a most-work header
+    at all. See section 18.</p>
+  </div>
+
+  <p><strong>And it confines the new complexity.</strong> Missing data in history is a normal
+  condition, so it needs a durable state on the block, retries against different Smartnodes, and a
+  firm rule that such a block is never marked invalid. That whole machine only has to exist for old
+  blocks. Recent blocks run on code that already works. The boundary between the two is the recent
+  window, whose floor is 720 blocks, roughly a day, set by the round-voting mechanism rather than
+  by reorg depth.</p>
+
+  <figure>
+    <div class="fbox">
+      <svg viewBox="0 0 900 296" role="img" aria-label="At the tip a requester can ask a peer for bodies by position or fall back to requesting the entire block. In history the fallback edge is gone, because no complete block was ever assembled, leaving only the position-addressed request.">
+        <defs>
+          <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,1 L9,5 L0,9 z" fill="currentColor"/>
+          </marker>
+          <marker id="ar2k" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,1 L9,5 L0,9 z" fill="#1B6560"/>
+          </marker>
+        </defs>
+
+        <text x="16" y="26" font-family="IBM Plex Sans Condensed, sans-serif" font-size="14" font-weight="700" fill="#1B6560">AT THE TIP</text>
+        <text x="16" y="44" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".7">a complete block exists somewhere</text>
+        <line x1="16" y1="56" x2="424" y2="56" stroke="#1B6560" stroke-width="1.2"/>
+
+        <rect x="16" y="96" width="130" height="52" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+        <text x="81" y="127" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="currentColor">Node</text>
+        <rect x="294" y="96" width="130" height="52" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+        <text x="359" y="127" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="currentColor">Peer</text>
+
+        <line x1="146" y1="112" x2="290" y2="112" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar2)"/>
+        <text x="218" y="104" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="currentColor" opacity=".75">bodies by position</text>
+
+        <line x1="146" y1="140" x2="290" y2="140" stroke="#1B6560" stroke-width="1.6" marker-end="url(#ar2k)"/>
+        <text x="218" y="162" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="#1B6560">or: send the whole block</text>
+        <text x="218" y="178" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="#1B6560" opacity=".8">the existing fallback</text>
+
+        <text x="16" y="228" font-family="IBM Plex Serif, serif" font-size="13" fill="currentColor" opacity=".85">Assembly can always fail safely.</text>
+        <text x="16" y="248" font-family="IBM Plex Serif, serif" font-size="13" fill="currentColor" opacity=".85">A block&#8217;s producer is never its only</text>
+        <text x="16" y="268" font-family="IBM Plex Serif, serif" font-size="13" fill="currentColor" opacity=".85">possible source, so withholding buys nothing.</text>
+
+        <line x1="450" y1="16" x2="450" y2="280" stroke="currentColor" stroke-width="1" opacity=".28"/>
+
+        <text x="476" y="26" font-family="IBM Plex Sans Condensed, sans-serif" font-size="14" font-weight="700" fill="#A9501C">IN HISTORY</text>
+        <text x="476" y="44" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".7">no complete block was ever assembled</text>
+        <line x1="476" y1="56" x2="884" y2="56" stroke="#A9501C" stroke-width="1.2"/>
+
+        <rect x="476" y="96" width="130" height="52" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+        <text x="541" y="127" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="currentColor">Node</text>
+        <rect x="754" y="96" width="130" height="52" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+        <text x="819" y="120" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="currentColor">Smartnode</text>
+        <text x="819" y="136" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="currentColor" opacity=".7">on-chain address</text>
+
+        <line x1="606" y1="112" x2="750" y2="112" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar2)"/>
+        <text x="678" y="104" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="currentColor" opacity=".75">bodies by position</text>
+
+        <line x1="606" y1="140" x2="750" y2="140" stroke="#A9501C" stroke-width="1.4" stroke-dasharray="5 5" opacity=".5"/>
+        <line x1="662" y1="128" x2="694" y2="152" stroke="#A9501C" stroke-width="2"/>
+        <line x1="694" y1="128" x2="662" y2="152" stroke="#A9501C" stroke-width="2"/>
+        <text x="678" y="178" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="#A9501C">nothing can answer this</text>
+
+        <text x="476" y="228" font-family="IBM Plex Serif, serif" font-size="13" fill="currentColor" opacity=".85">The fallback is the edge that disappears,</text>
+        <text x="476" y="248" font-family="IBM Plex Serif, serif" font-size="13" fill="currentColor" opacity=".85">and every hard question in this design</text>
+        <text x="476" y="268" font-family="IBM Plex Serif, serif" font-size="13" fill="currentColor" opacity=".85">is a consequence of losing it.</text>
+      </svg>
+    </div>
+    <figcaption>The comparison is one edge. Preserving the whole-block fallback at the tip is what
+    removes the withholding advantage; beyond the tip it cannot exist, which is why history needs
+    a durable incomplete state and a fetch protocol of its own.</figcaption>
+  </figure>
+</section>
+
+<section id="format">
+  <h2><span class="num">04</span>The block format</h2>
+  <p class="lede">The header survives untouched, and the reason is a property this chain already
+  had rather than a concession anyone made for this design.</p>
+
+  <p>The block merkle root builds its leaves from transaction identifiers and nothing else, and
+  this chain has no segwit, so that identifier has no witness variant to reconcile. Proof of work,
+  header relay, chain selection by work, and the existing inclusion-proof machinery all work over a
+  commitment block with no code written.</p>
+
+  <p>So a commitment block is not a new object. It is the same block structure with a second
+  serialisation: coinbase in full, every other entry a bare 32-byte identifier.</p>
+
+  <div class="note risk">
+    <span class="lbl">The selector cannot live in the header</span>
+    <p>Raptoreum replaced the usual version-bit scheme with its own update voting, which owns bits
+    0 through 28 with the top three masked, and bits 0, 1 and 2 are already assigned. There is no
+    free bit below 29 and nothing above it that does not break the mask.</p>
+    <p>Independently, the version field sits inside the hashed header, so a format recorded there is
+    fixed at mining time and a materialised block could never be re-serialised in full form without
+    changing its hash.</p>
+    <p>The selector is therefore a <strong>serialisation stream flag negotiated between peers</strong>,
+    on the pattern segwit used. The consequence is that the format is not self-describing and peers
+    must agree before transfer.</p>
+  </div>
+
+  <p>One correction worth carrying: inclusion proofs survive, but bloom-filtered blocks do not. The
+  identifier-set path works over commitments alone. The bloom path runs the filter over full scripts
+  and outpoints, so serving a filtered block needs bodies for the client's whole rescan range.</p>
+
+  <div class="note new">
+    <span class="lbl">One relay rule belongs with the format</span>
+    <p><strong>Never relay a commitment block you cannot assemble yourself.</strong> A block of bare
+    identifiers is cheap to forward, which is exactly why forwarding one you cannot connect is
+    dangerous: it propagates as a most-work header that nobody downstream can build on. Gating
+    relay on self-assembly restores the atomicity that whole-block relay had for free. Section 18
+    explains what it closes.</p>
+  </div>
+
+</section>
+
+<section id="acceptance">
+  <h2><span class="num">05</span>Block acceptance</h2>
+  <p class="lede">This is where the design lives, and where the cost is concentrated. Everything
+  below block connection is free. Everything above it has to learn a state that did not exist.</p>
+
+  <h3>Below connection, nothing changes</h3>
+  <p>The connect and disconnect graphs were traced in full. The special-transaction processing, the
+  quorum block processor, the deterministic list builder, the coinbase root checks, the transaction
+  loop, the InstantSend conflict pass, the block value and payee checks, the undo and index writes,
+  and the entire assets subsystem all take a block by reference, none reads from disk, and none
+  depends on byte offsets. Hand them a populated block and they cannot tell where it came from.</p>
+
+  <h3>Above it, the boundary is acceptance, not deserialisation</h3>
+  <p>Acceptance today validates bodies, persists the block, and marks it a chain candidate, all
+  before any connection happens. In the chain selector, <strong>the have-data flag simply means
+  connectable</strong>. So a body-incomplete block either gets that flag, becomes a candidate, is
+  selected, and shuts the node down when connection reads it back; or it is held out of the flag,
+  and roughly thirty call sites above connection must learn a new state.</p>
+
+  <p>Those sites are the ones that matter most: chain selection, the download scheduler, candidate
+  maintenance, the consistency assertions, pruning, database verification and crash replay. There is
+  no way to build this beside the existing path and swap it in.</p>
+
+  <div class="note new">
+    <span class="lbl">Three specifics</span>
+    <p><strong>Bit 256, not 128.</strong> Bit 128 is already the chainlock-conflict flag, used at
+    fourteen sites and persisted, so reusing it would misread existing databases.</p>
+    <p><strong>A new validity rung.</strong> The transactions-valid level is defined as covering
+    per-transaction checks, signature operation counts, byte size and the merkle root. Over
+    commitments only the root, duplicates and count are checkable, so that level cannot honestly be
+    granted at acceptance time.</p>
+    <p><strong>Materialisation must produce a fresh object.</strong> The block check caches its own
+    result. If a commitment-mode check marks an object that is later filled in place, the check
+    inside connection short-circuits and the per-transaction and signature-operation checks never
+    run on the connect path.</p>
+  </div>
+
+  <h3>The give-up rule, and its bound</h3>
+  <p>A node must never mark a body-incomplete block invalid. Doing so would permanently reject a
+  chain other nodes accept. Holding it and retrying costs only liveness, so <strong>the timeout
+  governs retry cadence and never validity</strong>, and it stays local policy rather than becoming
+  a consensus parameter.</p>
+
+  <div class="note risk">
+    <span class="lbl">Never invalid does not mean retry forever</span>
+    <p>Taken literally the rule is an attack. Mine a block committing to bodies that exist nowhere,
+    which nothing prevents, and every node polls every Smartnode for them indefinitely. Repeat and
+    the aggregate load grows with each block you buy.</p>
+    <p>Validity and retry are separate questions. The block stays valid-but-unconnectable forever,
+    which is correct and costs a cheap index entry. <strong>Active fetching</strong> is bounded by
+    per-block exponential backoff and a cap on how many incomplete blocks are chased at once. All
+    local policy, which the rule above already permits.</p>
+    <p><strong>The bound must not key off accumulated work.</strong> An earlier draft said to pursue
+    only blocks with more work than the current tip. That is useless against the attacker who
+    matters most, because a large pool mining nothing but unresolvable commitments always has more
+    work than the honest tip. Work is precisely what such an attacker has in abundance.</p>
+  </div>
+
+  <h3>Why this holds at 51%</h3>
+  <p>Take the worst case: a majority pool mines nothing but blocks committing to identifiers with no
+  transaction behind them, and never supplies data because none exists.</p>
+
+  <p><strong>Unconnectable work is inert.</strong> Chain selection does not follow the heaviest
+  chain, it follows the heaviest chain it can connect. A block whose data nobody has never becomes
+  a candidate, so no amount of work stacked on it moves anyone's tip. That is not a property to
+  add; it is how the code already behaves, and it was verified rather than assumed.</p>
+
+  <p>So honest miners never adopt the block, never pause, and keep building on the parent, because
+  mining always extends the connected tip. The attacker's chain grows into a pile nobody follows.
+  <strong>And it earns nothing</strong>, because its blocks are in no one's chain, so its coinbase
+  outputs are worthless. It pays the full cost of majority hashrate and collects zero reward, while
+  the honest chain keeps paying its own miners.</p>
+
+  <div class="note">
+    <span class="lbl">Two precisions</span>
+    <p><strong>"Orphaned" is the wrong word</strong>, and the difference matters. A stale block lost
+    a race: nodes hold it complete and simply prefer another. These blocks never entered the race,
+    and because nothing may mark them invalid they are not discarded the way a stale block is. That
+    accumulation is the real cost, and it is what the backoff bound exists to contain.</p>
+    <p><strong>The network slows, it does not stop.</strong> The honest chain continues on the
+    remaining hashrate, and since this chain retargets difficulty every block the interval recovers
+    within a handful of blocks. Compare with the same hashrate spent on ordinary reorgs, which earns
+    rewards and enables double-spends. This strategy is strictly worse for the attacker.</p>
+  </div>
+
+</section>
+
+<section id="bodystore">
+  <h2><span class="num">06</span>The body store</h2>
+  <p class="lede">Flat files in block order, not a key-value store, and addressed by position
+  rather than by hash. Both choices follow from the same measurement.</p>
+
+  <h3>Not a key-value store</h3>
+  <p>This tree already reached that conclusion once: block data lives in flat files rather than the
+  embedded database, because log-structured merge compaction rewrites large values repeatedly as
+  they migrate between levels. At a terabyte a year of immutable blobs that write amplification is
+  the dominant cost, and it buys nothing, because the data never changes.</p>
+
+  <p>So: bodies appended to a third file series beside blocks and undo data, with a small index
+  mapping 32-byte keys to positions, where the values are small enough that merge behaviour is
+  harmless. This is the existing pattern, and it is what the literature calls key-value separation.
+  RocksDB's blob mode is the packaged version, at the cost of a large dependency and the property
+  below.</p>
+
+  <div class="note new">
+    <span class="lbl">Assembly locality decides it</span>
+    <p>Bodies are written in block order, so assembling a block is one contiguous read. Assembly is
+    the hot path: every block, every node, on the critical path to connecting the tip. A key-ordered
+    store scatters one block's bodies across the entire dataset and turns that single read into
+    thousands of random ones. The identifier is a hash, so key order <em class="n">is</em> random
+    order.</p>
+  </div>
+
+  <h3>Addressed by position</h3>
+  <p>Commitment blocks are the chain, so every node holds every commitment forever, which makes a
+  height and an index a universal address in a way it never was before. That gives four things at
+  once: it is more compact than a 32-byte hash, it is self-verifying because the body must hash to
+  the identifier already committed at that position, it lets the server read contiguously, and it
+  <strong>demotes the global identifier index from mandatory to optional</strong>. At a hundred
+  transactions a second that index would be roughly 200 GB a year of pure random-access structure
+  wanting to live in memory and failing to.</p>
+
+  <p>A serving node then needs only a per-block offset table. Bare-hash lookup stays useful for
+  answering "show me this transaction", served by nodes that choose to keep the identifier index,
+  which is precisely what that index is today and precisely as optional.</p>
+
+  <h3>Two things to get right at the start</h3>
+  <p>The write must happen during acceptance, transactionally with the commitment write, and not
+  when transactions leave the mempool &mdash; that runs after connection has already succeeded,
+  side-chain blocks never reach it at all, and blocks are announced to peers before it fires. And
+  the format must be able to delete records later even though it never will at first, because
+  retrofitting deletion into an append-only store is a data migration across every Smartnode rather
+  than a code change.</p>
+
+  <div class="note risk">
+    <span class="lbl">Two corrections from the security review</span>
+    <p><strong>Never write to the permanent store at mempool acceptance.</strong> It is tempting,
+    because it makes assembly almost free. But unmined transactions pay no fee, so an attacker fills
+    every node's disk at line rate for nothing until the node aborts on low disk &mdash; which on a
+    Smartnode is a ban two quorum rounds later. The mempool cap bounds memory, not the file. A cache
+    is fine if it evicts with the mempool.</p>
+    <p><strong>Deletion is not only future-proofing.</strong> Every losing sibling block is persisted
+    by every node, so on an append-only store those bodies are permanent. A five percent miner
+    publishing late blocks adds roughly 26 GB a year to every Smartnode forever. The store must
+    actually drop the bodies of blocks that lost, once buried.</p>
+  </div>
+
+</section>
+
+<section id="stateroot">
+  <h2><span class="num">07</span>The state root</h2>
+  <p class="lede">Thirty-two bytes in the coinbase that stand in for gigabytes on disk, and the
+  single thing that gives decoupling anybody to be useful to.</p>
+
+  <h3>Two different things a chain holds</h3>
+  <p><strong>History</strong> is the ordered list of transactions: immutable, append-only, growing
+  forever. <strong>State</strong> is the current situation, who owns what right now. State is small,
+  it changes every block, and it is a pure function of history. Replay every block from genesis and
+  you get it, deterministically.</p>
+
+  <div class="tw">
+  <table>
+    <thead><tr><th>Store</th><th>Contents</th><th>Committed today?</th></tr></thead>
+    <tbody>
+      <tr><td>Coins</td><td>Every unspent output</td><td>No</td></tr>
+      <tr><td>Asset state</td><td>Balances per address per asset, and asset metadata</td><td>No</td></tr>
+      <tr><td>Smartnode state</td><td>Deterministic list and quorum state</td><td>Yes, two merkle roots already</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>The existing block merkle root will not do this job. It commits to <em class="k">what was
+  ordered</em>. The state root commits to <em class="n">where that left things</em>. Getting from
+  the first to the second means replaying every transaction, which is precisely the work a node
+  without history cannot perform.</p>
+
+  <h3>Why it becomes necessary the moment there are tiers</h3>
+  <p>Today a node syncs by downloading every block and replaying it. It computes state itself and
+  therefore trusts nobody, which is what being a full node means. A miner holding only a recent
+  window cannot do that: the bodies are not on its disk, and fetching all of them would mean
+  holding everything, which is the thing the tier exists to avoid.</p>
+
+  <p>So it must obtain state from somebody else, and without a commitment that means trusting them.
+  A hostile peer could hand over a coins set with an extra million RTM at an address of its
+  choosing, and the receiving node would have no way to tell. <strong>The state root moves that
+  trust onto proof of work instead.</strong> Fetch a snapshot from anyone, compute its fingerprint,
+  compare against the root committed in a block that cost real work to produce. A match means it is
+  exactly what the network agreed, and where the file came from stops mattering.</p>
+
+  <figure>
+    <div class="fbox">
+      <svg viewBox="0 0 900 268" role="img" aria-label="Two routes to a validated tip. Today a node downloads every block and replays from genesis, which requires all history and is impossible for a node holding only a recent window. With a state root, a node takes a snapshot from any source, checks its fingerprint against the root committed in the chain, and is validating immediately.">
+        <defs>
+          <marker id="ar5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,1 L9,5 L0,9 z" fill="currentColor"/>
+          </marker>
+          <marker id="ar5n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,1 L9,5 L0,9 z" fill="#A9501C"/>
+          </marker>
+        </defs>
+
+        <text x="16" y="34" font-family="IBM Plex Sans Condensed, sans-serif" font-size="12" font-weight="700" fill="currentColor" opacity=".6">TODAY</text>
+        <rect x="16" y="48" width="176" height="56" rx="2" fill="none" stroke="currentColor" stroke-width="1.3" opacity=".55"/>
+        <text x="104" y="72" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="currentColor" opacity=".7">Download everything</text>
+        <text x="104" y="89" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="currentColor" opacity=".55">all bodies, all history</text>
+        <line x1="192" y1="76" x2="228" y2="76" stroke="currentColor" stroke-width="1.3" opacity=".55" marker-end="url(#ar5)"/>
+        <rect x="232" y="48" width="200" height="56" rx="2" fill="none" stroke="currentColor" stroke-width="1.3" opacity=".55"/>
+        <text x="332" y="72" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="currentColor" opacity=".7">Replay from genesis</text>
+        <text x="332" y="89" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="currentColor" opacity=".55">compute state yourself</text>
+        <line x1="432" y1="76" x2="468" y2="76" stroke="currentColor" stroke-width="1.3" opacity=".55" marker-end="url(#ar5)"/>
+        <rect x="472" y="48" width="152" height="56" rx="2" fill="none" stroke="currentColor" stroke-width="1.3" opacity=".55"/>
+        <text x="548" y="81" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="currentColor" opacity=".7">Validated tip</text>
+        <text x="648" y="70" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="#A9501C">a windowed node</text>
+        <text x="648" y="86" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="#A9501C">cannot take this route</text>
+
+        <line x1="16" y1="134" x2="884" y2="134" stroke="currentColor" stroke-width="1" opacity=".22"/>
+
+        <text x="16" y="168" font-family="IBM Plex Sans Condensed, sans-serif" font-size="12" font-weight="700" fill="#A9501C">WITH A STATE ROOT</text>
+        <rect x="16" y="182" width="176" height="56" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+        <text x="104" y="206" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="currentColor">Snapshot, any source</text>
+        <text x="104" y="223" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="currentColor" opacity=".7">trusted for nothing</text>
+        <line x1="192" y1="210" x2="228" y2="210" stroke="#A9501C" stroke-width="1.6" marker-end="url(#ar5n)"/>
+        <rect x="232" y="182" width="200" height="56" rx="2" fill="none" stroke="#A9501C" stroke-width="1.8"/>
+        <text x="332" y="206" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="#A9501C">Check the fingerprint</text>
+        <text x="332" y="223" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="#A9501C" opacity=".85">against the committed root</text>
+        <line x1="432" y1="210" x2="468" y2="210" stroke="#A9501C" stroke-width="1.6" marker-end="url(#ar5n)"/>
+        <rect x="472" y="182" width="152" height="56" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+        <text x="548" y="215" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="currentColor">Validated tip</text>
+        <text x="648" y="204" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".78">holds no history</text>
+        <text x="648" y="220" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".78">trusts only the work</text>
+      </svg>
+    </div>
+    <figcaption>The root does not shorten the sync. It removes the need to have the data at all,
+    which is what the mining and ordinary tiers depend on.</figcaption>
+  </figure>
+
+  <div class="note">
+    <span class="lbl">How this differs from Bitcoin's version</span>
+    <p>Bitcoin's equivalent compares a snapshot against a hash <strong>hardcoded in the software by
+    developers</strong>, so the trust sits with them. Putting the root in the chain moves it to the
+    miners, which is what you already trust for everything else. Kaspa does it this way, and it is
+    the only proof-of-work chain running the pieces this design needs.</p>
+  </div>
+
+  <h3>What it actually is</h3>
+  <p>A hash over a set, where the set is every state element: each unspent output, each asset
+  record. The obvious construction sorts everything and hashes it in order, which is exactly what
+  this tree's existing set hash does, and it reads the entire database. Minutes of work, so it
+  cannot happen every two minutes.</p>
+
+  <p>What is needed instead is a hash that <strong>updates incrementally</strong>. When a block
+  spends 500 outputs and creates 600, subtract 500 elements and add 600, in microseconds, without
+  touching the rest. That is a multiset hash: every element maps to a large number, elements combine
+  by multiplication modulo a large prime, multiplication commutes so order does not matter, which is
+  correct because a set has no order, and division undoes it so removal costs the same as addition.
+  Roughly 32 bytes per block, and a few arithmetic operations per output created or spent.</p>
+
+  <h3>From element to number</h3>
+  <pre class="calc">element bytes            71 B    <i>the outpoint and coin, serialised</i>
+  --SHA256--&gt;            32 B    <i>a digest, and only a seed</i>
+  --ChaCha20--&gt;         384 B    <i>keystream</i>
+  --read as integer--&gt; <b>3072 bits</b>  <i>the number that is multiplied</i></pre>
+
+  <p>The digest is not what gets multiplied. It is expanded first, and the expansion is the point.
+  The construction is secure only if nobody can find two different sets of elements whose products
+  are equal. Multiplying 256-bit values would leave an attacker room to hunt for multiplicative
+  relations, choosing elements whose numbers share convenient factors and combining them into a
+  collision. A 3072-bit group takes that away. The modulus has the form two-to-the-n minus a small
+  constant, which makes reduction a shift and a small multiply-add rather than a division.</p>
+
+  <h3>A worked block</h3>
+  <p>A block with a coinbase and two ordinary transactions. The hex and the accumulator values are
+  illustrative; the counts, the structure and the costs are not.</p>
+
+  <pre class="calc"><b>BLOCK 1,000,000</b>                     3 transactions (coinbase + 2)
+
+  coinbase  4e1d9a..7b30   0 in,  3 out   <i>miner / smartnode / founder</i>
+  tx A      a37f02..e21c   1 in,  2 out   <i>payment + change</i>
+  tx B      b9c1e5..44a8   2 in,  1 out   <i>consolidation</i>
+
+<b>STATE DELTA</b>
+  spent   (elements removed)       3
+  created (elements added)         6
+  ------------------------------------
+  modular multiplications          9
+  modular inversions               1      <i>once, at finalise only</i>
+
+<b>ONE ELEMENT</b> = outpoint || <b>Coin::Serialize</b>   <i>the WHOLE coin - see below</i>
+  txid           a37f02..e21c            32 B
+  vout           00 00 00 01              4 B
+  height+cb      VARINT(h*2+coinbase)     4 B
+  amount         12500000    varint       5 B
+  scriptPubKey   76a914..88ac            25 B
+  <b>nType</b>          VARINT                   1 B  <i>REQUIRED</i>
+  <b>vExtraPayload</b>  FutureTx lock data       n B  <i>REQUIRED</i>
+  -------------------------------------------
+           --&gt;  <b>h</b>, a 3072-bit number
+
+<b>RUNNING ACCUMULATOR</b>              N = numerator        D = denominator
+  carried in from 999,999            N0                   D0
+  <u>- spend</u>  81bc44..09f1:1            N0                   D0*h1
+  <u>- spend</u>  5d2077..c3e0:0            N0                   D0*h1*h2
+  <u>- spend</u>  5d2077..c3e0:3            N0                   D0*h1*h2*h3
+  <b>+ create</b> 4e1d9a..7b30:0  miner     N0*h4                "
+  <b>+ create</b> 4e1d9a..7b30:1  smartnode N0*h4*h5             "
+  <b>+ create</b> 4e1d9a..7b30:2  founder   N0*h4*h5*h6          "
+  <b>+ create</b> a37f02..e21c:0  payment   N0*h4..h7            "
+  <b>+ create</b> a37f02..e21c:1  change    N0*h4..h8            "
+  <b>+ create</b> b9c1e5..44a8:0  payment   N0*h4..h9            "
+
+<b>FINALISE</b>
+  R     = N * D^-1  mod p                <i>1 inversion, 1 multiplication</i>
+  root  = SHA256(R)                      32 bytes
+  <b>--&gt; written into the coinbase as CCbTx v3</b>
+
+<b>VERIFY</b>  <i>(any other node)</i>
+  applies the same 9 elements to its own N and D, finalises,
+  compares 32 bytes.  mismatch --&gt; reject the block.
+
+<b>WHAT WAS NOT TOUCHED</b>
+  unspent outputs in the set             ~10,000,000
+  of those, read                                   0</pre>
+
+  <p>Three things the trace makes concrete. <strong>Additions and removals cost the same</strong>,
+  because a spend multiplies into the denominator rather than dividing the numerator, so nothing on
+  the per-element path needs an inverse. <strong>Disconnecting is the same trace backwards</strong>,
+  swapping which accumulator each element joins, with no rebuild. And <strong>the size of the set
+  appears nowhere</strong>; only how busy the block was.</p>
+
+  <h3>What it costs</h3>
+  <p>The comparison that settles it is against work the node already does. Every input in a block
+  requires a signature verification, and that same input triggers exactly one accumulator
+  multiplication.</p>
+
+  <div class="tw">
+  <table>
+    <thead><tr><th>Per input</th><th>Cost</th></tr></thead>
+    <tbody>
+      <tr><td>Signature verification</td><td class="num">~60&ndash;100 &micro;s</td></tr>
+      <tr><td>Accumulator update</td><td class="num">~2&ndash;4 &micro;s</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>So the accumulator adds a few percent to cryptography already on that path. At a hundred
+  transactions a second the per-block total stays under a tenth of a second, against a two-minute
+  interval. It stops being free at the headline figure of 2,600 a second, where it becomes a second
+  or two inside block connection with the main lock held. Multiplication commutes and associates, so
+  the elements split across cores and the partial products recombine, but that has to be done
+  deliberately rather than assumed. Every figure here is an estimate from the structure of the
+  operation and wants measuring before anything depends on it.</p>
+
+  <h3>The root is not an anchor on its own</h3>
+  <p>A header chain proves work, not validity, and work is rentable by the hour. A node that
+  cannot replay therefore accepts any state whose root sits in a most-work chain, which is
+  <strong>SPV security</strong> where a replaying full node today cannot be fooled by any amount of
+  hashrate. An earlier draft called moving trust to the miners the win. It is the win for
+  availability and the loss for validity.</p>
+
+  <p>Solana has run validators off snapshots for years and does not solve this cryptographically
+  either. It stacks three partial answers, and the load-bearing one is not the hash.</p>
+
+  <div class="tw">
+  <table>
+    <thead><tr><th>Leg</th><th>Solana</th><th>Here</th></tr></thead>
+    <tbody>
+      <tr><td>Internal consistency</td><td>Recompute the account hash over what was loaded</td><td>Recompute the accumulator; one pass</td></tr>
+      <tr><td>Consensus weight</td><td>What fraction of <strong>stake</strong> voted for that hash</td><td><strong>A ChainLock over the snapshot base</strong> &mdash; an identified, collateralised quorum</td></tr>
+      <tr><td>Configured trust</td><td>Known-validator flags restricting sources</td><td>An operator-named source set</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>The middle leg cannot be proof of work, and that is the whole point. Work behind a header is
+  rentable by the hour; collateral behind a signature is not.</p>
+
+  <ol class="steps">
+    <li><span class="s">01</span><p><span class="t">The base must be ChainLocked and buried</span>At least 720 blocks, matching the window floor.</p></li>
+    <li><span class="s">02</span><p><span class="t">Verify the lock against a derived quorum</span>Membership comes from the Smartnode root already in every coinbase, syncable from any peer and checked against headers.</p></li>
+    <li><span class="s">03</span><p><span class="t">Bound the transfer before it starts</span>Commit the record count and byte size beside the root, and chunk the snapshot with per-chunk hashes, so a hostile source cannot stream hundreds of gigabytes before a mismatch is detectable.</p></li>
+    <li><span class="s">04</span><p><span class="t">Keep an operator escape hatch</span>A named set of snapshot sources, which is what Solana's known-validator flag is.</p></li>
+  </ol>
+
+  <div class="note">
+    <span class="lbl">The honest statement</span>
+    <p>Quorum membership derives from a chain that bottoms out at a shipped value, exactly as
+    Solana's does. <strong>Nobody escapes an anchor.</strong> The question is only how thin it is
+    and how many independent checks stack above it, and an identified set is a better place to rest
+    it than rented hashrate.</p>
+    <p>Note this is what the attestation decision in section 11 buys a second time. The
+    attributable attestations chosen for retention accountability are the same signal this anchor
+    needs.</p>
+  </div>
+
+  <h3>The field is 32 bytes; the object is not</h3>
+  <p>The numerator and denominator are themselves 3072-bit numbers, so the live accumulator is
+  768 bytes of state, not 32. Only the finalised root is small. And that state has the same standing
+  as the coins set itself: it cannot be recomputed on demand, because recomputation is the full scan
+  this whole design exists to avoid.</p>
+
+  <p>So it has to be persisted rather than derived at startup, updated on every connect and every
+  disconnect, and carried inside the snapshot, since a node starting from one needs the accumulator's
+  value in order to keep updating it. <strong>The sharp edge is the flush.</strong> It must commit
+  atomically with the coins cache. If a crash lands between the two writes, the accumulator describes
+  one height and the coins database another, the node computes a wrong root, and it forks.</p>
+
+  <div class="note new">
+    <span class="lbl">The element must be the whole coin</span>
+    <p>This chain's coin record is not Bitcoin's. It carries a type field and an extra payload,
+    which is where time-locked transaction data lives, and the spend path enforces the lock by
+    reading exactly those two fields. An element that omits them lets a snapshot source
+    <strong>strip a lock</strong> so a locked coin spends early, or <strong>add one</strong> so a
+    victim's coin becomes permanently unspendable &mdash; both with a matching root.</p>
+    <p>So the rule is: the element is the outpoint plus the coin serialised in full, and anything
+    the spend path can read from a coin must be inside it.</p>
+  </div>
+
+  <div class="note risk">
+    <span class="lbl">Asset state is smaller than it looks, and the hard part is elsewhere</span>
+    <p>Per-address balances must <strong>never</strong> be committed. They are maintained only
+    under an index that defaults off and clamps negatives to zero, so committing them would fork
+    nodes by configuration. Asset ownership already lives in the unspent output set as asset
+    scripts, with per-asset conservation enforced on every transfer, so those balances are already
+    inside the coins multiset.</p>
+    <p>What must be committed is the asset records themselves, in full &mdash; thousands, not
+    millions. Omit any field and a snapshot source rewrites it with a matching root: drop the owner
+    address and the attacker becomes the owner whose signature the mint check then verifies.</p>
+    <p>The genuinely hard part is canonicality rather than volume. Identical state must produce
+    identical bytes on every node, or roots diverge and the chain forks.</p>
+  </div>
+</section>
+
+<section id="processes">
+  <h2><span class="num">08</span>Key processes</h2>
+  <p class="lede">Six paths through the system. Only the third and fourth are genuinely new; the
+  rest are existing paths with one step added or removed.</p>
+
+  <h3>Producing a block</h3>
+  <ol class="steps">
+    <li><span class="s">01</span><p><span class="t">Select and validate</span>The miner picks transactions from its own mempool and validates them against the UTXO set. It already holds every body it is about to commit to.</p></li>
+    <li><span class="s">02</span><p><span class="t">Build the coinbase</span>Subsidy plus fees, the two existing merkle roots, and the new state root asserting what the chain state becomes.</p></li>
+    <li><span class="s">03</span><p><span class="t">Emit commitments</span>The block is serialised with the coinbase in full and everything else as identifiers. The block header is byte-identical to what it would have been.</p></li>
+    <li><span class="s">04</span><p><span class="t">Publish</span>Bodies were already gossiped as ordinary transactions before the block existed, which is what makes a block of pure identifiers propagate instantly.</p></li>
+  </ol>
+
+  <h4 style="font-family:var(--sans);font-weight:600;font-size:1rem;margin:30px 0 6px">Holds, hashes, publishes</h4>
+  <p>Three different things, and only the third one changes.</p>
+  <div class="tw">
+  <table>
+    <tbody>
+      <tr><td>Holds</td><td>Everything. To select transactions the miner must validate them, to build the coinbase it must total the fees, and to obtain identifiers at all it hashes the bodies. All of it from its own mempool.</td></tr>
+      <tr><td>Hashes</td><td>The 80-byte header and nothing else. Transactions were never part of what proof of work covers, and the merkle root already commits to identifiers today. The header is byte-identical between the two designs.</td></tr>
+      <tr><td>Publishes</td><td>Header, coinbase in full, identifiers. The bodies are already on the network, gossiped as ordinary transactions before the block existed.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><strong>Mining hardware is untouched.</strong> A rig never sees transaction data today either.
+  Stratum hands it two halves of a coinbase with an extranonce between them plus a merkle branch to
+  walk, and the rig assembles, hashes and derives the root itself. Extra fields in the coinbase
+  payload are invisible to that arrangement, which is why the work sits entirely in what a pool does
+  after a share meets the target.</p>
+
+  <p>Nothing prevents a miner committing to identifiers whose bodies it does not hold. The block is
+  then unconnectable by anyone, its producer included, so it can never be built on and is orphaned.
+  That is the enforcement: not a prohibition, just a block that does not pay.</p>
+
+  <h4 style="font-family:var(--sans);font-weight:600;font-size:1rem;margin:30px 0 6px">The transaction the miner created itself</h4>
+  <p>The case that matters is a transaction that <strong>only exists at assembly time</strong>, such
+  as a pool fee payout sized to this block's fees. Nobody has relayed it, so nobody can assemble the
+  block.</p>
+
+  <p><strong>The common case is already covered.</strong> Pool payouts normally live in the
+  coinbase, which a commitment block carries in full by construction. This chain's coinbase already
+  pays miner, Smartnode and founder, so coinbase-based payout needs nothing new.</p>
+
+  <div class="note risk">
+    <span class="lbl">Where it bites, it is a new obligation on miners</span>
+    <p>Today a pool can build a transaction during assembly and ship it inside the block, so
+    propagation is irrelevant. Under decoupling it must relay first <strong>and wait</strong>.
+    Broadcasting and then mining two hundred milliseconds later is not enough: most of the network
+    will not have it, the block will not assemble, and under the relay rule it will not even spread.
+    <strong>The pool orphans its own block through haste.</strong></p>
+    <p>Nothing in the protocol teaches this, and pool software has never had to know it.</p>
+  </div>
+
+  <p><strong>The escape valve already exists in the codebase.</strong> Compact blocks carry a
+  prefilled list of transactions sent whole rather than as identifiers; today only the coinbase is
+  prefilled, with a note in the source that the mempool could fill more. A commitment block can do
+  the same, carrying a small number of transactions in full alongside the identifiers.</p>
+
+  <p>It would have to be <strong>bounded by an explicit byte budget</strong> counted against the
+  block limit, because unbounded prefill reopens unbounded block size, which is the thing this
+  design exists to close.</p>
+
+  <div class="note new">
+    <span class="lbl">The cleaner statement: publishing no longer discharges the obligation</span>
+    <p>An earlier draft here said a pool must relay and then wait for propagation, or it orphans its
+    own block. That was too strong. <strong>The miner holds the body and can serve it.</strong> Its
+    peers request it, assemble, and forward, and the next hop does the same, so body and block
+    propagate together with an extra round trip at the frontier. The cost is latency, not
+    failure.</p>
+    <p>Orphaning happens only if the miner <strong>will not or cannot serve</strong> &mdash; it
+    publishes commitments and goes offline, or refuses. So relay-and-wait is not required. Serving
+    is.</p>
+    <p>Which is the better way to put the whole change. Today, publishing a block discharges the
+    miner's obligation completely. Under this design it does not: publishing commitments is half of
+    it, and the miner stays on the hook for any body nobody else has, until it has spread. That also
+    makes bounded prefill a latency optimisation rather than a necessity, and it is left open on
+    those terms.</p>
+  </div>
+
+  <div class="note">
+    <span class="lbl">Where the new commitments live</span>
+    <p>The coinbase reaches the header only as a hash. It is the first transaction in the block, so
+    its hash is the first merkle leaf and the header carries only the root. That is why the header
+    stays 80 bytes however much the coinbase grows, and why this lineage already put the Smartnode
+    and quorum roots there rather than inventing header fields.</p>
+    <p>It is still fully committed, since changing one byte changes the coinbase hash, the merkle
+    root, the header, and voids the proof of work. And a light client can still read it with one
+    extra step: the coinbase transaction plus a merkle path proving it is leaf zero. That machinery
+    already exists here, because the simplified Smartnode list diff ships exactly that pairing so a
+    client can verify the list root against a header it trusts. The state root verifies the same way
+    through the same code.</p>
+  </div>
+
+  <h3>Accepting a block</h3>
+  <p>This is where the design lives. Today a node either has a block or does not. Here, having the
+  commitments and having the bodies become two separate facts, and a block can sit between them
+  indefinitely.</p>
+
+  <figure>
+    <div class="fbox">
+      <svg viewBox="0 0 900 258" role="img" aria-label="Block acceptance as a state machine: header valid, then commitments valid, then a bodies-incomplete state that retries against any peer, then bodies complete, then connected. The incomplete state is never marked invalid, because doing so would permanently reject a chain other nodes accept.">
+        <defs>
+          <marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,1 L9,5 L0,9 z" fill="currentColor"/>
+          </marker>
+          <marker id="ar3n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,1 L9,5 L0,9 z" fill="#A9501C"/>
+          </marker>
+        </defs>
+
+        <rect x="14" y="92" width="146" height="58" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+        <text x="87" y="117" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="currentColor">Header valid</text>
+        <text x="87" y="134" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="currentColor" opacity=".7">proof of work</text>
+
+        <line x1="160" y1="121" x2="190" y2="121" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar3)"/>
+
+        <rect x="194" y="92" width="156" height="58" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+        <text x="272" y="117" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="currentColor">Commitments valid</text>
+        <text x="272" y="134" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="currentColor" opacity=".7">merkle root, no duplicates</text>
+        <text x="272" y="172" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="currentColor" opacity=".6">no bodies needed &mdash; cheap to reject</text>
+
+        <line x1="350" y1="121" x2="382" y2="121" stroke="#A9501C" stroke-width="1.6" marker-end="url(#ar3n)"/>
+
+        <rect x="386" y="92" width="156" height="58" rx="2" fill="none" stroke="#A9501C" stroke-width="1.8"/>
+        <text x="464" y="117" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="#A9501C">Bodies incomplete</text>
+        <text x="464" y="134" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="#A9501C" opacity=".85">durable, survives restart</text>
+
+        <path d="M410 92 C410 46, 518 46, 518 92" fill="none" stroke="#A9501C" stroke-width="1.5" marker-end="url(#ar3n)"/>
+        <text x="464" y="42" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="#A9501C">retry, any peer, own schedule</text>
+        <text x="464" y="172" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="#A9501C">never marked invalid</text>
+
+        <line x1="542" y1="121" x2="574" y2="121" stroke="#A9501C" stroke-width="1.6" marker-end="url(#ar3n)"/>
+
+        <rect x="578" y="92" width="146" height="58" rx="2" fill="none" stroke="#A9501C" stroke-width="1.8"/>
+        <text x="651" y="117" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="#A9501C">Bodies complete</text>
+        <text x="651" y="134" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="#A9501C" opacity=".85">nStatus bit 256</text>
+
+        <line x1="724" y1="121" x2="754" y2="121" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar3)"/>
+
+        <rect x="758" y="92" width="128" height="58" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+        <text x="822" y="117" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="currentColor">Connected</text>
+        <text x="822" y="134" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="currentColor" opacity=".7">unchanged path</text>
+
+        <text x="14" y="226" font-family="IBM Plex Serif, serif" font-size="13" fill="currentColor" opacity=".85">Marking an incomplete block invalid would permanently reject a chain other nodes accept.</text>
+        <text x="14" y="246" font-family="IBM Plex Serif, serif" font-size="13" fill="currentColor" opacity=".85">Holding it and retrying costs only liveness, so the give-up timeout is policy, never validity.</text>
+      </svg>
+    </div>
+    <figcaption>The two copper states are the whole addition. Everything to the left of them is the
+    existing acceptance path made cheaper, and everything to the right is untouched.</figcaption>
+  </figure>
+
+  <h3>Fetching bodies</h3>
+  <p>Requests name a height and an index, not a hash. Commitment blocks are the chain, so every
+  node holds every commitment forever, which makes a position a universal address in a way it
+  never was before.</p>
+
+  <figure>
+    <div class="fbox">
+      <svg viewBox="0 0 900 190" role="img" aria-label="A request names a block height and index. The requester reads the committed identifier at that position from its own copy of the chain. The server returns the body from contiguous storage. The requester hashes the body and compares it to the identifier it already had.">
+        <defs>
+          <marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,1 L9,5 L0,9 z" fill="currentColor"/>
+          </marker>
+        </defs>
+        <rect x="14" y="52" width="188" height="66" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+        <text x="108" y="78" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="currentColor">Ask</text>
+        <text x="108" y="97" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" fill="#A9501C">height 1427554, #37</text>
+        <text x="108" y="112" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="currentColor" opacity=".65">a few bytes, not 32</text>
+
+        <line x1="202" y1="85" x2="240" y2="85" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar4)"/>
+
+        <rect x="244" y="52" width="188" height="66" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+        <text x="338" y="78" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="currentColor">Look up locally</text>
+        <text x="338" y="97" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".78">committed identifier</text>
+        <text x="338" y="112" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="currentColor" opacity=".65">already on disk</text>
+
+        <line x1="432" y1="85" x2="470" y2="85" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar4)"/>
+
+        <rect x="474" y="52" width="188" height="66" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+        <text x="568" y="78" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="currentColor">Server returns body</text>
+        <text x="568" y="97" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity=".78">one contiguous read</text>
+        <text x="568" y="112" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="currentColor" opacity=".65">stored in block order</text>
+
+        <line x1="662" y1="85" x2="700" y2="85" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar4)"/>
+
+        <rect x="704" y="52" width="182" height="66" rx="2" fill="none" stroke="#A9501C" stroke-width="1.6"/>
+        <text x="795" y="78" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="13" font-weight="600" fill="#A9501C">Verify</text>
+        <text x="795" y="97" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="#A9501C">hash(body) = identifier</text>
+        <text x="795" y="112" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="#A9501C" opacity=".8">no trust in the server</text>
+
+        <text x="14" y="160" font-family="IBM Plex Serif, serif" font-size="13" fill="currentColor" opacity=".85">A range request is the default shape, which makes batching free and rate accounting bounded.</text>
+        <text x="14" y="178" font-family="IBM Plex Serif, serif" font-size="13" fill="currentColor" opacity=".85">No global index from identifier to file position is needed on the serving side.</text>
+      </svg>
+    </div>
+    <figcaption>Position addressing removes a structure that would otherwise reach roughly 200 GB a
+    year: a map from every transaction that ever existed to a byte offset. A per-block offset table
+    replaces it.</figcaption>
+  </figure>
+
+  <h3>Reorganising</h3>
+  <p>Disconnecting a block needs the full bodies, not just undo data. The disconnect path walks
+  every transaction's inputs and outputs to unwind the address, spent and future indexes, dispatches
+  on special-transaction type, and pushes the bodies back into the mempool. So the recent window is
+  one window rather than two, and it can never be body-free at any depth a node might disconnect.</p>
+  <p>Following a branch never seen before is the genuinely new failure. The node holds that branch's
+  commitments and lacks its bodies, and must fetch them from peers who may be committed to the other
+  side. The rule is to stay on the chain you can validate, and accept sitting behind until the data
+  arrives.</p>
+
+  <h3>Bootstrapping a node</h3>
+  <p>This is the most security-sensitive path in the design, because a joining node has no history,
+  no state, and must ask strangers for everything. The anchor rules from section 07 are what make
+  it safe, and they are load-bearing at every step below.</p>
+  <ol class="steps">
+    <li><span class="s">01</span><p><span class="t">Pick a base block, and require it to be ChainLocked</span>Not merely buried. A ChainLock is a signature by an identified, collateralised quorum, and that is the anchor &mdash; not accumulated work, which is rentable by the hour. The base must also sit at least 720 blocks back, matching the window floor.</p></li>
+    <li><span class="s">02</span><p><span class="t">Verify the lock against a quorum you derived yourself</span>Membership comes from the Smartnode root already committed in every coinbase, syncable from any peer and checked against headers you hold. Never from whoever is offering you the snapshot.</p></li>
+    <li><span class="s">03</span><p><span class="t">Bound the transfer before starting it</span>Read the record count and byte size committed beside the root, so a hostile source cannot stream hundreds of gigabytes before a mismatch becomes detectable. Fetch in chunks with per-chunk hashes so a bad source is caught early rather than at the end.</p></li>
+    <li><span class="s">04</span><p><span class="t">Recompute, do not trust</span>Run the accumulator over everything loaded &mdash; coins, asset records, Smartnode state &mdash; and confirm it reproduces the committed root. One pass. This proves the snapshot is the state the quorum signed, and makes the source irrelevant.</p></li>
+    <li><span class="s">05</span><p><span class="t">Fill the window and validate forward</span>Fetch bodies for the last 720 blocks and connect them normally from the verified base.</p></li>
+    <li><span class="s">06</span><p><span class="t">Run</span>A miner or ordinary node is now fully validating and holds no history at all.</p></li>
+  </ol>
+
+  <div class="note new">
+    <span class="lbl">Why this is a prerequisite, not a refinement</span>
+    <p>Without a verifiable snapshot, a node holding only a recent window has no route to a
+    validated tip except replaying from genesis, which needs every body. It would then hold
+    everything, and only Smartnodes would benefit from decoupling &mdash; but Smartnodes hold
+    everything anyway. The state commitment is what gives the design anyone to be useful to.</p>
+  </div>
+
+  <div class="note risk">
+    <span class="lbl">What goes wrong without steps 01 and 02</span>
+    <p>Verifying only that the snapshot reproduces a root in a most-work header chain is
+    <strong>SPV security</strong>. A header chain proves work, not validity, so a node that cannot
+    replay will accept a state containing money that never existed if the attacker's fork looks
+    heaviest. Today no amount of hashrate can do that to a replaying node.</p>
+    <p>Recovery is worse than the attack. To leave a bad chain the victim must disconnect below its
+    snapshot base, where it has no bodies and no undo data, so it wedges and has to be rebuilt by
+    hand. Step 01 is what removes this, by resting the anchor on collateral instead.</p>
+  </div>
+
+  <div class="note">
+    <span class="lbl">Two failure modes that are not attacks on the state</span>
+    <p><strong>Hang without disconnect.</strong> Block download has stall detection and timeouts;
+    the snapshot transfer and the body scheduler have none. A source that dribbles forever is
+    currently indistinguishable from a slow one. Both need the rules blocks already have.</p>
+    <p><strong>The address list you cannot use yet.</strong> The chain publishes every Smartnode's
+    address, and that is the one address source an attacker controlling your peer discovery cannot
+    poison. But the thread that opens those connections waits until the chain is synced, so it is
+    inert during exactly the window where it would break an eclipse.</p>
+  </div>
+
+  <h3>Looking up history</h3>
+  <p>Any Smartnode can answer, because every Smartnode holds everything and the chain publishes
+  their addresses. A wallet rescanning, an exchange crediting a deposit, an explorer or an auditor
+  asks by position and verifies by hash.</p>
+  <div class="note">
+    <span class="lbl">What this buys over deleting history</span>
+    <p>Kaspa prunes everything past about three days and Grin discards spent outputs permanently.
+    Both are proof of work, both work, and both answer "show me an old transaction" the same way:
+    they cannot, at the protocol level. An archival node there cannot even be synced from the
+    network, only copied from another archive's disk.</p>
+    <p>Keeping commitments forever means the network always knows exactly what it is missing. Every
+    transaction that ever existed stays nameable from the chain alone. That is the precondition for
+    every retention guarantee, challenge, coverage metric or repair loop &mdash; none of which a chain
+    that deleted its own index can ever add.</p>
+  </div>
+</section>
+
+<section id="rpc">
+  <h2><span class="num">09</span>RPC surface</h2>
+  <p class="lede">Two genuinely new commands. Everything else is an existing call changing
+  behaviour or gaining a field.</p>
+
+  <h3>Calls that gain a new failure mode</h3>
+  <p>Anything returning transaction <em class="n">contents</em> rather than identifiers can now
+  fail on a node holding only a recent window. The shape does not change. What changes is that
+  "not available here" becomes a legitimate answer, and it should be an explicit documented error
+  rather than an empty result &mdash; otherwise a caller cannot tell an absent transaction from an
+  unheld one.</p>
+
+  <div class="tw">
+  <table>
+    <thead><tr><th>Call</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td>getblock, verbosity 2</td><td>Returns full transaction objects</td></tr>
+      <tr><td>getrawtransaction</td><td>The identifier index behind it becomes optional</td></tr>
+      <tr><td>getspecialtxes</td><td>Returns special transactions from a block</td></tr>
+      <tr><td>getblockstats</td><td>Computes fee and size statistics over bodies</td></tr>
+      <tr><td>REST endpoints</td><td>Same paths underneath</td></tr>
+      <tr><td>ZMQ raw block</td><td>Publishes a disk read; must materialise first</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>One family gets better</h3>
+  <p>Inclusion proofs work over identifiers, and <strong>a commitment block is exactly an
+  identifier list</strong>. So proof generation and verification, along with getblock at verbosity
+  one, become cheap and universally available &mdash; including on a node holding no bodies at all.
+  A genuine improvement rather than a survival.</p>
+
+  <h3>The two new commands</h3>
+  <ol class="steps">
+    <li><span class="s">01</span><p><span class="t">Load a snapshot</span>Read a state snapshot and verify it against the committed root. There is a hidden command to write one today and no counterpart to load one. Required for the mining and ordinary tiers to exist at all, and its output format has to grow to cover asset and Smartnode state as well as coins, which breaks compatibility with anything reading it now.</p></li>
+    <li><span class="s">02</span><p><span class="t">Fetch or repair a body range</span>For an archive backfilling, or an operator recovering a gap. The only thing here with no existing analogue anywhere in the tree.</p></li>
+  </ol>
+
+  <div class="note">
+    <span class="lbl">Fields, not commands</span>
+    <p>Two things want reporting and neither needs a method of its own. <strong>Body store
+    status</strong>, meaning ranges held, disk used and gaps, belongs in the chain info call.
+    <strong>Whether a block is body-complete</strong>, the new state from section 05, belongs as a
+    field in block output.</p>
+    <p>A new command is API surface maintained forever. A new field costs nothing to third parties
+    that ignore it.</p>
+    <p>A third belongs here too: <strong>per-peer miss rates and per-range coverage</strong>. Section
+    18 argues for collecting it from day one rather than with the retention layer, and reporting it
+    is a field, not a method.</p>
+  </div>
+
+  <h3>Mining needs negotiation, not new calls</h3>
+  <p>The template and submit calls both stay. The template needs a rule or capability string, the
+  way segwit used its own marker, and submit has to accept both serialisations. Parameters and
+  rules rather than new methods &mdash; and precisely the part external pool software has to be
+  taught, which is why it sits on the schedule risk rather than the engineering one.</p>
+</section>
+
+<section id="adversarial">
+  <h2><span class="num">10</span>Adversarial surface</h2>
+  <p class="lede">Serving history by request is entirely new code. The existing transaction request
+  path never touches disk, so none of its protections transfer.</p>
+
+  <p>This section covers the surface the protocol creates. <strong>Section 18 is the full threat
+  model</strong>, including the attacks that use it &mdash; starving a Smartnode's quorum
+  contribution through the same lock that serves bodies, and turning the network's own retry loop
+  into sustained load against the tier.</p>
+
+  <h3>Amplification</h3>
+  <p>A request entry is 36 bytes and can pull a transaction of up to <strong>1,000,000 bytes</strong>
+  &mdash; the consensus limit, not the standardness cap &mdash; so roughly 28,000 times over.
+  Incoming requests are capped at 50,000 entries per message, so one maximal request can name
+  50 GB, against up to 125 inbound peers.</p>
+
+  <p>The only backpressure is the send buffer, and the disk read happens before the push, so an
+  attacker draining slowly keeps the server seeking. The upload target that bounds block serving is
+  enforced only on the block path and the mempool handler, so body traffic falls outside it
+  entirely.</p>
+
+  <div class="note risk">
+    <span class="lbl">The honest traffic looks identical</span>
+    <p>Retention refill produces the same scattered-read profile as the attack. At steady state the
+    network does this to itself, so any defence has to distinguish the two, and identity is the only
+    thing that can. That is another reason the Smartnode tier being identified and addressable from
+    the chain matters more than it first appears.</p>
+  </div>
+
+  <h3>A privacy regression</h3>
+  <p>Today a peer can only pull a transaction from the mempool if it asked for the mempool first and
+  the transaction predates that request. The rule exists to stop a peer probing whether a node has
+  accepted a given transaction. Serving by identifier from a store written at mempool acceptance
+  bypasses it, and anyone could then test acceptance the instant it happens.</p>
+
+</section>
+
+<section id="attest">
+  <h2><span class="num">11</span>What a quorum attests to</h2>
+  <p class="lede">The proposal was that proof of work mines the block but a Smartnode quorum must
+  approve that the network holds the bodies of every included transaction, and that a block without
+  that approval is orphaned.</p>
+
+  <div class="note new">
+    <span class="lbl">Decided &mdash; 12 September 2026</span>
+    <p><strong>The attestation is a record, not a validity gate.</strong> Block validity is
+    unchanged. No quorum veto, no halt condition, no censorship surface, no change to chain
+    selection, and no new consensus field. The reasoning is below, and what remains to build is at
+    the end of this section.</p>
+  </div>
+
+  <h3>What such an attestation can actually carry</h3>
+  <p>A quorum member can only attest that the data exists once it holds the bodies and has
+  assembled the block. But assembling and validating a block is exactly what adopting it as your
+  tip means. So a signature reading "I hold every body in this block" carries the same information
+  as one reading "this is my tip."</p>
+
+  <p>That second signature already exists. <strong>A ChainLock already means a quorum of Smartnodes
+  each independently validated and adopted that block</strong>, which under this design necessarily
+  means each held every body in it. The attestation is not new information. It is the same fact,
+  signed by the same parties, at the same moment.</p>
+
+  <p>So the real proposal is <em class="n">make ChainLocks mandatory for block validity rather than
+  advisory</em>. It deserves deciding as that, on its own merits, rather than arriving at sideways
+  through a data-availability argument &mdash; because withholding is already defeated by the tip
+  regime, where an unassemblable block never becomes anyone's tip and its producer is never its only
+  possible source.</p>
+
+  <h3>Option A &mdash; the attestation is a gate</h3>
+  <p>A block cannot carry a signature over itself, so the gate cannot be "wait and see whether a
+  ChainLock arrives". That would make validity depend on a timeout, and a timeout is a consensus
+  parameter that nodes with different network views will disagree about. The constructible form is
+  that <strong>the attestation rides in the next block</strong>: a block is invalid unless it
+  carries a valid quorum signature over its parent. Inspectable, no clock involved, and with
+  precedent in Decred's ticket votes.</p>
+
+  <p>What it buys is real: availability becomes an explicit, on-chain, signed fact by identified and
+  collateralised parties, and Smartnodes become a genuine second security tier. What it costs is
+  equally real. If the entire Smartnode set vanished today, Raptoreum would keep producing blocks
+  and only lose ChainLocks and InstantSend. Under Option A <strong>the chain halts</strong>, because
+  no miner can produce a valid block without a quorum signature over its parent.</p>
+
+  <h3>Option B &mdash; the attestation is a record</h3>
+  <p>The same signature, recorded, with no effect on validity. It buys the one thing an attestation
+  genuinely provides and nothing else here does: identified, collateralised parties on record saying
+  they hold this data. That is what turns retention from a hope into an obligation that can later be
+  enforced, and you cannot penalise a party that never promised anything. It is what Flow's
+  collection guarantee does, and the deferred retention layer will need it either way.</p>
+
+  <div class="tw">
+  <table>
+    <thead><tr><th></th><th>A &mdash; gate</th><th>B &mdash; record</th></tr></thead>
+    <tbody>
+      <tr><td>Availability at block time</td><td>No gain over the tip regime</td><td>No gain over the tip regime</td></tr>
+      <tr><td>Accountability for retention</td><td>Yes</td><td>Yes</td></tr>
+      <tr><td>Smartnodes as a security tier</td><td>Yes, with a veto</td><td>No</td></tr>
+      <tr><td>Chain halts if quorums stall</td><td>Yes</td><td>No</td></tr>
+      <tr><td>Censorship surface</td><td>Yes</td><td>No</td></tr>
+      <tr><td>Needs the signing-attempts fix first</td><td>Yes, blocking</td><td>No</td></tr>
+      <tr><td>New consensus field</td><td>Yes</td><td>No</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="note risk">
+    <span class="lbl">One defect changes status, and it is now a prerequisite</span>
+    <p>The signing-attempts process is deliberately skipped here and fails when two blocks compete
+    at one height. Choosing the record over the gate means it can no longer stop the chain, which is
+    what that decision bought. But it is the only defence against the single attack that survives
+    the relay rule, so it moves from worth-fixing to <strong>required, and before the fetch
+    protocol</strong>.</p>
+  </div>
+
+  <h3>Manufactured quorum splits</h3>
+  <p>This is how the chain behaves today. A quorum member signs only the tip it has connected, and
+  refuses to sign twice at the same height. When two blocks compete at one height the signatures
+  split, no lock forms, and that height falls back to proof-of-work finality. Nothing new.</p>
+
+  <p><strong>What decoupling changes is who controls it.</strong> Today competing blocks at one
+  height are an accident of near-simultaneous mining: rare, brief, nobody's to schedule. Under
+  decoupling an attacker manufactures the condition by choosing who receives the transaction data
+  and when.</p>
+
+  <ol class="steps">
+    <li><span class="s">01</span><p><span class="t">Deliver selectively</span>Mine a block, give its data to part of the quorum and withhold from the rest.</p></li>
+    <li><span class="s">02</span><p><span class="t">The quorum splits its signatures</span>Those with the data sign your block. The rest are on the honest sibling and sign that.</p></li>
+    <li><span class="s">03</span><p><span class="t">The data then spreads normally, and it does not help</span>Whoever has it serves it, and gossip repairs availability within seconds. Both halves of the quorum have already spent their signature for that height, and there is no second round.</p></li>
+  </ol>
+
+  <div class="note">
+    <span class="lbl">Why the obvious objection does not hold</span>
+    <p>"The nodes that have the data will rebroadcast it" is correct and beside the point. The
+    attack never depended on denying data. It depends on the quorum committing signatures before the
+    data finishes spreading, and on the one-signature-per-height rule making that split permanent.</p>
+    <p><strong>Severity is bounded.</strong> No fork and no halt. One height loses near-instant
+    finality and falls back to proof of work, which reopens a double-spend window that locks
+    normally close. It also needs the attacker to catch a race rather than being available on
+    demand.</p>
+  </div>
+
+  <div class="note">
+    <span class="lbl">Why B</span>
+    <p>Option A is a decision to make Raptoreum a hybrid chain, where proof of work proposes and a
+    collateralised quorum disposes. Coherent and defensible, but not justified by the availability
+    problem, which the tip regime already solves, and it buys a halt condition and a censorship
+    surface that do not exist today.</p>
+    <p>Option B gets the accountability in full at almost no cost, and the deferred retention layer
+    needs it either way. <strong>A contains B</strong>, so nothing here forecloses the gate if it is
+    ever wanted.</p>
+  </div>
+
+  <h3>What still has to be built</h3>
+  <p>"ChainLocks already do this" is nearly true, and falls short in one specific place.</p>
+
+  <p>A ChainLock is a recovered threshold signature. <strong>By construction it identifies no
+  individual signer</strong>, which is the entire point of threshold signatures. So it proves that a
+  quorum adopted the block, and therefore that a quorum held its bodies, but it names nobody who can
+  later be held to it. Accountability needs a party.</p>
+
+  <p>The attributable information exists and is thrown away. Each signature share carries the index
+  of the quorum member that produced it, so every contribution is attributable while the signing
+  session runs. Those shares live in memory and are discarded once the recovered signature is
+  assembled.</p>
+
+  <p>So the work reduces to <strong>retaining attributable attestations</strong>, either by
+  persisting the contributing shares alongside the recovered signature, which is cheapest and reuses
+  the existing wire format, or by adding a distinct availability message that members sign and that
+  is kept.</p>
+
+  <div class="note risk">
+    <span class="lbl">Carry this into the retention design</span>
+    <p>A ChainLock share asserts "this is my tip", which implies <strong>having</strong> the bodies,
+    not promising to <strong>keep</strong> them. Enforcement eventually wants an explicit retention
+    promise, and that is a choice inside option B rather than a settled part of it.</p>
+    <p>None of it blocks decoupling. It blocks challenges, because a challenge can only penalise a
+    party that promised something, so it should be built before the retention layer rather than
+    before the format work.</p>
+  </div>
+</section>
+
+<section id="priorart">
+  <h2><span class="num">12</span>Prior art</h2>
+  <p class="lede">Several production chains split block data from block commitments. Every one of
+  them bought the split by removing the ordering layer's need to validate the data.</p>
+
+  <div class="tw">
+  <table>
+    <thead><tr><th>Chain</th><th>What it does</th><th>What it gave up</th></tr></thead>
+    <tbody>
+      <tr><td>Flow</td><td>Blocks carry collection hashes, not transactions. Consensus nodes work from the hash and never inspect bodies.</td><td>Consensus nodes execute nothing. Validity is established afterwards by execution nodes and policed by verification nodes.</td></tr>
+      <tr><td>Ethereum</td><td>A commitment in the execution layer; data on a separate gossip network, held by consensus clients, discarded after about 18 days.</td><td>Blobs are opaque to the virtual machine. No node needs them to compute state.</td></tr>
+      <tr><td>Ethereum, PeerDAS</td><td>Blob data split into 128 columns, each node holding and serving a subset. Live since December 2025.</td><td>Same. This is the sharding model deferred here, running in production.</td></tr>
+      <tr><td>Celestia</td><td>Two-dimensional erasure coding, namespaced trees, light nodes sampling random chunks.</td><td>Executes nothing at all.</td></tr>
+      <tr><td>Segwit</td><td>Witness data separable and committed. In this tree's own lineage.</td><td>A node that does not fetch it cannot validate, only trust.</td></tr>
+      <tr><td>Kaspa</td><td>Proof of work. Prunes all block and transaction data past about three days, held together by compact work proofs plus the same accumulator and state commitments proposed here.</td><td>Deletes the data. An archive cannot even be synced from the network, only copied from another archive.</td></tr>
+      <tr><td>Grin</td><td>Proof of work. Cut-through removes spent outputs permanently; a node needs headers, the output set and kernels.</td><td>Deletes the data, provably and permanently.</td></tr>
+      <tr><td>Solana</td><td>Validators routinely bootstrap from state snapshots rather than replaying. Verified three ways: recompute the hash over what was loaded, check the fraction of stake that voted for it, and restrict sources to operator-named validators.</td><td>Does not solve it cryptographically. The load-bearing leg is an identified, stake-weighted set &mdash; the model section 07 borrows.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="note new">
+    <span class="lbl">Three groups, and only two are occupied</span>
+    <p><strong>Delegate validation away and keep the data:</strong> Flow, Celestia, Ethereum. All
+    proof of stake, all with identified proposers.</p>
+    <p><strong>Keep validation and delete the data:</strong> Kaspa, Grin. Both proof of work, neither
+    guaranteeing history is retained anywhere.</p>
+    <p><strong>Keep validation, keep the data, move it with a guarantee:</strong> nobody. That third
+    line is this design.</p>
+  </div>
+
+  <p>The Kaspa toolkit supplies the state commitments and the Flow structure supplies an accountable
+  storage tier, so both halves have working precedent. Nobody has combined them, which is either the
+  interesting part or the warning depending on appetite.</p>
+
+  <p>One structural note rather than a scheduling one: the sampling family arrived with proof of
+  stake because sampling committees must be drawn from a known set, and anonymous miners cannot be
+  sampled. That is why this chain is better placed than Bitcoin &mdash; the Smartnode tier already
+  <em class="k">is</em> that set.</p>
+
+</section>
+
+<section id="ledger">
+  <h2><span class="num">13</span>Change ledger</h2>
+  <p class="lede">The surprising result of the analysis is how much of the chain is untouched, and
+  how concentrated the new work is.</p>
+
+  <div class="ledger">
+    <div class="led keep">
+      <h4>Unchanged</h4>
+      <p class="sub">Works as-is over a commitment block</p>
+      <ul>
+        <li>The block header, byte for byte. The merkle root already commits to identifiers and there is no witness variant to reconcile.</li>
+        <li>Proof of work, difficulty, header relay and chain selection by work.</li>
+        <li>Inclusion proofs for light clients, which are built from identifiers alone.</li>
+        <li>Everything below block connection: the transaction loop, script verification, special transactions, the assets subsystem, undo data.</li>
+        <li>ChainLocks and InstantSend, whose lookups all sit inside the recent window.</li>
+        <li>Smartnode registration, which validates collateral through the coins view rather than through history.</li>
+      </ul>
+    </div>
+    <div class="led new">
+      <h4>New</h4>
+      <p class="sub">Has to be designed and built</p>
+      <ul>
+        <li>A second block serialization, selected by a negotiated stream flag rather than a header bit, because the version field is both full and hashed.</li>
+        <li>A second "we have it" fact on each block, and the acceptance layer that understands it.</li>
+        <li>The body store: flat files in block order, in a format that can delete records later even though it will not at first.</li>
+        <li>A position-addressed fetch protocol, in which "I do not have that" is a first-class answer from the first day.</li>
+        <li>An incremental accumulator over chain state, plus a canonical record form for asset state, which has none today.</li>
+        <li>Snapshot loading, anchored on a ChainLock over the base rather than on accumulated work, with the transfer bounded before it starts.</li>
+        <li>A relay rule gating forwarding on self-assembly, and a single predicate for whether the bodies are held that every network-triggered path must consult.</li>
+        <li>Passive collection of miss rates and per-range coverage, shipped with the protocol rather than with the retention layer.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="note">
+    <span class="lbl">Deliberately deferred</span>
+    <p>Retention mechanics, sharding, challenges, incentives, repair and erasure coding. All of it
+    stays available later precisely because the chain keeps the names. Three decisions must still be
+    taken now, since retrofitting them is a data migration rather than a code change: a deletable
+    store format, a non-punitive answer for a miss, and never pruning commitments.</p>
+  </div>
+</section>
+
+<section id="breaks">
+  <h2><span class="num">14</span>What breaks</h2>
+  <p class="lede">Located rather than guessed. Each was read in the tree at tag 2.0.3.01.</p>
+
+  <div class="tw">
+  <table>
+    <thead><tr><th>Where</th><th>Issue</th></tr></thead>
+    <tbody>
+      <tr><td>Update voting</td><td>No free block-version bit; the format selector cannot live in the header</td></tr>
+      <tr><td>Block index flags</td><td>Bit 128 is the chainlock-conflict flag, and it is persisted. Use 256.</td></tr>
+      <tr><td>Validity levels</td><td>The transactions-valid rung cannot be granted over commitments</td></tr>
+      <tr><td>Block check cache</td><td>Materialisation must produce a fresh object or connection short-circuits its own checks</td></tr>
+      <tr><td>Chain selection</td><td>Have-data means connectable, so an incomplete block is either selected or invisible</td></tr>
+      <tr><td>Connect path</td><td>A failed block read aborts the node outright</td></tr>
+      <tr><td>Round voting</td><td>A consensus vote count reads 720 blocks of bodies, asserting on success</td></tr>
+      <tr><td>Transaction index</td><td>Offsets point into block files, so the index breaks and its consumers must be re-pointed</td></tr>
+      <tr><td>Request scheduler</td><td>No primitive for asking a peer for a hash it never announced</td></tr>
+      <tr><td>Initial sync</td><td>Transaction requests are refused outright during initial block download</td></tr>
+      <tr><td>Transaction serving</td><td>The existing path never reads disk; historical serving is entirely new code</td></tr>
+      <tr><td>Bloom filtering</td><td>Runs the filter over full scripts, so it needs bodies</td></tr>
+      <tr><td>Block filter index</td><td>Needs full scripts and undo data; only a full-retention node can build it</td></tr>
+      <tr><td>ZMQ raw block</td><td>Publishes a disk read and must materialise first</td></tr>
+      <tr><td>Message size</td><td>The peer-to-peer limit is 3 MB, below any large block in either format</td></tr>
+      <tr><td>Compact block requests</td><td>The index type cannot name a position past 65,535</td></tr>
+      <tr><td>Block size constants</td><td>The maximum and everything derived from it, including per-block output limits</td></tr>
+      <tr><td>Prune accounting</td><td>Usage and disk checks ignore a third file series</td></tr>
+      <tr><td>ChainLocks cleanup</td><td>Walks every tracked transaction under the two hottest locks, every 30 seconds</td></tr>
+      <tr><td>InstantSend lookups</td><td>Negative results are never cached, so a miss costs repeated database reads forever</td></tr>
+      <tr><td>Reindex</td><td>Rebuilds by scanning block files; body files need a self-delimiting format</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>One thing gets cheaper. The ChainLock safety walk reads whole blocks from disk to recover a set
+  of identifiers. <strong>A commitment block is that set</strong>, given a raw-commitment read
+  distinct from a materialising one.</p>
+
+</section>
+
+<section id="components">
+  <h2><span class="num">15</span>Components to build</h2>
+  <p class="lede">Eight. Two deliver value on their own and depend on nothing else here.</p>
+
+  <div class="ledger">
+    <div class="led keep">
+      <h4>Ships alone</h4>
+      <p class="sub">Useful whether or not decoupling happens</p>
+      <ul>
+        <li><strong>A. State commitment and snapshot sync.</strong> An incremental accumulator over the coins set, the same over asset state once it has a canonical record form, the new coinbase field, a snapshot format covering all three state stores, and the load path that verifies against the committed root.</li>
+        <li><strong>B. ChainLocks and InstantSend volume work.</strong> The cleanup rewrite and negative caching for lock lookups. Two known defects with known fixes, gating any throughput increase either way.</li>
+      </ul>
+    </div>
+    <div class="led new">
+      <h4>Depends on the rest</h4>
+      <p class="sub">The decoupling build proper</p>
+      <ul>
+        <li><strong>C. Block format and serialisation.</strong> The second form, the negotiated stream flag, a raw-commitment read distinct from a materialising one, and materialisation producing a fresh object.</li>
+        <li><strong>D. The acceptance layer.</strong> The two facts, the new validity rung, the thirty call sites, and a durable incomplete-block state machine.</li>
+        <li><strong>E. The body store.</strong> Flat files in block order, written during acceptance, deletable later, self-delimiting so reindex can rebuild it.</li>
+        <li><strong>F. The fetch protocol.</strong> Position-addressed requests, a non-punitive answer for a miss, working during initial sync, batched by range, rate limited and accounted. Modelled on the block-serving path rather than the transaction one, which is the difference between holding the global lock across a disk read and not; and reading from an index the body store owns, so serving touches no chain state at all.</li>
+        <li><strong>G. Block production.</strong> Miner-side emission, template and submit accepting both forms, and coordination with external pool software.</li>
+        <li><strong>H. Migration and activation.</strong> A deployment bit, the dual-format period, and the ecosystem deadline.</li>
+        <li><strong>I. Safety hardening.</strong> The <code>HaveBodies</code> predicate and the audit of every path that may materialise a block; the relay rule; the retry bound; bounded snapshot transfer; stall rules for snapshot and body fetch. Small, and it gates all of the above being safe to run.</li>
+        <li><strong>J. Coverage telemetry.</strong> Per-peer miss rates and per-range coverage, collected passively. Cheap, separable from retention, and required by the activation criterion.</li>
+      </ul>
+    </div>
+  </div>
+
+  <pre class="calc"><b>A</b> ------------------------------&gt; <i>(the tiers can exist)</i>
+<b>B</b> ------------------------------&gt; <i>(volume is survivable)</i>
+<b>J</b> ------------------------------&gt; <i>(coverage becomes measurable)</i>
+
+<b>C</b> --+-- <b>D</b> --+
+     |        |
+     +-- <b>E</b> -- <b>F</b> --+-- <b>I</b> -- <b>H</b>
+     |        |
+     +-- <b>G</b> ------+
+
+<i>I gates H, not the other way round: nothing activates
+until the safety hardening is in.</i></pre>
+
+  <p>A and B are independent of everything and of each other, so they can start immediately.
+  <strong>D is the risk and should be probed before C is committed to.</strong> H is last and waits
+  on all of it.</p>
+
+  <div class="note">
+    <span class="lbl">Not a component, but adjacent</span>
+    <p>Retaining attributable attestations, from section 11. Small, blocked by nothing, and required
+    before any challenge can mean anything, because a recovered threshold signature identifies no
+    signer. It belongs before the retention layer rather than before the format work.</p>
+    <p><strong>Prerequisites in existing code</strong>, which are not new components but must ship
+    before activation: intra-block asset state visibility, and asset undo keyed per transaction.
+    Both are silent divergences today and permanent forks once asset state enters the root, and
+    changing either after activation is itself a hard fork.</p>
+  </div>
+
+</section>
+
+<section id="questions">
+  <h2><span class="num">16</span>Open questions</h2>
+  <p class="lede">Ordered by what blocks the most.</p>
+
+  <ol class="steps">
+    <li><span class="s">01</span><p><span class="t">Is the acceptance-layer rework tractable?</span>The bet stated as engineering. Analysed here and never attempted, and the only part with no reference implementation anywhere. Nothing should be built before it is probed.</p></li>
+    <li><span class="s">02</span><p><span class="t">What does a contract call look like on the wire?</span>Every volume figure assumes payment-shaped transactions of a few hundred bytes. It decides the throughput, which decides the storage trigger, which decides whether the retention deferral is safe or merely postponed.</p></li>
+    <li><span class="s">03</span><p><span class="t">How is the state commitment built?</span>The primitive is missing here and the reference exists. It needs designing for both the coins set and asset state, and it gates whether the mining and ordinary tiers exist at all.</p></li>
+    <li><span class="s">04</span><p><span class="t">Migration and activation</span>Whether there is a rollback path, how long both formats coexist, and what wallets and exchanges must do by when. Those answers constrain the block format and block production, so this cannot be left much longer. Note the stated criterion is coverage data, and <strong>nothing currently produces it</strong> while the deployment mechanism votes by block signalling that cannot see it. Section 18 has the attack that follows.</p></li>
+    <li><span class="s">05</span><p><span class="t">How does a new Smartnode obtain history?</span>Never specified, and the targeted-erasure analysis in section 18 shows it is the attack's delivery mechanism. Fetching from peers makes a hostile fast source the default; copying a datadir is the position this design rejects. Needs multi-source fetch and verification of the store at rest.</p></li>
+    <li><span class="s">06</span><p><span class="t">How is body serving rate-limited and accounted?</span>Smartnodes become public file servers with roughly three-thousand-fold amplification outside any upload accounting.</p></li>
+    <li><span class="s">07</span><p><span class="t">Coordinating the external mining interface</span>Not an engineering problem, which is exactly why it decides schedules.</p></li>
+  </ol>
+
+  <div class="note">
+    <span class="lbl">Closed &mdash; 12 September 2026</span>
+    <p><strong>Gate or record?</strong> Answered: record. Block validity is unchanged. What remains
+    is retaining attributable attestations, and that belongs with the deferred retention layer rather
+    than with decoupling.</p>
+  </div>
+
+  <div class="note new">
+    <span class="lbl">Deferred by decision, not open</span>
+    <p>Retention mechanics, sharding, challenges, incentives, repair and erasure coding. All of it
+    remains available later precisely because the chain keeps the names. Three decisions must still
+    be taken now, since retrofitting them is a data migration rather than a code change: a deletable
+    store format, a non-punitive answer for a miss, and never pruning commitments.</p>
+  </div>
+
+</section>
+
+<section id="risk">
+  <h2><span class="num">17</span>The bet</h2>
+  <p class="lede">Block acceptance would depend on a network fetch, inside the state machine that
+  decides which chain the node is on.</p>
+
+  <p>Several chains split block data from block commitments, and every one of them bought the split
+  by removing the ordering layer's need to validate the data. Flow's consensus nodes work from
+  collection hashes and delegate execution to a different role entirely. Celestia orders and samples
+  and executes nothing. Ethereum's blobs are opaque to the virtual machine. Kaspa and Grin, the two
+  proof-of-work examples, keep validation and delete the data instead.</p>
+
+  <p>Here the bodies are the transactions, and nothing can compute the UTXO set without them. That
+  turns availability from a liveness concern into a validity concern, which is why the incomplete
+  state has to exist at all.</p>
+
+  <div class="note risk">
+    <span class="lbl">Where that leaves it</span>
+    <p>Three groups exist. Delegate validation away and keep the data: Flow, Celestia, Ethereum.
+    Keep validation and delete the data: Kaspa, Grin. Keep validation, keep the data, and move it
+    somewhere with a guarantee: nobody.</p>
+    <p>That third line is this design. The Kaspa toolkit supplies the state commitments, the Flow
+    structure supplies an accountable storage tier, and Solana supplies the snapshot-bootstrap
+    model. All three halves have working precedent. Nobody has combined them.</p>
+  </div>
+
+  <div class="note risk">
+    <span class="lbl">What the security review changed about that</span>
+    <p>An earlier draft closed by saying everything except the acceptance layer is conventional
+    engineering. That is still true of the <em class="n">difficulty</em> and it was misleading about
+    the <em class="n">risk</em>. Three independent adversarial passes found fourteen attacks, and
+    the cheapest one needs 37 bytes. None of them required a novel technique. They exist because a
+    familiar mechanism was pointed at a new state, and a node that asserts rather than returns an
+    error is a remote crash the moment the data is optional.</p>
+    <p>So two things should be probed before anything is built on top: <strong>the acceptance
+    layer</strong>, because it is unprecedented, and <strong>every path that can materialise a
+    block</strong>, because it is entirely precedented and still fatal. Section 18 lists both.</p>
+  </div>
+</section>
+
+<section id="security">
+  <h2><span class="num">18</span>Security review</h2>
+  <p class="lede">Three independent adversarial passes on a different model, briefed to attack
+  rather than confirm, split across theft, consensus disruption and availability. Plus one on the
+  migration window. Every code claim was verified before recording.</p>
+
+  <div class="note">
+    <span class="lbl">Scope</span>
+    <p>Pre-existing network defects are out of scope <strong>unless decoupling makes them
+    reachable, or unless decoupling cannot ship without them fixed</strong>. Several findings below
+    are existing code, listed because this design turns an unreachable assertion into a remote
+    crash, a silent divergence into a permanent fork, or an optional index into a consensus input.</p>
+  </div>
+
+  <h3>Three rules close most of it</h3>
+  <ol class="steps">
+    <li><span class="s">01</span><p><span class="t">Never relay a commitment block you cannot assemble yourself</span>Restores relay atomicity, so a withheld block never propagates as a most-work header. Closes the partition, the mining advantage and the transition split at once.</p></li>
+    <li><span class="s">02</span><p><span class="t">Split the non-punitive rule by regime</span>A miss is normal for history addressed by position. A peer that announced a block keeps today's delivery obligation and today's disconnect. Two reviewers found this independently, and it corrects an earlier recommendation here.</p></li>
+    <li><span class="s">03</span><p><span class="t">One predicate for "do I have the bodies"</span>No network-triggered path may materialise a block without consulting it. This closes the entire remote-crash class below.</p></li>
+  </ol>
+  <p>Plus one that costs almost nothing: <strong>record miss rates and per-range coverage passively
+  from day one</strong>. Ship the metric with the protocol, not with the retention layer. It is the
+  only way targeted erasure becomes visible before it completes, and it is what the activation
+  criterion needs.</p>
+
+  <h3>Critical</h3>
+  <div class="tw">
+  <table>
+    <thead><tr><th>Attack</th><th>Mechanism</th></tr></thead>
+    <tbody>
+      <tr><td>Remote crash of any windowed node, 37 bytes</td><td>The block-serving path is guarded only by the have-data flag and then asserts outright if the read fails. A miner holds commitments for all history and bodies for 720 blocks, so one request for an older block kills it. Pool addresses are public. The same hazard sits on the compact-block, filtered-block, notification and transaction-lookup paths.</td></tr>
+      <tr><td>ChainLock enforcement stalls or kills a node, zero hashrate</td><td>Enforcement disconnects the victim's connectable tip to move to the locked block, which the victim cannot connect without bodies. A failed disconnect partway hits an assertion and the process dies. Unreachable today, because having the header means having the block.</td></tr>
+      <tr><td>Snapshot bootstrap is SPV security</td><td>A header chain proves work, not validity. Recovery is worse than the attack: disconnecting below the base needs bodies the node does not have, so it wedges. Addressed by the anchor in section 07.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>High</h3>
+  <div class="tw">
+  <table>
+    <thead><tr><th>Attack</th><th>Mechanism</th></tr></thead>
+    <tbody>
+      <tr><td>Body-availability partition</td><td>Relay header and commitments widely, bodies to a chosen subset. One block of ordinary mining. Closed by rule 1.</td></tr>
+      <tr><td>Metered-body selfish mining</td><td>Publishing the header stops honest miners racing a competing block; withholding bodies stops them extending it. Both risks removed at once, which classic selfish mining cannot do.</td></tr>
+      <tr><td>Retry-queue poisoning</td><td>Mine a block committing to bodies that exist nowhere, which nothing prevents. Never invalid, never punished, so every node polls every Smartnode forever.</td></tr>
+      <tr><td>Seek-amplified fetch on the main lock</td><td>Worse by disk operations than by bytes: smallest body per distinct file, descending height, ranges straddling boundaries. Served on the main lock it blocks block connection, ChainLocks and a Smartnode's own quorum contributions.</td></tr>
+      <tr><td>Serving as a way to starve a quorum contribution</td><td>Missing a contribution is punished today; decoupling adds an unattributable way to cause the miss, and each resulting ban removes a replica of history.</td></tr>
+      <tr><td>Storage as an economic weapon</td><td>Entirely design-created. Filling blocks costs pocket change in fees while imposing hundreds of gigabytes a year on every Smartnode, uncompensated. An attacker can pull the storage trigger from section 02 for a few thousand RTM.</td></tr>
+      <tr><td>The round-voting assertion becomes reachable</td><td>It reads 720 blocks of bodies and asserts, contradicting the rule that a miss is normal. The fix removes the problem entirely: persist the fact at connect time and the deep rescan disappears.</td></tr>
+      <tr><td>Two existing asset defects become forks</td><td>Every mint in a block checks against pre-block state, so the supply cap is bypassable. And asset undo takes the last matching entry, so a one-block reorg leaves state inflated. Silent today; permanent forks once asset state is committed, so both must ship before activation.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>Medium, and the ones not to skip</h3>
+  <p>The InstantSend safety walk <strong>fails open</strong>, treating a block as safe when it
+  cannot recover its identifier set &mdash; which under this design happens exactly when bodies are
+  missing. Losing sibling blocks' bodies become permanent on an append-only store, roughly 26 GB a
+  year from a five percent miner publishing late. And targeted erasure is invisible to consensus,
+  because an attacker running fast Smartnodes that serve everything except one range breaks no
+  rule and the state root does not need that range.</p>
+
+  <div class="note">
+    <span class="lbl">Miss and timeout are different things</span>
+    <p>The sybil interaction is worse than either half. With part of the Smartnode set answering
+    "not found", and the existing sixty-second wait before another peer is tried, a node that picked
+    a hostile source for a twelve-thousand-transaction block waits a minute per hundred bodies. At a
+    tenth of the set hostile that is one block in ten taking hours, on the critical path to the tip,
+    with the attacker inside the set collecting rewards throughout.</p>
+    <p>The fix is to stop conflating two answers. A <strong>miss</strong> is cheap and honest, must
+    never be punished, and should trigger an immediate re-request elsewhere rather than a wait,
+    because the peer already told you it does not have it. A <strong>timeout</strong> is silence
+    after accepting, and should disconnect exactly as block download does today. Source selection
+    then uses a local throughput score &mdash; preference, not punishment, which is what keeps
+    partial retention shippable later.</p>
+  </div>
+
+  <div class="note done">
+    <span class="lbl">Downgraded: the fail-open safety walk</span>
+    <p>Reported as a live hazard, and on examination close to unreachable once the window exists.
+    The walk covers the tip and five blocks below, the identifier sets are held in memory for
+    connected blocks, and the disk fallback runs only after a restart, where the 720-block window
+    guarantees the data is present. The null branch would need a node missing bodies within six
+    blocks of its own tip.</p>
+    <p>Still worth flipping to fail closed, since it costs nothing and the direction is wrong on
+    principle. Recorded here so it is not re-escalated.</p>
+  </div>
+
+  <div class="note risk">
+    <span class="lbl">Targeted erasure, in more detail</span>
+    <p><strong>What the design already gives you.</strong> The target stays enumerable forever, so
+    an attacker can make a transaction unanswerable but never unaskable. The erasure produces a
+    permanent, nameable, verifiable hole rather than silence &mdash; this position, these Smartnodes
+    asked, none had it. A chain that pruned its identifier lists cannot say that, and for a dispute
+    a hole you can point at is itself evidence.</p>
+    <p><strong>Measure which ranges, not miss rates.</strong> Honest loss and deliberate erasure
+    look nothing alike. Honest loss is oldest-first under disk pressure, or aligned to storage file
+    boundaries, or scattered and small when it is corruption, or a shrinking gap at one end while a
+    node backfills. Deliberate erasure is contiguous, mid-history, aligned to nothing, identical
+    across one operator's nodes, and stable rather than shrinking.</p>
+    <p>The attacker cannot escape that. <strong>To reliably erase a range you must reliably not
+    serve it, and reliable behaviour is what makes a pattern.</strong> Randomising to hide means
+    sometimes serving it, which means it survives.</p>
+    <p><strong>Timing is the whole value.</strong> An alarm that fires when replication of a range
+    drops below a threshold is actionable, because someone can re-seed it. One that fires at zero is
+    an obituary. That, rather than monitoring hygiene, is why the coverage metric ships with the
+    protocol.</p>
+    <p><strong>And it exposes a gap the design never answers: how a new Smartnode obtains history at
+    all.</strong> If the answer is fetching through the body protocol, the attacker's fast nodes are
+    the preferred source by construction and the gap propagates to every new Smartnode
+    automatically &mdash; the attack rides onboarding rather than fighting attrition. If the answer
+    is copying a datadir, that is the position this design exists to reject, and one corrupt source
+    propagates silently because nothing verifies a store at rest.</p>
+  </div>
+
+  <p>The remainder: the retry loop as a peer-steering primitive; a sybil answering "not found" to
+  make one block in ten take hours to assemble; what decoupling adds to a bootstrap eclipse, which
+  is hang-without-disconnect and an unbounded download; opening transaction requests during initial
+  sync; and a reorg past the snapshot base wedging a windowed node.</p>
+
+  <h3>The migration window</h3>
+  <div class="note risk">
+    <span class="lbl">The activation criterion cannot be measured</span>
+    <p>The cutover is meant to be decided by coverage data. But deployment here votes by block
+    signalling, either hashrate or mined quorum commitments, and neither can see whether anybody
+    holds anything. Coverage itself needs challenges, which are deferred.</p>
+    <p>So: signal for the cutover with hashrate, old-format blocks stop, and there is no rollback.
+    If coverage was poor, history is gone and nobody could have objected because the measurement
+    never existed. It is also near-unattributable, since it looks like an honest activation that
+    went wrong. The passive coverage metric above is separable from the retention layer and is what
+    this criterion actually requires.</p>
+  </div>
+
+  <h3>Confirmed safe</h3>
+  <div class="ledger">
+    <div class="led keep">
+      <h4>Verified, not assumed</h4>
+      <p class="sub">Each checked against the code</p>
+      <ul>
+        <li>The attestation decision holds: a stalled quorum delays finality and does not halt the chain.</li>
+        <li>An unassemblable block can never become anyone's tip. Chain selection asserts on it, so a withholder can stall a victim but never make it adopt.</li>
+        <li>Body forgery is blocked: the identifier covers the special-transaction payload, and malleation changes the identifier, so a malleated body is simply the wrong body.</li>
+        <li>Accumulator collisions are blocked, given a canonical element form, because elements pass through a random oracle before multiplication.</li>
+        <li>Smartnode impersonation is blocked by registration uniqueness and the authentication signature over the operator key.</li>
+        <li>Reflection against third parties is blocked: all serving goes over the requester's own connection.</li>
+        <li>Duplicate coinbase identifiers are blocked by the enforced height in the coinbase payload.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="variant">
+  <h2><span class="num">19</span>Build whole, split after</h2>
+  <p class="lede">A variant that removes most of the risk in this document, at the cost of the
+  capacity it was originally for. On the analysis below it is the one to build first.</p>
+
+  <p>Blocks are constructed, relayed, validated and connected <strong>exactly as today</strong>,
+  carrying their transactions with them. Each node then splits the validated block locally into its
+  identifier list and its bodies, keeping the list forever and putting the bodies in the store,
+  where they can be pruned and fetched back. The decoupling becomes a storage transformation rather
+  than a change to the wire.</p>
+
+  <h3>What it removes</h3>
+  <p>The whole acceptance layer, which is section 05 and <strong>the one component with no
+  reference implementation anywhere</strong>. No second serialisation, no negotiated format flag,
+  no split of have-the-block into two facts, no new validity rung, no durable incomplete state,
+  none of the thirty call sites.</p>
+
+  <p>With it goes most of section 18. No withholding, because a block is complete or it does not
+  propagate. No partition of chain selection, no metered-body selfish mining, no manufactured quorum
+  split, no retry-queue poisoning, no assembly-time transaction problem, and no remote crash from a
+  block whose bodies are absent, because the block arrived whole. Mining is untouched, so template
+  and submit handling and every third-party pool implementation carry on unchanged &mdash; which
+  deletes the coordination risk that was the schedule threat.</p>
+
+  <p>And it may not be a consensus change at all. Splitting a validated block for storage is the
+  same class of local decision as pruning is today: no activation, no dual-format window, no
+  ecosystem deadline, no irreversible cutover.</p>
+
+  <h3>What it does not give you</h3>
+  <p><strong>Capacity.</strong> The block on the wire still carries full transactions, so the size
+  cap still bounds how many fit. The original claim was 32 bytes per transaction inside the block,
+  which is what turns a 2 MB cap into sixty thousand transactions instead of five thousand. This
+  variant keeps storage small and leaves the ceiling exactly where it is.</p>
+
+  <p>Getting the capacity means raising the cap, and that is where the honest trade sits. At the tip
+  the wire cost is nearly identical either way, because compact blocks already move short
+  identifiers and the bodies already travelled as ordinary relay. The difference is what a hostile
+  peer can make you download. <strong>A 10 MB block of commitments is cheap to reject; a 125 MB
+  block of transactions is not.</strong> That is the one genuine argument the commitment format has
+  here, and it only begins to matter at caps far above today's.</p>
+
+  <div class="note risk">
+    <span class="lbl">One property weakens</span>
+    <p>In the commitment design the identifier list <em class="n">is</em> the block, so every node
+    necessarily has it and the network provably knows what it is missing. In this variant, keeping
+    the list after pruning the bodies is a local choice. A node could prune everything, and the
+    naming property would hold by convention rather than by construction.</p>
+    <p>Fixable by making leaves-retained the standard pruning mode, but it moves from guaranteed to
+    conventional, and the naming property is what the whole retention argument rests on.</p>
+  </div>
+
+  <h3>What it does to the plan</h3>
+  <p>Four of the ten components largely dissolve: the block format, the acceptance layer, mining and
+  migration. What remains is the state root and snapshot sync, the lock and instant-send volume
+  work, the body store, the fetch protocol, and the telemetry. Those were always the parts with
+  known shapes, and two of them already paid for themselves independently.</p>
+
+  <div class="note done">
+    <span class="lbl">The sequencing this suggests</span>
+    <p>Build the storage transformation and the fetch protocol, which are safe and need no fork, and
+    find out whether contract load actually pushes against the block cap.</p>
+    <p>If it never does, you are finished. If it does, the commitment format is still available, and
+    by then the body store, the fetch protocol and the state root are already running &mdash; which
+    were its prerequisites anyway. Nothing is wasted either way.</p>
+  </div>
+</section>
+
+</main>
+</div>
+</div>

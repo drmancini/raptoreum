@@ -1632,3 +1632,40 @@ The defence that actually works is reading the applied value back out of the run
 `getconnectioncount`, `getblockchaininfo`, the `PERF: relay trickle overridden` log line --
 rather than trusting that the config was written. Every experiment script here now does that
 before it measures anything.
+
+### 2026-09-17 — peer count does not drive relay cost; and a correction on the 100 kB cap
+
+**Peer-count sweep.** Same 1500 tx/s, only the mesh density changed. Peer count was read
+back with `getconnectioncount` rather than assumed, after an earlier attempt showed that
+`addnode` does not limit peers at all (the node redials from `peers.dat`); `connect=` plus
+deleting `peers.dat` is what actually pins it.
+
+| condition | connections (c4/ase/cor/bow) | msghand c4 | msghand ase | msghand cor | msghand bow |
+|---|---|---|---|---|---|
+| full mesh | 21/16/19/11 | 89.3% | 90.3% | 44.2% | 30.1% |
+| sparse | 5/6/6/3 | 78.2% | 85.8% | 46.2% | 28.9% |
+
+A roughly fourfold cut in connections moved msghand by 5-12%, and on one node not at all.
+**Relay cost is per-transaction, not per-peer.** The `ForEachNode` -> `PushInventory` loop
+is therefore not where the ~930 tx/s goes, despite doing a lock, a bloom lookup and a
+`std::set` insert per peer. It also means **930 tx/s is not pessimistic for a realistic
+topology** -- a node with fewer peers does not do better.
+
+**Correction: `MAX_STANDARD_TX_SIZE` is consensus, not policy.** An earlier entry claimed
+the 100 kB cap bound only relay and that the block path was limited only by block size,
+allowing ~13,500 inputs and tens of seconds of hashing in one transaction. That is wrong.
+`ContextualCheckTransaction` (validation.cpp:419) rejects oversize transactions with
+`DoS(100)`/`REJECT_INVALID` whenever DIP0001 is active, and it runs on both the mempool
+path (line 619) and the block path (line 4054). The grep that misled us looked only in
+`consensus/tx_check.cpp`, which carries the older `MAX_LEGACY_BLOCK_SIZE` check.
+
+Corrected: one transaction is capped at ~675 P2PKH inputs, so quadratic sighash costs on
+the order of 67 MB of hashing and tens of milliseconds, with ~20 such transactions fitting
+a 2 MB block. Removing the cap is a **hard fork** and removes that bound.
+
+**The input-count benchmark did not produce usable data and is not reported.** Every row was
+rejected -- first for a flat fee below the size-scaled minimum relay fee, then for
+`txn-mempool-conflict`, then for `bad-txns-oversize` once past 100 kB. A rejected
+transaction short-circuits before signature checking, so the timings measure rejection
+paths. The harness needs a size-scaled fee, non-overlapping UTXOs, and a ceiling of ~675
+inputs. Rerun before any claim about the shape of the curve.
