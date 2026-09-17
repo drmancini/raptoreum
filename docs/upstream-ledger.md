@@ -51,7 +51,7 @@ decoupling direction is settled.
 | `getblocktemplate` runs a full `ConnectBlock` per call | perf-results.md §10 |
 | per-ATMP deep copy of the global assets cache scales with asset count | perf-results.md §17 note |
 | relay cap indexed to block size breaks under decoupling | §8 / §16.3 |
-| **`MAX_DIP0001_BLOCK_SIZE` raised 2 MB -> 8 MB in the rig tree (local, uncommitted)** | big-block testing; **not upstream**. Changes block capacity and the derived relay cap (280/trickle upstream vs 1,120 here). Any rig run using the *default* cap is therefore not measuring shipped relay behaviour. |
+| **`MAX_DIP0001_BLOCK_SIZE` raised 2 MB -> 8 MB on `perf/throughput-rig` only (commit `e55f029d6`)** — NOT on the measurement host's `ft/09` tree | big-block testing; **not upstream**. Changes block capacity and the derived relay cap (280/trickle upstream vs 1,120 here). Any rig run using the *default* cap is therefore not measuring shipped relay behaviour. |
 | InstantSend attestation throughput and its failure mode | §15 / §16 |
 
 ## Local-only — never upstreamed
