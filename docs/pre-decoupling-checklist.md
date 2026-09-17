@@ -1,9 +1,101 @@
 # Code changes before / around decoupling (v1 target ~1,500 tx/s)
 
+> **Revised 2026-09-17 after the twelve-node WAN swarm.** Three things changed:
+> the open question at the bottom of this document is **answered**, the Tier 3
+> relay item is **no longer sufficient and has been promoted to a precondition**,
+> and a new hazard was found that bears directly on the design
+> (quadratic sighash, see Tier 0). Read `docs/perf-results.md` from
+> "relay is the binding constraint" onward for the measurements.
+
+## Tier 0 — the two facts that reorder everything else
+
+**1. Relay, not acceptance, is the binding constraint.** Measured on twelve nodes
+across three continents at 1,500 tx/s offered:
+
+| | |
+|---|---|
+| acceptance | fine -- msghand 61-72% of one core on a 4-thread VPS |
+| relay delivery | **~930 tx/s**, confirmed four independent ways |
+| deficit | ~570 tx/s, accumulating as backlog |
+| schedule-bound? | **no** -- cutting the trickle interval 5x moved it 1.4% |
+| mempool-size dependent? | **no** -- 864 tx/s empty vs 876 tx/s at 133k entries |
+
+Every downstream symptom follows from this: mempools diverge, compact blocks match
+almost nothing, block convergence reaches 35 s against a 15 s interval. None of it
+needs an absorption or block-size explanation, and an earlier entry blaming the
+absorption gap has been retracted.
+
+**Decoupling does not address this.** A commitment block changes what the *block*
+carries; bodies still cross the same relay path at the same rate. Fixing relay is
+therefore a **precondition** for decoupling, not something shipped alongside it.
+
+**2. Quadratic sighash is live, and the 100 kB cap is what contains it.**
+`SigVersion` has one value, `BASE` -- no SegWit, no BIP143 -- and `SignatureHash`
+reserialises the whole transaction per input, so an N-input transaction costs
+O(N^2). `MAX_STANDARD_TX_SIZE` (100 kB) is policy, and its own comment says it is
+there "to mitigate CPU exhaustion attacks".
+
+| limit | kind | binds |
+|---|---|---|
+| `MAX_STANDARD_TX_SIZE` 100 kB | policy | mempool/relay only |
+| `MAX_STANDARD_TX_SIGOPS` 4000 | policy, **not** gated on standardness | ~4,000 P2PKH inputs |
+| `CheckTransaction` | consensus | **no per-tx size limit at all** |
+| block size 2 MB | consensus | ~13,500 inputs in one transaction |
+
+So the mempool path is bounded by sigops even if the size cap is lifted, but the
+**block path is bounded only by block size**. Removing the 100 kB cap without a
+BIP143-style sighash would let any user, for the price of fees, force every node
+into seconds of hashing on a single transaction -- Bitcoin's 2015 megatransaction,
+which is why BIP143 exists.
+
+**This is most likely what motivates the dual validation path**, and it is worth
+being precise about: quorum pre-attestation *concentrates* the cost on quorum
+members rather than removing it, and since full block verification is retained,
+every node still pays O(N^2) when the block arrives. The fix that actually removes
+the cost is BIP143-style sighash -- precompute the hash components once per
+transaction and reuse them across inputs, turning O(N^2) into O(N).
+
+
 Three tiers: what must land *before* decoupling code starts, what is design-independent
 foundation that can go before or in parallel, and what is *part of* the decoupling build
 itself. Parallel validation and the MemPoolAccept port are parked (v1 = ~1,500 tx/s, within
 single-thread capacity).
+
+**3. Decoupling removes the bound that block size currently provides.** Today the block
+carries bodies, so 2 MB of block is 2 MB of validation work. A commitment block carries
+txids, so what it commits to is not bounded by its own size:
+
+| | block holds | implied body bytes |
+|---|---|---|
+| today | 2 MB of bodies | 2 MB -- bounded |
+| decoupled, 32-byte txids | 62,500 txids | up to 6.25 GB at the 100 kB cap |
+| decoupled, cap also removed | 62,500 txids | unbounded |
+
+What makes this survivable is that bodies are validated once at mempool acceptance and
+`ConnectBlock` skips re-verification on a `scriptExecutionCache` hit
+(validation.cpp:1488; `CheckInputsFromMempoolAndCache` inserts with
+`cacheFullScriptStore=true`). **So the CPU story of decoupling rests entirely on that cache
+hitting**, and it is a fixed-size CuckooCache that evicts:
+
+| | |
+|---|---|
+| `-maxsigcachesize` default | 32 MB, half to the script cache = 16 MB |
+| capacity | ~524,288 entries |
+| at 1500 tx/s | ~350 s of arrivals, i.e. ~2.9 blocks at a 2-minute cadence |
+| what `maxmempool=2000` can hold | ~1.5M transactions |
+
+The cache is **smaller than the mempool can be**, so under backlog eviction is certain, and
+an evicted transaction is fully re-validated at block connect -- quadratic sighash included.
+
+Three things therefore have to be decided in the design rather than discovered later:
+
+- a bound on committed body bytes (or committed validation work) per block;
+- a cache sized for the committed set, which makes `-maxsigcachesize` a consensus-adjacent
+  tuning parameter rather than a local one;
+- what a node does when a commitment names a transaction it has never seen -- fetch and
+  fully validate, with no bound, is the default behaviour today.
+
+None of this is measured yet. It is the first thing the architecture session should price.
 
 ## Tier 1 — must precede decoupling (protects the work)
 
@@ -120,12 +212,14 @@ Each of these was on the earlier list as required or primary. All were disproven
   throughput together).
 - `MAX_INV_SZ` message-splitting (only needed if the cap target exceeds 50k, i.e. toward 10K).
 
-## The one measurement that could change the plan
+## The one measurement that could change the plan — ANSWERED 2026-09-17
 
-Single-thread acceptance on representative smartnode hardware, cold cache, mixed tx types.
-If it sits comfortably above 1,500, the parked items stay parked. If a real smartnode does
-~1,200, 1,500 is over budget and parallel validation returns to the v1 path. A day of work,
-and it is the only thing that would undo the "park it" decision.
+Single-thread acceptance on representative smartnode hardware. **Measured on a 4-thread
+VPS carrying 1,500 tx/s: msghand at 61-72% of one core** (89% when blocks come every 3 s,
+because block processing also runs on msghand). Acceptance is not over budget, so
+**parallel validation stays parked**.
+
+What is over budget is relay, which was not on this list at all. See Tier 0.
 
 ---
 

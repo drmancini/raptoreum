@@ -47,6 +47,17 @@ drain() {
 run_one() {   # run_one <tag> <peers>
   echo "=== peers=$2 ==="
   deploy "$2"; drain
+  # A sparse mesh propagates blocks over more hops, so the drain's blocks need
+  # longer to reach everyone. Without this the preflight gate sees mismatched
+  # heights and (correctly) refuses to run.
+  echo "  waiting for height convergence..."
+  for i in $(seq 40); do
+    hs=$(for a in $ALIASES; do
+           timeout 20 ssh -o BatchMode=yes "$(tgt $a)" "$(bas $a)/bin/raptoreum-cli -regtest -datadir=$(bas $a)/data -rpcport=19898 -rpcuser=swarm -rpcpassword=$PW getblockcount" 2>/dev/null
+         done | sort -u | wc -l)
+    [ "$hs" = "1" ] && { echo "  converged after $((i*10))s"; break; }
+    sleep 10
+  done
   bash poll_mempool.sh "runs/poll-$1.txt" $((DUR+60)) 3 &
   local POLL=$!
   ( MINER=cor SKIP_MINER_LOAD=1 bash run_phase1.sh "$1" "$RATE" 999 "$DUR" > "/tmp/$1.out" 2>&1 ) &
