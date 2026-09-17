@@ -37,16 +37,25 @@ there "to mitigate CPU exhaustion attacks".
 
 | limit | kind | binds |
 |---|---|---|
-| `MAX_STANDARD_TX_SIZE` 100 kB | policy | mempool/relay only |
-| `MAX_STANDARD_TX_SIGOPS` 4000 | policy, **not** gated on standardness | ~4,000 P2PKH inputs |
-| `CheckTransaction` | consensus | **no per-tx size limit at all** |
-| block size 2 MB | consensus | ~13,500 inputs in one transaction |
+| `MAX_STANDARD_TX_SIZE` 100 kB | **consensus** while DIP0001 is active | ~675 P2PKH inputs, on both paths |
+| `MAX_STANDARD_TX_SIGOPS` 4000 | policy, not gated on standardness | mempool path |
+| block size 2 MB | consensus | ~20 maximum-size transactions per block |
 
-So the mempool path is bounded by sigops even if the size cap is lifted, but the
-**block path is bounded only by block size**. Removing the 100 kB cap without a
-BIP143-style sighash would let any user, for the price of fees, force every node
-into seconds of hashing on a single transaction -- Bitcoin's 2015 megatransaction,
-which is why BIP143 exists.
+The 100 kB limit is enforced in `ContextualCheckTransaction` (validation.cpp:419) with
+`DoS(100)`/`REJECT_INVALID`, and that function is called from both the mempool path
+(line 619) and the block path (line 4054). It is therefore **consensus, not policy** --
+an earlier revision of this document said otherwise and was wrong. The limit in
+`consensus/tx_check.cpp` is the older `MAX_LEGACY_BLOCK_SIZE` one, which is what misled us.
+
+So quadratic sighash is currently **bounded by consensus**: worst case is ~675 inputs
+hashing ~100 kB each, on the order of 67 MB and tens of milliseconds for one transaction,
+and ~20 such transactions in a 2 MB block. Unpleasant, not fatal.
+
+**What this means for the proposal to remove the cap.** It is a hard fork, not a relay
+policy change, and it removes the only bound on quadratic sighash. Bitcoin's 2015
+megatransaction (1 MB, ~5,570 inputs, ~25 s to validate) is what that regime looks like,
+and BIP143 is what fixed it. RTM has no SegWit -- `SigVersion` has one value, `BASE` --
+so the O(N^2) is live and only the cap holds it down.
 
 **This is most likely what motivates the dual validation path**, and it is worth
 being precise about: quorum pre-attestation *concentrates* the cost on quorum
