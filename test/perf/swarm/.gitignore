@@ -1,0 +1,3 @@
+# Generated per-deployment: contains the RPC credential and the mesh addnode
+# list. Regenerate with gen_configs.py; never commit.
+conf/

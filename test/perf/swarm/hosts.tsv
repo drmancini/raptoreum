@@ -1,0 +1,13 @@
+# alias ssh_target                thr mem_mb maxmempool base                region    notes
+use     usa-east.raptoreum.zone   6   13336  2000       /home/mike/rtmswarm us-east   prod-mainnet
+usw     usa-west.raptoreum.zone   4   5683   1500       /home/mike/rtmswarm us-west   prod-mainnet
+ase     asia-east.raptoreum.zone  4   5485   1500       /home/mike/rtmswarm asia-east prod-mainnet
+asw     asia-west.raptoreum.zone  6   13996  2000       /home/mike/rtmswarm asia-west prod-mainnet
+eur     europe.raptoreum.zone     6   12880  2000       /home/mike/rtmswarm eu        prod-mainnet
+cor     core.raptoreum.zone       12  53597  2000       /home/mike/rtmswarm eu        2xrtmd+osmiumd
+dev     dev.raptoreum.zone        4   9351   2000       /home/mike/rtmswarm eu        clean
+c1      rtm-c1                    4   4357   1000       /home/mike/rtmswarm unknown   clean
+c2      rtm-c2                    4   4404   1000       /home/mike/rtmswarm unknown   osmiumd
+c3      rtm-c3                    4   4790   1000       /home/mike/rtmswarm unknown   clean
+c4      rtm-c4                    4   1503   600        /home/mike/rtmswarm unknown   tight-ram
+bow     bowser                    24  58068  2000       /data/rtmswarm      lan       lan-tag-separately
