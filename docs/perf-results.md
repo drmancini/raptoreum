@@ -1434,9 +1434,9 @@ measure this, for instance) would be flat; a growing queue looks exactly like th
    term and it is unavoidable without changing the constant.
 
 2. *The ceiling is relay throughput.* For offered R and serviced S, a growing queue gives
-   dL/dt = (R-S)/S. The measured slope is 0.65, so S is about 1500/1.65 = **909 tx/s**
-   against 1500 offered. Relay services roughly 60% of the offered rate and the rest
-   accumulates.
+   dL/dt = (R-S)/S. Least-squares on the buckets gives slope 0.602, so S is about
+   1500/1.602 = **936 tx/s** against 1500 offered -- a 564 tx/s deficit that accumulates.
+   Relay services roughly 62% of the offered rate.
 
 **This reorders the whole picture.** Acceptance sustains 1500 tx/s at 61-72% of one core on
 a 4-thread VPS. Relay does not. Every earlier observation follows from this without needing
@@ -1450,7 +1450,12 @@ decoupling does for block size, the relay path has to carry the full transaction
 backlog grows regardless. The relay work in Tier 3 is therefore not an accompaniment to
 decoupling; on this evidence it is a precondition for any of it.
 
-**Caveats.** The absolute value of S is measured with `-debug=mempool` on, which costs each
+**Caveats.** An operator `tail -f` on all twelve debug logs began 101 s into the 171 s load
+phase, adding roughly 225 kB/s of outbound per node against ~550 kB/s of relay upload.
+Restricting the fit to buckets before it started gives S = 936 tx/s; including everything
+gives 921. A 1.6% difference, so the finding is not an artefact of it -- but log streaming
+must be off during future runs. The absolute value of S is also measured with
+`-debug=mempool` on, which costs each
 node ~1500 log lines/s; the true ceiling is somewhat higher. The queueing signature (the
 linear slope) is robust to that, since a constant tax cannot produce it. The run is
 right-censored: p50 to all nodes (172 s) exceeds the run length (150 s), so only 40% of
