@@ -1538,13 +1538,12 @@ in each node's own log (`PERF: relay trickle overridden (max=50000, interval=...
 
 | condition | S | rounds |
 |---|---|---|
-| shipped `INVENTORY_BROADCAST_INTERVAL` (5 s) | 930 tx/s | 37 (full run) |
-| the same, truncated to B's window | 899 tx/s | 20 |
-| `-perfinvinterval=1` | 849 tx/s | 20 |
+| shipped `INVENTORY_BROADCAST_INTERVAL` (5 s) | 930 tx/s | 37 |
+| `-perfinvinterval=1` | 917 tx/s | 37 |
 
-Compared on a matched window, cutting the trickle interval fivefold left S **6% lower** --
-noise, or marginally worse because more frequent messages cost more per message. It
-certainly did not raise throughput.
+Both runs accepted 225,005 of 225,005 offered and took the same wall time (153.4 s vs
+154.6 s). Cutting the trickle interval fivefold changed relay throughput by **-1.4%**, which
+is noise. It certainly did not raise it.
 
 **So the two effects are now fully separated.**
 
@@ -1563,7 +1562,6 @@ which is real work rather than a constant, and it is a precondition for decoupli
 than an accompaniment: commitment blocks change what the block carries, not the rate at
 which bodies must cross the network.
 
-**Caveats.** B is a partial run (20 of ~37 rounds) compared against A truncated to match;
-A's own full-window figure is 930. Single runs. No smartnode features, so the true ceiling on
+**Caveats.** Single runs, one per condition, 37 sample rounds each. No smartnode features, so the true ceiling on
 a mainnet-like network is lower. `-debug=mempool` was off for both, and no log streaming was
 running.
