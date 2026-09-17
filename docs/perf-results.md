@@ -1674,7 +1674,7 @@ the 100 kB cap bound only relay and that the block path was limited only by bloc
 allowing ~13,500 inputs and tens of seconds of hashing in one transaction. That is wrong.
 `ContextualCheckTransaction` (validation.cpp:419) rejects oversize transactions with
 `DoS(100)`/`REJECT_INVALID` whenever DIP0001 is active, and it runs on both the mempool
-path (line 619) and the block path (line 4054). The grep that misled us looked only in
+path (line 619) and the block path (line 4056). The grep that misled us looked only in
 `consensus/tx_check.cpp`, which carries the older `MAX_LEGACY_BLOCK_SIZE` check.
 
 Corrected: one transaction is capped at ~675 P2PKH inputs, so quadratic sighash costs on

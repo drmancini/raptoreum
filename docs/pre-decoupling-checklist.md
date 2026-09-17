@@ -1,4 +1,16 @@
-# Code changes before / around decoupling (v1 target ~1,500 tx/s)
+# Code changes before / around decoupling
+
+> **SUPERSEDED AS THE PLAN, 2026-09-17.** `build-plan.md` is the schedule of record: the target
+> is now a throughput whose *commitments* fill a 2-8 MB block (520-2,083 tx/s), the fork is
+> closed in favour of the commitment format, and retention plus the state root are deferred on
+> stated RTM team input with tripwires. Two things here are also now wrong: relay is **not** a
+> blanket precondition (520 tx/s sits inside the measured 900-1,220 tx/s ceiling, though the cap
+> re-index is still mandatory), and the Tier 0 discussion of committed work is superseded by §1A
+> of the design — the **block sigop cap**, which nothing here mentions, caps a commitment block
+> at ~167 tx/s until it is re-based.
+>
+> This document is kept for what it still owns: the measurements that produced the tier
+> ordering, and the explicit record of what was descoped and why.
 
 > **Revised 2026-09-17 after the twelve-node WAN swarm.** Three things changed:
 > the open question at the bottom of this document is **answered**, the Tier 3
@@ -44,7 +56,7 @@ there "to mitigate CPU exhaustion attacks".
 
 The 100 kB limit is enforced in `ContextualCheckTransaction` (validation.cpp:419) with
 `DoS(100)`/`REJECT_INVALID`, and that function is called from both the mempool path
-(line 619) and the block path (line 4054). It is therefore **consensus, not policy** --
+(line 619) and the block path (line 4056). It is therefore **consensus, not policy** --
 an earlier revision of this document said otherwise and was wrong. The limit in
 `consensus/tx_check.cpp` is the older `MAX_LEGACY_BLOCK_SIZE` one, which is what misled us.
 

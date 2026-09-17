@@ -39,14 +39,17 @@ git fetch upstream ft/breaking-up && git log --oneline upstream/develop..FETCH_H
 
 | change | branch | PR | state |
 |---|---|---|---|
-| Functional test suite (9-part stacked series) | `ft/01-ghostrider-hash` … `ft/09-run-by-default` | #471-#479 on `develop`, #482-#490 on `ft/breaking-up` | submitted |
+| Functional test suite (9-part stacked series) | `ft/01-ghostrider-hash` … `ft/09-run-by-default` | #471-#479 on `develop` | submitted, awaiting review |
 
-> **Each change is now proposed twice, deliberately** (2026-09-17). The eleven PRs against
-> `develop` stay as they were; an identical set was opened against trí's `ft/breaking-up` so
-> the decoupling work can build on them without waiting for `develop` review. Diffs were
-> verified byte-identical pair by pair.
+> **One PR per change, on `develop`** (settled 2026-09-17). An identical set was briefly
+> opened against trí's `ft/breaking-up` so decoupling work could build on the series without
+> waiting for `develop` review. Trí then said he would review the `develop` PRs and merge
+> them into the break-up branch himself, so **#482-#492 were closed the same day** with a
+> comment pointing at their `develop` counterpart. Head branches were left in place --
+> deleting one would close its `develop` PR too. The pairing is kept below because the closed
+> numbers stay referenceable.
 >
-> | head branch | on `develop` | on `ft/breaking-up` |
+> | head branch | on `develop` (open) | on `ft/breaking-up` (closed) |
 > |---|---|---|
 > | ft/01-ghostrider-hash | #471 | #482 |
 > | ft/02-prune-dead-tests | #472 | #483 |
@@ -60,7 +63,7 @@ git fetch upstream ft/breaking-up && git log --oneline upstream/develop..FETCH_H
 > | fix/socket-handler-busy-loop | #480 | #491 |
 > | fix/asset-cache-atmp-copy | #481 | #492 |
 >
-> If one of a pair merges, close the other rather than letting it go stale. Two `gh` traps
+> Review happens on the `develop` set only; nothing is proposed twice any more. Two `gh` traps
 > worth remembering: `gh pr edit --base` fails silently on this repo (deprecated
 > Projects-classic GraphQL field) -- use `gh api -X PATCH .../pulls/N -f base=X`; and the
 > topic branches live on the `drmancini` fork, so `gh pr create` needs `--head drmancini:<branch>`

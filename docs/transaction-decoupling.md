@@ -1,7 +1,16 @@
 # Transaction Decoupling on Raptoreum Core
 
-**Version 7.** Supersedes v6. The header was left at "Version 3" through several
+**Version 8.** Supersedes v7. The header was left at "Version 3" through several
 revisions; the content is what the revision number tracks, not this line.
+
+> **v8 closes the fork and re-bases the design on two owner decisions and one measurement
+> nobody had made.** The commitment format is the design (§0A). The target is fixed:
+> commitments filling a 2-8 MB block every two minutes, i.e. **520 to 2,083 tx/s**. The RTM
+> team states those figures are *peaks and bursts, not sustained load*, and that Smartnodes
+> will hold the whole chain — which restores §8's full replication and defers the state root
+> (§7A), both now carrying explicit tripwires. And the **block sigop cap caps a commitment
+> block at ~167 tx/s** unless it is re-based, which is new work nobody had listed (§1A).
+> Build order lives in `build-plan.md`; this document describes the design, not the schedule.
 
 **What this is.** Not an argument for decoupling. A description of what decoupling
 *would be* in this tree, at the level of files, structures and states.
@@ -15,6 +24,23 @@ and kept, because the corrections are load-bearing.
 **Terminology.** Off-chain transaction data is called the **body**, and the store that
 holds it the **body store**. "Payload" is not used: `vExtraPayload` is the DIP2
 special-transaction field throughout `src/evo` and `src/assets`.
+
+## What changed in v8
+
+- **The fork is closed: the commitment format is the design.** §15's build-whole-split-after
+  cannot express a target stated as "commitments fill a 2-8 MB block", so it is out. It stays
+  in the document as the fallback if §12 Q1 kills the acceptance layer.
+- **§1A is new and mandatory.** A commitment block bounds *names*, not work and not bytes. The
+  block sigop cap, a per-transaction work cap and a body-byte cap are one joint decision.
+- **Retention is deferred again on a stated assumption** (§8), and the **state root becomes
+  optional** (§7A) — both with tripwires, because both were forced back into scope for several
+  hours by a sustained-throughput reading the RTM team has since denied.
+- **The fetch protocol is the tip critical path**, not a history service (§5.2, §13.F).
+- **Two claims about the dual validation path were wrong and are corrected** in §17, one of
+  them this document's own: a committed state root does **not** make an attested-invalid
+  transaction detectable.
+- Positional addressing is ambiguous off the active chain and needs blockhash addressing as
+  well (§5.2). Several claims are now **deleted rather than corrected** — see §0A.
 
 ## What changed since v1
 
@@ -62,9 +88,29 @@ was made.** These are the positions that stand, with the places they correct:
 | The signing-attempts process is **required and gates F**, not a known limitation. | §3A.4, §3A.6, §13.B |
 | The fail-open safety walk is **downgraded** to near-unreachable. | C2, §14.8b |
 
-### The open fork
+### The fork, closed 2026-09-17
 
-**This document describes two designs and does not choose between them.**
+**The commitment format is the design.** The requirement is a throughput whose *commitments*
+fill a 2-8 MB block every two minutes — 62,500 to 250,000 identifiers per block, 520 to
+2,083 tx/s. A design in which the block still carries bodies cannot express that target: at
+373-byte bodies the same throughput needs a ~67 MB block. So §15 is not a candidate.
+
+§15 is retained for exactly one purpose: **it is the fallback if §12 Q1 finds the acceptance
+layer intractable.** Nothing else in this document depends on it.
+
+**Claims from earlier revisions now deleted rather than corrected**, because carrying a dead
+claim is its own failure:
+
+| deleted claim | why |
+|---|---|
+| "the block size cap is what limits throughput" | relay (~900-1,220 tx/s), InstantSend (~76 locks/s) and the sigop cap (§1A) all bind first |
+| "(height, index) is a universal address" | false off the active chain — a competing branch at one height commits to different identifiers (§5.2) |
+| the window floor is 720 blocks "set by round-voting" | B6 persists that count at connect and removes the rescan, so the floor needs a new justification (§6) |
+| "Kaspa runs this, so the state root is a port rather than research" | the multiset hash is a port; a persisted, reorg-symmetric, consensus-critical accumulator across two databases has no reference |
+| "the anchor is the ChainLock, so this does not depend on `nMinimumChainWork`" | quorum membership is derived SPV-style against headers, so it does rest on the shipped anchors — which are stale (§14.6) |
+| "nothing is deleted" | contradicted by C6 — losing siblings' bodies must be dropped once buried (§8.4) |
+
+### The alternative, retained as a fallback
 
 - **The commitment format** (§1–§13). Blocks carry identifiers; bodies live outside. Buys capacity.
   Its first step is §12 Q1: **probe the acceptance layer before building anything on it.**
@@ -179,6 +225,61 @@ unchanged. Only its identifier-set constructor does (`merkleblock.cpp:50-51`, us
 `filter->IsRelevantAndUpdate(*block.vtx[i])` over full scripts and outpoints, and
 `net_processing.cpp:1654-1676` then sends the matched transactions. Serving
 `MSG_FILTERED_BLOCK` requires bodies for the client's whole rescan range.
+
+---
+
+## 1A. The block resource budget — new in v8, and mandatory
+
+**A commitment block bounds identifiers. It does not bound work and it does not bound bytes.**
+Three limits therefore have to be re-based, and they interact, so they are one decision.
+
+**1. The block sigop cap blocks the design outright until it is re-based.**
+`MaxBlockSigOps() = MaxBlockSize()/50` (`consensus/consensus.h:21-23`) is 40,000 at 2 MB.
+`GetLegacySigOpCount` counts `scriptPubKey` sigops per **output**
+(`consensus/tx_verify.cpp:214-223`), so an ordinary two-output payment is 2 sigops. A 2 MB
+commitment block naming 62,500 such payments carries 125,000 and is **invalid**: `CheckBlock`
+sums across the block and rejects above the cap with `DoS(100)` (`validation.cpp:3935-3941`,
+again at `:4051-4064`, and with P2SH counted at `:2374-2375`). The cap admits roughly 20,000
+transactions — **167 tx/s against a 520 tx/s design point** — and the miner simply stops
+filling (`miner.cpp:286-289`), silently.
+
+This is §16.3's relay cap in a second place: a limit indexed to block *bytes*, which stop
+tracking what the block commits to the moment bodies leave the block.
+
+**2. The sigop cap is also what bounds worst-case hashing, so it cannot be re-based naively.**
+Legacy `CHECKMULTISIG` recomputes the whole-transaction sighash per key tried, with no `BASE`
+sighash cache, so the real bound today is sigops × maximum transaction size: 40,000 × 100 kB
+≈ **4 GB of SHA256d, on the order of 8-16 seconds**. An earlier revision put today's worst
+case at 0.4 s by counting only the per-transaction cap; that was ~20x optimistic. Re-base the
+block budget to committed count and worst-case hashing scales with it; re-base it generously
+and quadratic sighash is unleashed, since this tree has no SegWit and `SignatureHash`
+reserialises per input.
+
+**3. Body bytes need their own consensus cap.** Committed count × the 100 kB per-transaction
+limit is 6.25 GB of bodies per block at the 2 MB design point, and at
+`DEFAULT_MIN_RELAY_TX_FEE` (`validation.h:83`) an attacker buys that for roughly 62 RTM per
+block. A fee floor scaling with body bytes is policy, which a miner-attacker ignores. Under
+§8's full replication that is a permanent network-wide storage bill, so the bound must be
+consensus.
+
+**Proposed.** One rule set, chosen together:
+
+| limit | re-based to | constraint that picks the value |
+|---|---|---|
+| block sigop budget | committed identifier count | total worst-case block hashing stays at or under today's ~4 GB |
+| per-transaction work | `sigops × size` | caps the quadratic term per transaction; calibrate with `bench_inputs.py` |
+| block body bytes | committed identifier count | bounds both the fetch and the permanent storage one block can impose |
+
+**No declared coinbase field is needed for any of it.** Bodies are self-authenticating, so a
+prefix whose accumulated work or bytes exceeds the cap already proves the block invalid and
+aborts the fetch. `sum == declared` buys nothing over `<= MAX`, and a declared field would be
+a miner-chosen number exactly as §7 says of the fee total. §7's "total body byte size" field
+is therefore dropped — but **the rule it was standing in for survives here.**
+
+**Per-transaction is the checkable unit.** A node cannot know what a commitment block implies
+before fetching; it can reject each body as it arrives. The one term needing the UTXO view is
+P2SH sigops (`validation.cpp:2374`), so the accept-time bound is the legacy count and the
+connect-time bound is the full one.
 
 ---
 
@@ -531,6 +632,12 @@ not hold the block. **Under §0's model that objection disappears.** Commitment 
 the chain, so every node holds every commitment, forever. A position becomes a universal
 address.
 
+**Corrected in v8 — a position is not universal off the active chain.** A competing branch at
+height H commits to different identifiers, so `(height, index)` names nothing well-defined
+during a reorg, while following an unseen branch, or in §3A.7's quorum-split case. Those paths
+address by **`(blockhash, index/range)`**; `(height, range)` stays the default shape for the
+active chain and for history, where it is unambiguous and contiguous on disk.
+
 **Proposed.** Requests are `(height, index)` or `(height, range)`, not bare identifiers.
 Four consequences, all good:
 
@@ -654,7 +761,33 @@ The block merkle root commits to **what was ordered**. The state root commits to
 that left things**. Getting from the first to the second requires replaying every
 transaction, which is precisely the work a node without history cannot do.
 
-### 7A.3 Why it is necessary here specifically
+### 7A.3 Why it is necessary here specifically — DOWNGRADED TO OPTIONAL IN v8
+
+> **OWNER DECISION 2026-09-17, on RTM team input taken at face value.** The 520-2,083 tx/s
+> figures are **peaks and bursts, not sustained load**, and Smartnodes will hold the entire
+> chain history. Both change this section's conclusion.
+>
+> The argument below is that a windowed node cannot replay and therefore needs verified state.
+> That was load-bearing while the target was read as *sustained*, because replay then costs
+> days per year of chain history and terabytes of download. At a modest sustained average,
+> with the Smartnode tier serving all history, **a new node can replay and then prune** — so
+> snapshot sync is a convenience and the state root is **optional**.
+>
+> **What survives as a reason to build it:** it is a per-block divergence check for a brand-new
+> acceptance layer, turning a silent state disagreement into a block rejection at the next
+> block. A want, not a must. **What does not survive:** that it makes the dual validation path
+> auditable — see §17.
+>
+> **Tripwires that bring it back**, in order: replay bootstrap becoming impractical (sustained
+> load, or chain age), or the Smartnode tier thinning under storage pressure so that "history
+> is always available from a Smartnode" stops being true. Deferring it also defers §7A.6's
+> canonical asset element form, which was the hardest unsolved design problem here.
+>
+> **Consequence for assets:** with no state root, asset state is committed nowhere and stays
+> exactly as it is today. B8 and B9 (§14.3) remain real divergences worth fixing, but they stop
+> being permanent-fork risks and stop being pre-activation blockers.
+
+
 
 Today a node syncs by downloading every block and replaying it. It computes state itself
 and therefore trusts nobody. That is what being a full node means.
@@ -944,6 +1077,20 @@ to copy.
 ---
 
 ## 8. Node tiers (owner decision, 2026-09-11)
+
+> **RE-CONFIRMED 2026-09-17, after being broken for several hours.** Read as *sustained*, the
+> v8 target puts full replication at 6.1 TB/yr/node at 520 tx/s and 24.6 TB/yr at 2,083 —
+> against the 512 GB Smartnode in RTM's own contract paper, and against this section's own
+> 1 TB/yr trigger, which then fires on day one. The RTM team states the figures are peaks and
+> bursts and that Smartnodes will hold everything, so **capacity is sized for the burst and
+> storage for the average**, and the decision below stands as written.
+>
+> **The tripwire is §8.5's, unchanged: sustained load above roughly 85 tx/s, or growth crossing
+> 1 TB per node per year.** At the 512 GB spec the practical sustained ceiling is ~10-30 tx/s
+> depending on replacement cycle. One caveat on every figure here: `vExtraPayload` runs to
+> `MAX_TX_EXTRA_PAYLOAD` = 10,000 B (`consensus/consensus.h:25`), so the 373-byte body
+> assumption could be off by up to 27x once the contract layer's new transaction type is
+> specified (§12 Q2).
 
 **Simplification adopted.** Retention, pruning of history and sharding are deferred until
 the decoupling design itself is settled. Until then:
@@ -1475,6 +1622,11 @@ incentives, repair, erasure coding. Recoverable later because the chain keeps th
 ---
 
 ## 13. Components to build
+
+> **v8: the schedule moved out of this document.** `build-plan.md` owns the phased build —
+> six phases, effort estimates, design certainty per component, the four real gates, and what
+> stays deferred with its tripwire. The component descriptions below remain the design
+> reference for each piece; where the two disagree about *order or effort*, the plan wins.
 
 Ten. Two of them deliver value on their own and depend on nothing here.
 
@@ -2072,7 +2224,7 @@ backpressure, and no degraded-but-working mode.
 2,915 locked one-input transactions — sessions = inputs + 1, confirmed. A two-input
 transaction costs three threshold signatures.
 
-#### What this settles about the buspool proposal
+#### What this settles about the buspool proposal — and see §17 for the v8 position
 
 A design in which Smartnodes pre-attest transactions so they can take a shorter validation
 path is optimising the wrong side of the wrong bottleneck. §16.1 shows validation is not a
@@ -2149,3 +2301,102 @@ So the 2 MB stage has **two** blockers, not one. v6 recorded InstantSend as marg
 this point against a modelled ~800 tx/s network-wide; the measured figure is an order of
 magnitude below that, at a quorum a tenth the live size. The rest of the 10 MB list is then
 a known set of prerequisites rather than a set of discoveries.
+
+---
+
+## 17. The dual validation path (v8)
+
+**Kept live by owner decision 2026-09-17**, not deferred: trí still holds to it, and the most
+likely reason is one no measurement here can refute.
+
+### 17.1 The throughput case is dead. The structural case is not.
+
+§16.5 and the arms below kill the *buspool* framing — attestation as a validation shortcut. What
+survives is different in kind: **a Spark job's result is not verifiable by anybody.** A miner
+cannot re-execute it, and Spark's execution model is non-deterministic by design (lazy DAG
+evaluation, dynamic partitioning, speculative re-execution of stragglers), so no second party
+can reproduce it either. For a transaction carrying an off-chain computation result, "validate
+it yourself" is not expensive, it is impossible in principle, and a quorum signature is the only
+validity rule available.
+
+**Assumption** — that this, rather than throughput, is what trí means. It is checkable with one
+question (§17.5) and it reframes the object: not "skip ECDSA for attested payments" but "a
+transaction class whose validity rule is a threshold signature over a result nobody can
+recompute". RTM's contract paper supports the shape: a job or batch submitted by RPC "creates a
+special type of transaction on the Raptoreum chain", and the result "is recorded on the chain or
+on a database maintained by the Smartnodes".
+
+### 17.2 What a shortcut is worth, measured
+
+One binary, corpus v2 (2-in/2-out), 25,000 tx/s offered, one runtime flag between arms. Each arm
+was proved to be what it claims with a transaction carrying a genuine signature over an
+unrelated digest — valid DER, low-S, wrong:
+
+| arm | ceiling | node CPU | that transaction |
+|---|---|---|---|
+| stock | 5,269 tx/s | 119% | rejected |
+| signature verification removed | **15,842 tx/s** | 135% | **accepted** |
+| the same checks on `CCheckQueue` | **4,721 tx/s** | 249% | rejected, via the pooled path |
+
+Signature verification is two thirds of acceptance. But the saving arrives on the one path with
+the most headroom: stock is ten times over a 520 tx/s design point, while relay and the sigop
+cap of §1A bind first.
+
+### 17.3 Three corrections, two of them to this document
+
+**The state root does not make an attested-invalid transaction detectable.** An earlier position
+here said a committed root turns "the quorum lied" into an immediate block rejection. **Wrong.**
+If every node trusts the attestation at connect they all apply the same transaction, and the
+multiset root **matches** — it commits to *agreement*, not validity. The verifying minority is
+the side that forks off. So trust-at-connect is silently catastrophic rather than auditable, and
+the root is no defence against it.
+
+**Skipping at acceptance does not merely relocate the cost.** Skipping must not populate
+`scriptExecutionCache` (it inserts only after executing, `validation.cpp:1541-1544`), so
+`ConnectBlock` pays cold — but cold-at-connect runs on `CCheckQueue` with thousands of checks
+queued and one wait, which is exactly the batched shape ATMP cannot have. It moves two thirds of
+acceptance off the serial message-handling thread onto the parallel pool, at the cost of
+`cs_main` held roughly 0.5-1.8 s per block.
+
+**Parallel acceptance is not a port-and-go, and it is the honest comparator.** The pooled arm
+above is 10% *slower* than stock at twice the CPU, because ATMP takes a `CCheckQueueControl`,
+enqueues two checks, wakes workers and waits — per transaction, against ~59 µs of actual
+verification per input. Getting the 3× locally means pipelining script checks across several
+transactions inside the acceptance path, with real correctness questions about which transaction
+failed. Any attestation proposal must beat *that*, not the naive pooling that loses.
+
+### 17.4 Three positions, and the one decision that bounds the risk
+
+| position | trust boundary | a lying quorum can |
+|---|---|---|
+| full local validation | none | nothing |
+| **admission-only shortcut** — acceptance skips script checks for attested transactions and does not cache; `ConnectBlock` verifies cold and parallel | the one islocks already impose | waste mining and fill mempools; **cannot fork** |
+| consensus trust — block validation accepts the attestation too | the quorum, for validity | apply state no verifier agrees with; see §17.3 |
+
+The admission-only row is a third option neither earlier revision contained. It is also worth
+nothing per transaction: verifying one lock costs at least 1.15 ms of BLS against roughly 118 µs
+of ECDSA saved on a two-input transaction — **10× worse** — so break-even is 10 to 20
+transactions per signature. **Batching is the gate for every row of that table**, which makes it
+the same work as §13.B's InstantSend batching. Build it once.
+
+**And the decision that bounds the third row:** *what may an attested transaction change?* If
+contract-layer state only, a lying quorum corrupts contract state and cannot steal RTM. If
+balances or asset mints, a quorum majority is theft, under an honest-majority assumption about a
+committee whose collateral is worth a few million dollars. That is the whole security surface of
+the feature, and it is why the platform analysis landed on a narrow, inbound-only peg.
+
+### 17.5 What settles it
+
+Two measurements and three questions.
+
+- The attestation ceiling at a **realistic quorum of 50**, with the two unexploited fixes
+  applied: async threshold recovery, which parallelises 10.7× on sixteen cores, and the 100 ms
+  `SendMessages` cadence that is the actual binding constraint. Every figure available comes
+  from 3-13 member quorums. Needs smartnodes on the swarm, never attempted.
+- Batched attestation prototyped far enough to measure per-item cost.
+- And from trí: **what exactly is attested** — the job, the result, or a batch; **what an
+  attested transaction is permitted to change**; and **whether ordinary payments are in scope**
+  at all or only contract results.
+
+Until those land, the admission-only variant is the version to build, because it needs no
+consensus change and is the baseline the others must beat.

@@ -1,6 +1,6 @@
 # Docs
 
-Seven live documents. Everything else is outbound text or archive. If a fact appears in two
+Nine live documents. Everything else is outbound text or archive. If a fact appears in two
 places it will eventually disagree with itself, so each doc below owns its subject and the
 others reference it rather than restating.
 
@@ -8,12 +8,14 @@ others reference it rather than restating.
 
 | doc | owns |
 |---|---|
-| `transaction-decoupling.md` | **the design.** What we are building and why. |
+| `transaction-decoupling.md` | **the design.** What we are building and why, at the level of files, structures and states. Currently v8. |
+| `architecture-plain-language.md` | **the same design without the code.** What it is and why it holds, for reading and for handing to someone else. Currently v2. |
+| `build-plan.md` | **the schedule.** Phased components, effort, design certainty, the gates, and what is deferred with its tripwire. |
 | `throughput-bottleneck.md` | **what limits throughput**, measured, and the errors that produced earlier wrong answers. |
 | `perf-constants.md` | **constants, read from source.** The single source of truth for any constant. Do not restate values elsewhere — cite this. |
 | `perf-results.md` | **the measurement log**, chronological. Entries stand as measured; a correction banner flags conclusions later overturned. |
 | `upstream-ledger.md` | **how this tree differs from upstream**, including local modifications that change behaviour. |
-| `pre-decoupling-checklist.md` | **the plan.** What must happen before/around decoupling, and what has been explicitly descoped. |
+| `pre-decoupling-checklist.md` | **the pre-work record.** What was measured before the build plan existed, and what has been explicitly descoped and why. Superseded as *the plan* by `build-plan.md`. |
 | `asset-cache-drag.md` | the per-ATMP asset-cache copy: measurement, fix, and follow-ups. |
 
 ## Two standing warnings
