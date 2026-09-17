@@ -1397,3 +1397,67 @@ observed miss was 22-51.
 (net_processing.cpp:201). Next run: absorbing cadence with the trickle set below the block
 interval. Until that is measured, no causal claim should be made about the propagation
 collapse, and the decoupling argument must not lean on one.
+
+### 2026-09-17 — relay is the binding constraint, not acceptance or block size
+
+Measured per-transaction propagation directly: every node logs each accepted txid under
+`-debug=mempool`, and with `logtimemicros` plus chrony (max pairwise skew 5.5 ms) those
+timestamps are comparable across hosts. Origin time comes from the submitter's own log,
+since RPC submission does not pass through net_processing and emits no such line locally.
+1500 tx/s offered from 11 nodes, 150 s, no mining. 225,005 transactions.
+
+**Headline.**
+
+| | |
+|---|---|
+| origin -> one peer, p50 | 66.5 s |
+| origin -> all 12 nodes, p50 | 172 s |
+| network-wide within 120 s | 12.2% |
+
+**The distribution is not stationary, and that is the whole finding.** First-hop p50 against
+when the transaction was offered:
+
+| submitted at | first-hop p50 |
+|---|---|
+| 0-15 s | 3.2 s |
+| 30-45 s | 25.3 s |
+| 60-75 s | 39.4 s |
+| 90-105 s | 61.7 s |
+
+Latency grows linearly with time into the run. A constant overhead (the logging we added to
+measure this, for instance) would be flat; a growing queue looks exactly like this.
+
+**Two quantities separate out.**
+
+1. *The floor is the trickle.* Before any backlog, first-hop p50 is 3.2 s -- what a Poisson
+   draw with `INVENTORY_BROADCAST_INTERVAL = 5` predicts (median ~3.5 s). This is a latency
+   term and it is unavoidable without changing the constant.
+
+2. *The ceiling is relay throughput.* For offered R and serviced S, a growing queue gives
+   dL/dt = (R-S)/S. The measured slope is 0.65, so S is about 1500/1.65 = **909 tx/s**
+   against 1500 offered. Relay services roughly 60% of the offered rate and the rest
+   accumulates.
+
+**This reorders the whole picture.** Acceptance sustains 1500 tx/s at 61-72% of one core on
+a 4-thread VPS. Relay does not. Every earlier observation follows from this without needing
+an absorption gap or a block-size argument: blocks reference transactions that have not
+propagated because relay is 600 tx/s behind, so compact reconstruction misses, so nodes pull
+whole blocks, so convergence collapses.
+
+**Consequence for decoupling — it does not fix this.** A commitment block changes what the
+*block* carries. The bodies still cross the same relay path at the same 1500 tx/s. Whatever
+decoupling does for block size, the relay path has to carry the full transaction rate or the
+backlog grows regardless. The relay work in Tier 3 is therefore not an accompaniment to
+decoupling; on this evidence it is a precondition for any of it.
+
+**Caveats.** The absolute value of S is measured with `-debug=mempool` on, which costs each
+node ~1500 log lines/s; the true ceiling is somewhat higher. The queueing signature (the
+linear slope) is robust to that, since a constant tax cannot produce it. The run is
+right-censored: p50 to all nodes (172 s) exceeds the run length (150 s), so only 40% of
+transactions completed propagation inside the captured window -- percentiles for those that
+did are valid, the tail is truncated. `-perfinvmax=50000` was confirmed applied in each
+node's own log, so this is not the shipped 56 tx/s cap. Single run.
+
+**Next, and it is cheap:** `-perfinvinterval` already exists. Re-run at the same offered rate
+with the trickle set below the default and see whether S moves. If S is set by the trickle
+schedule, it will; if S is set by message handling, it will not.

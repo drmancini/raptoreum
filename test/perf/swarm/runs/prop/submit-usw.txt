@@ -1,0 +1,2 @@
+loaded 28000 tx, 10.4 MB (skipped 22000)
+offered 20455 in 165.2s = 124 tx/s | accepted 20455 | rejected 0
