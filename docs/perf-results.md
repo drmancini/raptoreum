@@ -1483,3 +1483,37 @@ quorums.
 
 Bringing smartnodes up on the swarm is its own piece of work (ProTx registrations, DKG,
 quorum formation) and has not been attempted.
+
+### 2026-09-17 — the relay ceiling cross-validated, and ChainLocks Cleanup ruled out
+
+**Independent confirmation of S.** The miner offers no load, so everything entering its
+mempool arrived over relay and its acceptance rate is the delivery rate directly. Counting
+`AcceptToMemoryPool` lines per second on `cor` during the load phase gives 864-922 tx/s,
+against 936 tx/s derived from the queueing slope of per-hop latency. Two unrelated methods
+within ~5%. Relay delivers roughly 900 tx/s against 1500 offered.
+
+(Rates fall to ~320 tx/s after t+150 s in that data. That is the offered load ending and the
+backlog draining, not a slowdown.)
+
+**`CChainLocksHandler::Cleanup` is not the cause, though the code deserves a look anyway.**
+`TransactionAddedToMempool` has no gate -- not on quorums, not on ChainLocks, not on
+smartnode status -- so every node records every transaction in `txFirstSeenTime`
+(quorums_chainlocks.cpp:373). `Cleanup` then walks that whole map every 30 s
+(`CLEANUP_INTERVAL`), calling `GetTransaction` per entry while holding
+`LOCK2(cs_main, mempool.cs)`, and entries are only removed once a transaction is six blocks
+deep. With a 34x absorption gap nothing reaches six confirmations, so the map grows without
+bound. That is a real hazard and it is the Tier 2 item's mechanism.
+
+It is nevertheless **not binding at the sizes measured here**, on two tests:
+
+- *No periodicity.* Per-second acceptance autocorrelation at lag 30 s is +0.250, against
+  +0.294 at 29 s and +0.217 at 15 s. No peak at the cleanup interval.
+- *No size dependence.* On `cor`, acceptance was 864 tx/s with an empty mempool and 876 tx/s
+  with 133,000 entries in it. A walk whose cost is O(map) would have shown decay.
+
+So relay's ~900 tx/s is a **fixed per-transaction cost**, not a structure that degrades as
+state grows. That matters for the fix: making the relay path cheaper or concurrent, rather
+than repairing a data structure. The Cleanup hazard still wants addressing before any
+long-running high-throughput deployment, but it is not what is capping throughput today, and
+this measurement was taken with no quorums -- on a network with ChainLocks the map is also
+pruned by `blockTxs` handling that never ran here.
