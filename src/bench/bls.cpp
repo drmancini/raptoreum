@@ -9,6 +9,10 @@
 #include <util/time.h>
 
 #include <iostream>
+#include <thread>
+#include <chrono>
+#include <cstdio>
+#include <vector>
 
 CBLSWorker blsWorker;
 
@@ -446,3 +450,62 @@ BENCHMARK(BLS_Recover_6)
 BENCHMARK(BLS_Recover_12)
 BENCHMARK(BLS_Recover_30)
 BENCHMARK(BLS_Recover_240)
+
+// Does threshold recovery parallelise?
+//
+// InstantSend attestation is bounded by CBLSSignature::Recover -- 9.41 ms at
+// threshold 30, nine times everything else in the path, and it does not batch.
+// It runs synchronously on the single CSigSharesManager::WorkThreadMain, and
+// CBLSWorker exposes async aggregation and verification but no async recovery.
+//
+// Recovery is Lagrange interpolation over one session's shares, with no state
+// shared between sessions, so recoveries for distinct messages are independent.
+// This measures whether that independence actually converts into throughput.
+static void BLS_Recover_ParallelScaling(benchmark::Bench &bench) {
+    const size_t threshold = 30;          // llmq50_60, InstantSend
+    const size_t per_thread = 40;
+    const std::vector<size_t> thread_counts = {1, 2, 4, 8, 16};
+
+    size_t maxt = thread_counts.back();
+    // Independent problems, one set per thread, built outside the timed region.
+    std::vector<std::vector<CBLSSignature>> sigs(maxt);
+    std::vector<std::vector<CBLSId>> ids(maxt);
+    for (size_t t = 0; t < maxt; t++) {
+        sigs[t].resize(threshold);
+        ids[t].resize(threshold);
+        for (size_t i = 0; i < threshold; i++) {
+            CBLSSecretKey sk;
+            sk.MakeNewKey();
+            sigs[t][i] = sk.Sign(GetRandHash());
+            ids[t][i] = CBLSId(GetRandHash());
+        }
+    }
+
+    printf("\n--- threshold recovery scaling (threshold=%zu, %zu recoveries/thread) ---\n",
+           threshold, per_thread);
+    double base = 0.0;
+    for (size_t n : thread_counts) {
+        auto t0 = std::chrono::steady_clock::now();
+        std::vector<std::thread> workers;
+        for (size_t t = 0; t < n; t++) {
+            workers.emplace_back([&, t]() {
+                for (size_t k = 0; k < per_thread; k++) {
+                    CBLSSignature recovered;
+                    recovered.Recover(sigs[t], ids[t]);
+                }
+            });
+        }
+        for (auto &w : workers) w.join();
+        double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        double rate = (double)(n * per_thread) / secs;
+        if (n == 1) base = rate;
+        printf("  threads=%2zu  %6.1f recoveries/s  per-recovery %6.2f ms  speedup %4.1fx\n",
+               n, rate, 1000.0 * secs / (double)per_thread, rate / base);
+        fflush(stdout);
+    }
+    printf("--- end scaling ---\n");
+    bench.minEpochIterations(1).run([&] {
+        CBLSSignature r; r.Recover(sigs[0], ids[0]);
+    });
+}
+BENCHMARK(BLS_Recover_ParallelScaling)

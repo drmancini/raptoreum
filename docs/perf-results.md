@@ -1194,3 +1194,46 @@ have biased results:
   smartnode actually runs, and the network's ceiling is its slowest member.
 - The unresolved kernel symbol in §6's `perf diff` (11% → 40%) is still unattributed and
   is deliberately not claimed as a networking cost.
+
+## 19. Threshold recovery parallelises — the attestation path was never optimised
+
+§15 measured threshold recovery at 9.41 ms (106/s) and called it the dominant cost of the
+attestation path. §16 measured the live ceiling at ~76 locks/s. Both stand. What neither did
+was ask whether either number is a *floor*, and the comparison against mempool acceptance was
+made between an optimised, characterised validation path and an untouched attestation path.
+
+Recovery is Lagrange interpolation over one session's shares with no state shared between
+sessions, so recoveries for distinct messages are independent. Measured on a Xeon 6517P
+(16 physical cores / 32 threads), threshold 30, 40 recoveries per thread:
+
+| threads | recoveries/s | per-recovery | speedup |
+|---:|---:|---:|---:|
+| 1 | 107.1 | 9.33 ms | 1.0x |
+| 2 | 215.9 | 9.27 ms | 2.0x |
+| 4 | 430.2 | 9.30 ms | 4.0x |
+| 8 | 792.3 | 10.10 ms | 7.4x |
+| 16 | 1,150.9 | 13.90 ms | **10.7x** |
+
+Single-thread reproduces §15 exactly (9.33 vs 9.41 ms). **Recovery parallelises near-linearly
+to four threads and gives 10.7x at the physical core count.** The 106/s figure is unexploited
+serialisation, not a limit: it runs synchronously on the single
+`CSigSharesManager::WorkThreadMain`, and `CBLSWorker` exposes async aggregation, verification-
+vector building, contribution-share verification and signature verification — but **no async
+recovery**. The thread pool is already there; recovery simply is not wired into it.
+
+**The nuance that cuts the other way:** the live ceiling of ~76 locks/s is *below* the 106/s
+recovery ceiling, so recovery was not the binding constraint in that test — the round-trip
+cadence was (`SendMessages` runs at most once per loop iteration). Parallelising recovery
+removes a ceiling that has not yet been reached.
+
+So the attestation path has two addressable constraints and neither has been touched: the
+messaging cadence (binding now, a scheduling constant of the same class as the relay cap,
+which was worth ~30x when lifted) and recovery (binding at ~106/s, removable to ~1,150/s).
+
+**Consequence for the design comparison.** The claim that quorum attestation is too slow to
+be worth building on is **not safe**, and should not be used against it. What survives is
+architectural rather than throughput: attestation requires a quorum round trip, which imposes
+a latency floor that local validation does not have, and it makes the fast path depend on
+smartnode liveness. Those objections hold regardless of how fast recovery runs.
+
+Bench: `BLS_Recover_ParallelScaling` in `src/bench/bls.cpp`.
