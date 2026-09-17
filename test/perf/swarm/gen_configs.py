@@ -55,6 +55,11 @@ for r in rows:
         "",
         "debug=bench",
         "debug=cmpctblock",
+        # Per-transaction arrival times. AcceptToMemoryPool logs one line per
+        # accepted tx under this category; with logtimemicros that gives each
+        # node's arrival time for every txid, which is the only way to measure
+        # true propagation latency -- getrawmempool's "time" is whole seconds.
+        "debug=mempool",
         "logtimemicros=1",
         "",
         "[regtest]",

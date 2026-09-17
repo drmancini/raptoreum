@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Turn a Phase 1 run's collected logs into propagation / reconstruction / connect numbers."""
 import argparse, os, re, statistics, sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 TS   = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+)Z")
 TIP  = re.compile(r"UpdateTip: new best=([0-9a-f]{64}) height=(\d+)")
@@ -13,7 +13,7 @@ def ts(line):
     m = TS.match(line)
     if not m: return None
     s = m.group(1)
-    d = datetime.strptime(s[:26].ljust(26, "0"), "%Y-%m-%dT%H:%M:%S.%f")
+    d = datetime.strptime(s[:26].ljust(26, "0"), "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=timezone.utc)
     return d.timestamp()
 
 def parse(path):

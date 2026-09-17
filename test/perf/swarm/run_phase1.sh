@@ -36,6 +36,29 @@ for a in $ALIASES; do
 done > "$OUT/offsets-before.txt"; wait
 sed 's/^/  /' "$OUT/offsets-before.txt"
 
+# A node whose tip is older than nMaxTipAge stays in initial block download, and
+# in IBD it ignores transaction announcements (net_processing.cpp:3055) while
+# still accepting everything offered locally over RPC. The result is a node that
+# reports 100% acceptance while holding only its own transactions -- a run that
+# executes perfectly and measures nothing. Refuse to start unless every node is
+# out of IBD and on the same height.
+echo "--- preflight: mesh health ---"
+PRE_FAIL=0; PRE_H=""
+for a in $ALIASES; do
+  info=$(cli "$a" getblockchaininfo | tr -d ' "' | awk -F: '/^blocks/{b=$2} /^initialblockdownload/{i=$2} END{print b"|"i}' | tr -d ',')
+  h=${info%%|*}; ibd=${info##*|}
+  [ -z "$PRE_H" ] && PRE_H=$h
+  if [ "$ibd" != "false" ] || [ "$h" != "$PRE_H" ]; then
+    echo "  !! $a height=$h ibd=$ibd (expected height=$PRE_H ibd=false)"; PRE_FAIL=1
+  else
+    echo "  ok $a height=$h"
+  fi
+done
+if [ "$PRE_FAIL" = "1" ]; then
+  echo "ABORT: mesh is not healthy. Bootstrap the offending nodes first."
+  exit 1
+fi
+
 echo "--- marking log positions ---"
 for a in $ALIASES; do
   ( echo "$a $(sshq "$(tgt $a)" 40 "wc -l < $(bas $a)/data/regtest/debug.log" 2>/dev/null | tr -d ' ')" ) &
@@ -61,11 +84,20 @@ done
 
 echo "--- mining every ${INTERVAL}s on $MINER for ${DUR}s ---"
 ADDR=$(cli "$MINER" getnewaddress | tr -d '\r')
-( sshq "$(tgt $MINER)" $((DUR+120)) \
-    "end=\$((\$(date +%s)+$DUR)); while [ \$(date +%s) -lt \$end ]; do \
+# Fixed cadence: sleeping INTERVAL *after* each generatetoaddress makes the real
+# interval INTERVAL + template-construction time, which at a large mempool is not
+# small (getblocktemplate runs a full ConnectBlock). Schedule against a fixed
+# start instead, and log each block's wall time so the actual cadence is checkable.
+( sshq "$(tgt $MINER)" $((DUR+180)) \
+    "start=\$(date +%s); i=0; end=\$((start+$DUR)); \
+     while [ \$(date +%s) -lt \$end ]; do \
+       echo \"tick \$i \$(date +%s.%N)\"; \
        $(bas $MINER)/bin/raptoreum-cli -regtest -datadir=$(bas $MINER)/data -rpcport=19898 \
          -rpcuser=swarm -rpcpassword=$PW generatetoaddress 1 $ADDR >/dev/null 2>&1; \
-       sleep $INTERVAL; done" ) > "$OUT/mine.txt" 2>&1 &
+       i=\$((i+1)); t=\$((start + i*$INTERVAL)); now=\$(date +%s); \
+       [ \$t -gt \$end ] && t=\$end; \
+       [ \$t -gt \$now ] && sleep \$((t-now)); \
+     done" ) > "$OUT/mine.txt" 2>&1 &
 wait
 T1=$(date +%s.%N)
 echo "  wall: $(python3 -c "print('%.1f s' % ($T1-$T0))")"
@@ -96,7 +128,8 @@ done > "$OUT/offsets-after.txt"; wait
 echo "--- pulling log tails ---"
 for a in $ALIASES; do
   ( mk=$(awk -v a="$a" '$1==a{print $2}' "$OUT/logmark.txt"); mk=${mk:-0}
-    sshq "$(tgt $a)" 120 "tail -n +$((mk+1)) $(bas $a)/data/regtest/debug.log" > "$OUT/debug-$a.log" 2>/dev/null ) &
+    sshq "$(tgt $a)" 120 "tail -n +$((mk+1)) $(bas $a)/data/regtest/debug.log" > "$OUT/debug-$a.log" 2>/dev/null
+    sshq "$(tgt $a)" 120 "cat $(bas $a)/logs/$TAG.log" > "$OUT/sent-$a.log" 2>/dev/null ) &
 done; wait
 echo "  collected: $(ls -la $OUT/debug-*.log 2>/dev/null | awk '{s+=$5} END{printf "%.1f MB", s/1e6}')"
 echo "=== done: $OUT ==="
