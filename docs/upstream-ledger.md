@@ -17,6 +17,24 @@ was.
 Base: `develop` is `master` + 31 commits with no divergence (fast-forward), so rebasing
 topic branches onto a moved `develop` stays cheap.
 
+## Upstream's own decoupling branch
+
+`Raptor3um/raptoreum` carries **`ft/breaking-up`**, created by trí for the decoupling work.
+
+Checked 2026-09-17 at `d02e91323`: it is `develop` plus exactly **one unrelated commit** --
+`test(amount): cap GetFeeTest's overflow case at OLD_MAX_MONEY (#444)`, touching only
+`src/test/amount_tests.cpp`. **There is no decoupling code in it yet.** It is a starting
+point, not a design to react to.
+
+Worth re-checking before and during the design session; if trí pushes there, that is the
+first place his direction becomes concrete rather than described.
+
+Fetch without creating a tracking ref:
+
+```
+git fetch upstream ft/breaking-up && git log --oneline upstream/develop..FETCH_HEAD
+```
+
 ## Upstreamable — has a topic branch, PR'd
 
 | change | branch | PR | state |
