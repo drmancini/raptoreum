@@ -1,5 +1,16 @@
 # Throughput test — §0.1 constants, read from the tree
 
+> **The rig tree is not shipped RTM.** Constants below are upstream values unless marked.
+> The perf working tree carries local modifications that change behaviour, and reading one
+> of them as a shipped value has already produced one wrong conclusion. Known divergences:
+>
+> | constant | upstream | rig tree | effect |
+> |---|---|---|---|
+> | `MAX_DIP0001_BLOCK_SIZE` | **2,000,000** | **8,000,000** | block capacity, and the relay cap derived from it (`140 x MaxBlockSize()/1e6`): 280/trickle upstream vs 1,120 on the rig |
+>
+> Check `git diff upstream/develop -- src/consensus/consensus.h` before quoting any
+> consensus constant from this tree. Full divergence list: `upstream-ledger.md`.
+
 Read at `ft/09-run-by-default` (49 commits on `develop`). Every value below is quoted
 from source, not assumed from Dash or Bitcoin. Values that differ from Bitcoin's are
 marked.

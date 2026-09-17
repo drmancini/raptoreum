@@ -58,7 +58,16 @@ The INV trickle cap bounds per-peer relay **by schedule, not by CPU**:
 `INVENTORY_BROADCAST_MAX_PER_1MB_BLOCK * MaxBlockSize()/1e6` announcements per trickle, with
 `INVENTORY_BROADCAST_INTERVAL = 5` seconds.
 
-- stock cap → **50–65 tx/s per peer**. No v1 target is reachable, regardless of threading.
+- stock cap → **50–65 tx/s per peer** measured. No v1 target is reachable, regardless of
+  threading. **Caveat:** these runs used the rig binary, where `MAX_DIP0001_BLOCK_SIZE` is
+  locally raised to 8 MB, so the *default* cap they ran with was 1,120/trickle — not the 280
+  upstream ships. The cap was therefore not the binding constraint in those particular runs
+  (they achieved ~47–65 tx/s against a 224 tx/s allowance), so what limits per-peer relay at
+  the default is **not established**. Upstream's 280/trickle arithmetic gives ~56 tx/s
+  inbound, which brackets the measured range, but by a different mechanism. An independent
+  review pointed at the getdata servicing cadence — one getdata per message-handler pass —
+  rather than the announcement cap. Treat "lifting the cap raises relay by more than an order
+  of magnitude" as measured, and the *reason* as open.
 - cap 7,500 → schedule-bound at 1,500/s per peer; peers averaged 1,241/s and lagged ~34k.
 - cap 50,000 → 1,500 tx/s to 8 peers converges with lag ≤ one trickle.
 
