@@ -77,10 +77,21 @@ margin for the Poisson jitter in the trickle. Size it well above the arithmetic 
 
 All four were found by an independent review on a different model, and all four are verified:
 
-1. **Relay budget measured under the wrong load.** Relay capacity was measured while ingestion
-   was saturating msghand (85–99%), then applied to the v1 point where ingestion needs ~30%.
-   The "698 tx/s per peer at 8 peers" was what remained after saturation, not a relay ceiling.
-   The conclusion drawn from it — "1,500 tx/s supports only 3–4 peers" — is **withdrawn**.
+1. **Relay budget measured under the wrong load, and the mechanism misidentified.** Relay
+   capacity was measured while ingestion was saturating msghand (85–99%), then applied to the
+   v1 point where ingestion needs ~30%. The "698 tx/s per peer at 8 peers" was what remained
+   after saturation, not a relay ceiling. The conclusion drawn from it — "1,500 tx/s supports
+   only 3–4 peers" — is **withdrawn**.
+
+   **The actual mechanism, since settled by probe:** it is not a shared budget divided N ways.
+   The message handler takes **one message per peer per pass** (`net_processing.cpp:4009`,
+   "Just take one message"), and the requesting peer issues **one-entry getdata messages**
+   (measured: 40,555 single-entry getdatas against 1 batched). So per-peer delivery is
+   **`accepted / N sources`** — 1,405 / 1,205 / 698 at 1/4/8 peers is `accepted/N`, not
+   `5,600/N`. Above the cap the limiter is the handler loop, not relay capacity. The
+   "1,150–1,660 tx/s at cap 7,500/50,000" figures were also whole-run averages blending the
+   offer phase (~650 tx/s, handler-bound) with the post-offer drain (cap-bound), which is why
+   50,000 appeared faster than 7,500.
 2. **Wrong denominator.** Rates were computed as `final_mempool / 120`, but acceptance ran
    135–142 s at 1 peer and ≥175 s at 8 (still accepting 3,088 tx/s at t=130, 640 at t=147).
    Every rate in the first pass was inflated, unevenly across cases.
