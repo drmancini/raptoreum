@@ -1298,6 +1298,12 @@ Roughly linear in transaction count, consistent with the 2-4 ms seen for 200-tx 
 
 ### 2026-09-17 — the same swarm at the v1 target (1500 tx/s): cascade failure
 
+> **SUPERSEDED — do not quote the conclusion of this entry.** The measurements below are
+> sound; the explanation is not. This entry blames an absorption gap. Running the same
+> load at a cadence that absorbs it fixed acceptance and mempool growth and left
+> convergence unchanged, so absorption is not the cause. The cause is a relay throughput
+> ceiling of ~936 tx/s; see the two entries below.
+
 Identical to the run above in every respect except offered rate: 240 -> 1500 tx/s, block
 every 15 s, 180 s, miner offers no load. A 2 MB block holds ~5,035 of these transactions, so
 15 s blocks absorb ~336 tx/s: this run is deliberately **4.5x above absorption**.
