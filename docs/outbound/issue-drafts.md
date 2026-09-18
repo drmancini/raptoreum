@@ -1,3 +1,9 @@
+<!-- lifecycle: living — unposted. A draft is living until the day it is posted.
+     owns:      two issue reports for Raptor3um/raptoreum, not yet submitted
+     status:    held pending the decoupling direction; see upstream-ledger.md
+     note:      posting requires asking first (D-10). Once posted, this file becomes frozen and
+                gains the issue URL and date. -->
+
 # Two issue drafts for Raptor3um/raptoreum
 
 Measured on `develop` (2.0.4.1), regtest, `checkmempool=0`. Review before posting.
