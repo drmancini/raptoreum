@@ -9,6 +9,16 @@ Each N is timed twice: once with a valid transaction, and once with a
 same-shape transaction whose first prevout does not exist. The second is
 rejected before any signature work but after the same parsing and transport, so
 the difference isolates validation from the cost of moving a large hex blob.
+
+Three things are required for a row to survive to the timing, each learned by
+having it not: a size-scaled fee (below), a FRESH fan-out set so nothing
+collides with a corpus run (`txn-mempool-conflict` is silent in the timings),
+and --counts capped at 650. Past ~675 P2PKH inputs a transaction exceeds
+MAX_STANDARD_TX_SIZE and is rejected as bad-txns-oversize before any signature
+work, so the default counts list ending at 800 measures rejection paths.
+
+Ran 2026-09-18 on bowser against an isolated regtest node; see
+docs/perf-results.md.
 """
 import argparse, base64, http.client, json, os, sys, time, statistics
 

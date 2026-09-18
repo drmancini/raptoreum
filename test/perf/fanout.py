@@ -57,10 +57,13 @@ def main():
     ap.add_argument("--value", type=float, default=0.0005)
     ap.add_argument("--seed", default="rtm-perf-fanout-v1")
     ap.add_argument("--wallet", default="perf")
+    ap.add_argument("--port", type=int, default=None,
+                    help="rpcport, when the node is not on the chain default "
+                         "(a second node on one box always is not)")
     a = ap.parse_args()
 
     os.makedirs(a.out, exist_ok=True)
-    node = rpc(a.datadir, wallet=a.wallet)
+    node = rpc(a.datadir, wallet=a.wallet, port=a.port)
     print("height at start:", node.getblockcount())
 
     mine_to = node.getnewaddress()
