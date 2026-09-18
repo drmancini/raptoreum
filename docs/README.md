@@ -1,6 +1,14 @@
 # Docs
 
-Nine live documents. Everything else is outbound text or archive. If a fact appears in two
+Ten live documents, in three lifecycles — **living** (revised in place, always current),
+**append-only** (the measurement log, never edited except by a forward-pointing correction), and
+**frozen** (written once for an audience elsewhere: `outbound/`). `archive/` holds what stopped
+being living, and every file there says why and what replaced it.
+
+**One number, one home.** A measured value lives in `perf-results.md` and is named in
+`findings.md`; a constant lives in `findings.md` read from source. Anywhere else, cite the ID.
+A value restated in prose is how two documents come to disagree, and it is how this folder
+already contradicted itself four times. Everything else is outbound text or archive. If a fact appears in two
 places it will eventually disagree with itself, so each doc below owns its subject and the
 others reference it rather than restating.
 
@@ -8,6 +16,7 @@ others reference it rather than restating.
 
 | doc | owns |
 |---|---|
+| `findings.md` | **what we know.** Every number and decision this project relies on, one line each, with the regime it was measured in and a status. **Living docs cite an ID (F12, C7, A1, D4, R9); they do not restate a value.** |
 | `transaction-decoupling.md` | **the design.** What we are building and why, at the level of files, structures and states. Currently v8. |
 | `architecture-plain-language.md` | **the same design without the code.** What it is and why it holds, for reading and for handing to someone else. Currently v2. |
 | `build-plan.md` | **the schedule.** Phased components, effort, design certainty, the gates, and what is deferred with its tripwire. |
