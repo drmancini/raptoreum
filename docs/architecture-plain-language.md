@@ -464,7 +464,11 @@ In order of what blocks the most.
 6. **Migration:** rollback or not, how long both formats coexist, and what wallets, explorers and
    exchanges must do by when.
 7. **Rate limiting and accounting for body serving**, which today's upload accounting does not cover.
-8. **Whether InstantSend and ChainLocks are actually live on mainnet.** Their sporks ship off, and the
-   answer decides whether several costs in this design are real or inert.
+8. ~~Whether InstantSend and ChainLocks are actually live on mainnet.~~ **Answered, and it does
+   not change the design.** Mainnet currently has InstantSend switched off deliberately and a
+   broken quorum layer; both will be fixed before decoupling and neither is this project's scope.
+   The design assumes InstantSend on and quorums healthy, so every cost that depends on them
+   stays priced — including that a ChainLock-signing smartnode must hold every transaction in the
+   last six blocks, which in practice means every smartnode must converge.
 9. **Coordinating the external mining interface** — not an engineering problem, which is why it decides
    schedules.
