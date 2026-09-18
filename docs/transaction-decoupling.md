@@ -396,7 +396,10 @@ third outcome beside valid and invalid: it drops the chain from the candidate se
 any failure bit, and re-inserts it into `m_blocks_unlinked` so that, in its own words, "if the
 block arrives in the future we can try adding to setBlockIndexCandidates again." The 0.1 probe
 held a commitment-only block, restarted on the validated tip and converged once the body arrived
-with **no change to chain selection at all** (F-25f). What the layer still owes is not this rule
+with no change to chain selection — **under the encoding where `BLOCK_HAVE_DATA` means bodies
+held** (F-25f). Under the separate bit this section actually calls for, `FindMostWorkChain` must
+test that bit instead: whatever means "bodies held" has to be what chain selection reads, or
+`ConnectTip`'s guarantee that a selected block is readable is relaxed rather than extended. What the layer still owes is not this rule
 but the plumbing beneath it: a body store, a fetch scheduler, and a status bit that separates
 holding the commitments from holding the bodies, which the probe did without and which is why its
 withheld block was re-requested twice and then dropped (F-25i).
@@ -2326,8 +2329,9 @@ remove the outputs those transactions created, and undo data records the coins t
 the ones they made. So consensus trust does not merely shift a trust boundary: it obliges a node
 to either keep bodies it was told it could skip, or carry an extended undo record that names every
 output created. Neither is priced anywhere in this document. The bodies-required path is free of
-this entirely — connecting needs the bodies, so the gap is always above the tip and the case
-cannot arise (F-29).
+this **given §6's retention window** — connecting needs the bodies, so the gap stays above the tip
+as long as the window covers full reorg depth (F-29). Note `validation.h:MIN_BLOCKS_TO_KEEP` is
+below §6's floor, so `-prune` and decoupling conflict as written.
 
 **And the decision that bounds the third row:** *what may an attested transaction change?* If
 contract-layer state only, a lying quorum corrupts contract state and cannot steal RTM. If
