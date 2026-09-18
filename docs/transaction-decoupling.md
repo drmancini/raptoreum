@@ -248,8 +248,11 @@ tracking what the block commits to the moment bodies leave the block.
 
 **2. The sigop cap is also what bounds worst-case hashing, so it cannot be re-based naively.**
 Legacy `CHECKMULTISIG` recomputes the whole-transaction sighash per key tried, with no `BASE`
-sighash cache, so the real bound today is sigops × maximum transaction size: 40,000 × 100 kB
-≈ **4 GB of SHA256d, on the order of 8-16 seconds**. An earlier revision put today's worst
+sighash cache, so the bound today is sigops × maximum transaction size: 40,000 × 100 kB
+≈ 4 GB of SHA256d — **but only for the scripts the counter actually charges.** Measured
+2026-09-18, today's real worst case runs through a path the counter charges nothing for: a 2 MB
+block of bare-multisig spends is **~49 s of validation charged ~42 sigops of a 40,000 budget**.
+An earlier revision put today's worst
 case at 0.4 s by counting only the per-transaction cap; that was ~20x optimistic. Re-base the
 block budget to committed count and worst-case hashing scales with it; re-base it generously
 and quadratic sighash is unleashed, since this tree has no SegWit and `SignatureHash`
@@ -266,7 +269,7 @@ consensus.
 
 | limit | re-based to | constraint that picks the value |
 |---|---|---|
-| block sigop budget | committed identifier count | total worst-case block hashing stays at or under today's ~4 GB |
+| block sigop budget | committed identifier count | **a deliberate budget, not "match today"** — today's worst case is ~49 s per 2 MB block through an uncounted path, which is 40% of the interval and an accident of the accounting rather than a design choice |
 | per-transaction work | accurate sigops over **spent** scripts × size | caps the quadratic term per transaction. **Measured 2026-09-18: ~130 µs per sigop of work, plus ~40% more from the size term at the 100 kB ceiling.** |
 | block body bytes | committed identifier count | bounds both the fetch and the permanent storage one block can impose |
 
@@ -291,8 +294,31 @@ blocks. See `perf-results.md`.
 
 **Per-transaction is the checkable unit.** A node cannot know what a commitment block implies
 before fetching; it can reject each body as it arrives. The one term needing the UTXO view is
-P2SH sigops (`validation.cpp:2374`), so the accept-time bound is the legacy count and the
-connect-time bound is the full one.
+**the whole spend-side count** (§1A above), which is view-dependent. That looks like it breaks
+the prefix-abort, and does not: bodies arrive **in block order, which is topological**, so the
+count is computable incrementally against a scratch view as they stream in, and a prefix that
+exceeds the budget still aborts the fetch. It works only because fetch is positional — hash-
+addressed fetch delivers bodies in arbitrary order and would force a node to hold all of them
+before it could price any.
+
+**And the budget's value is set by ordinary traffic, not by the attack.** Measured per-input and
+per-sigop costs give, for a full commitment block of ordinary two-in/two-out payments:
+
+| cold — bodies never seen, cache misses | 2 MB block | 8 MB block |
+|---|---|---|
+| single thread | ~16-20 s | ~65-78 s |
+| the stated 8-core Smartnode | ~4-5 s | ~17-20 s |
+| a 4-thread VPS | ~7 s | ~28 s |
+| **warm — validated at acceptance** | **~0.8 s** | ~3.2 s |
+
+**That 20-25× swing is the most important number in this section.** What stands between a 0.8 s
+connect and a 16 s one is whether relay delivered the bodies before the block named them, so
+§16.3's relay cap re-index is not only about convergence for reconstruction — it is what keeps the
+script cache hitting. And `-maxsigcachesize` stops being local tuning: 524,288 entries is 8.4
+blocks at 2 MB and **2.1 blocks at 8 MB**, so at the top of the range the cache cannot hold the
+last two blocks and cold connects become certain under any backlog. It is consensus-adjacent
+sizing. The cold column is also a third independent reason to mine 2 MB by policy (§13.H), beside
+relay and storage.
 
 ---
 
