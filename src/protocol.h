@@ -303,6 +303,17 @@ enum ServiceFlags : uint64_t {
     // serving the last 288 blocks
     // See BIP159 for details on how this is implemented.
     NODE_NETWORK_LIMITED = (1 << 10),
+    // NODE_COMMITMENTS means the peer can read a block carried as its coinbase plus
+    // one 32-byte identifier per remaining transaction, and can fetch the bodies it
+    // names. In the experimental range below on purpose: the format is fork-local
+    // and unactivated, and a low bit risks colliding with an upstream assignment.
+    //
+    // Like every service bit this is an UNAUTHENTICATED advertisement. A peer may
+    // claim it and send nonsense, so nothing may be trusted on the strength of the
+    // bit alone -- it decides only which serialization we offer, never whether what
+    // comes back is believed. Every identifier is checked against the body that
+    // arrives for it (see MaterialiseBlock).
+    NODE_COMMITMENTS = (1 << 24),
 
     // Bits 24-31 are reserved for temporary experiments. Just pick a bit that
     // isn't getting used, or one not being used much, and notify the
@@ -362,6 +373,23 @@ static inline bool HasAllDesirableServiceFlags(ServiceFlags services) {
  * Checks if a peer with the given service flags may be capable of having a
  * robust address-storage DB.
  */
+/**
+ * Can this peer be sent a block in commitment form?
+ *
+ * Decides which serialization we OFFER and nothing else. The bit is an
+ * unauthenticated claim, so a true answer here never licenses trusting what the
+ * peer sends back: identifiers are verified against the bodies that arrive for
+ * them regardless.
+ */
+static inline bool CanReceiveCommitments(ServiceFlags services) {
+    return (services & NODE_COMMITMENTS);
+}
+
+/** The stream flags to serialize a block with, for a given peer. */
+static inline int BlockSerFlagsFor(ServiceFlags services) {
+    return CanReceiveCommitments(services) ? (SER_NETWORK | SER_COMMITMENTS) : SER_NETWORK;
+}
+
 static inline bool MayHaveUsefulAddressDB(ServiceFlags services) {
     return (services & NODE_NETWORK) || (services & NODE_NETWORK_LIMITED);
 }
