@@ -243,6 +243,6 @@ is findable.
 |---|---|---|
 | F-4, F-7, F-30, F-32 | four numbers with no single value | a measurement at a stated regime, or one choice recorded here |
 | F-29 | `DisconnectTip` across a body gap is unreachable without dual validation — and is a cost dual validation had not been charged | answers from trí (D-6) |
-| F-18 at quorum 50 | the InstantSend gap is priced from a quorum a tenth the live size | 0.4, the smartnode swarm |
+| F-18 at quorum 50 | the InstantSend gap is priced from a quorum a tenth the live size | **NOT 0.4** — it formed an 8-member quorum on ten smartnodes, and `-llmqtestparams` overrides only size and threshold, so the swarm can never answer this. Needs a **50-smartnode loopback regtest on mario**, which is how F-18 was measured in the first place |
 | X-6 | the load shape, and whether a contract transaction is 373 B or 10 kB | trí |
 | the work cap's value | F-12 gives the constant; the budget is a choice | 1.2 |
