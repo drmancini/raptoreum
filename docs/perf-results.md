@@ -1687,3 +1687,73 @@ rejected -- first for a flat fee below the size-scaled minimum relay fee, then f
 transaction short-circuits before signature checking, so the timings measure rejection
 paths. The harness needs a size-scaled fee, non-overlapping UTXOs, and a ceiling of ~675
 inputs. Rerun before any claim about the shape of the curve.
+
+### 2026-09-18 — input-count validation cost: the quadratic term is NOT visible at legal sizes
+
+`bench_inputs.py` finally produced data. What it needed was not the fee (the size-scaled fee
+was already in the script) but a **fresh fan-out set** -- every earlier row collided with a
+corpus run and was rejected as `txn-mempool-conflict`, silently, so the timings measured
+rejection -- and **`--counts` capped at 650**, since past ~675 P2PKH inputs a transaction
+exceeds `MAX_STANDARD_TX_SIZE` and is rejected as `bad-txns-oversize` before any signature
+work. `fanout.py` also needed a `--port` passthrough to drive a node off the chain default.
+
+Method: an isolated regtest node on bowser (`/data/rtm-bench`, rpcport 19788, `listen=0`,
+fresh chain, zero assets, **not** the swarm node), two independent fan-out sets of 12,000 and
+24,000 P2PKH UTXOs at 0.001 RTM. `delta_ms` is a valid transaction minus a same-shape
+transaction whose first prevout does not exist, which is rejected after the same parse and
+transport but before signature work.
+
+| inputs | bytes | run 1 delta_ms (reps 2) | run 2 delta_ms (reps 5) | us/input, run 1 | us/input, run 2 |
+|---|---|---|---|---|---|
+| 25 | 3,770 | 3.6 | -- | 142.9 | -- |
+| 50 | 7,456 | 7.3 | -- | 145.8 | -- |
+| 100 | 14,832 | 16.1 | -- | 161.5 | -- |
+| 200 | 29,564 | 37.9 | 38.4 | 189.5 | 192.0 |
+| 300 | 44,330 | 59.8 | 50.4 | 199.4 | 167.9 |
+| 400 | 59,068 | 66.9 | 51.3 | 167.2 | 128.3 |
+| 500 | 73,818 | 68.9 | 70.7 | 137.8 | 141.4 |
+| 650 | 95,954 | 104.3 | 102.6 | 160.5 | 157.9 |
+
+**The headline: cost is linear in input count over the whole legal range.** Per-input cost is
+flat at roughly 130-200 us from 25 inputs to 650, with no trend -- it wobbles in both
+directions across two independent runs. Pooled least squares through the origin gives
+**156 us per input**. A quadratic term would have raised per-input cost by about a third
+between N=200 and N=650 (sighash bytes per input scale with transaction size: 29.6 kB against
+96 kB); that rise is not there, and the run-to-run scatter is about +/-25%, larger than the
+effect it would produce.
+
+**The O(N^2) term is real in the code and simply not dominant at legal sizes.** At 650 inputs
+the sighash work is 650 x 96 kB = 62 MB of SHA256d, which on this box (Ryzen 9 3900X, SHA
+extensions) is tens of milliseconds -- comparable to, not larger than, the 650 ECDSA
+verifications beside it. Bounding it: the deviation from pure linearity at N=650 is inside the
+noise, so the per-byte term is **under 0.4 ns/byte/input**, i.e. at most about a quarter of the
+cost of the largest legal transaction.
+
+**Worst legal transaction: ~100 ms.** 104.3 and 102.6 ms across the two runs at 650 inputs and
+96 kB. Not seconds. The 100 kB cap is doing its job.
+
+**What this does and does not settle.**
+
+- **BIP143-style sighash buys nothing at legal sizes** and stays deferred. There is no
+  throughput argument for it, and the DoS argument is bounded by the cap plus a per-transaction
+  work rule (§1A of the design).
+- **It does NOT measure the adversarial shape, and that is where the hazard actually lives.**
+  These are P2PKH inputs: one sigop, one signature, one sighash each. A `CHECKMULTISIG` input
+  can trigger up to ~15-20 sighash computations of the whole transaction, because the legacy
+  interpreter has no `BASE` sighash cache and re-hashes per key tried. So the quantity to bound
+  is **sigops x size, not inputs x size**, which is what §1A proposes -- and the constant in
+  that rule cannot be set until a multisig arm is measured. **Next arm of this bench.**
+- **A useful figure for the acceptance layer, by arithmetic from the measured constant.** A full
+  2 MB commitment block of ordinary 2-in/2-out payments commits to 62,500 transactions =
+  125,000 inputs, i.e. roughly **19.5 s of single-thread validation, ~2 s across twelve cores**,
+  when the bodies were never seen at acceptance and miss the script cache. At the 8 MB point it
+  is 78 s and ~7-10 s. That is the cold-connect budget the design has to live inside, and it is
+  the cost the script cache exists to avoid paying.
+
+**Caveats.** One box, and one with SHA extensions -- a node without them pays more for the
+hashing half, which is the half this says is small. Timings are `sendrawtransaction` round
+trips, so they include RPC, parse and mempool bookkeeping amortised per transaction, which is
+why the N=1 row reads 900 us/input and should be ignored. Regtest with zero assets, so no
+per-ATMP asset-cache copy is in these numbers (on mainnet that is 2.0-3.2 ms per call). Two
+runs, reps 2 and 5. The bench node is left running at `/data/rtm-bench` on bowser for the
+multisig arm.
