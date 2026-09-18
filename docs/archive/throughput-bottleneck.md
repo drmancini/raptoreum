@@ -1,3 +1,17 @@
+<!-- archived: 2026-09-18
+     why:      its headline conclusion is overturned — "the v1 target of 1,500 tx/s is
+               reachable on the current single-threaded design, with headroom" — by the
+               twelve-node WAN swarm, where relay delivers ~930 tx/s (findings.md F1).
+     replaced: findings.md owns what limits throughput now; perf-results.md owns the
+               measurements, including the five recovered from here in the 2026-09-18
+               back-entry. Nothing in this file is the only copy any more.
+     keep:     because its four first-pass errors are a useful checklist, and because
+               README's second standing warning points at them. -->
+
+> **ARCHIVED 2026-09-18. Its headline is wrong.** Read `findings.md` for what limits throughput
+> and `perf-results.md` for the measurements. This file is kept for its record of how the first
+> pass went wrong, not for its conclusions.
+
 # Where the throughput bottleneck actually is
 
 Measured on the perf rig (Ryzen 9 3900X, 12c/24t, 62 GB), regtest, `checkmempool=0`,

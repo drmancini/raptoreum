@@ -1,6 +1,6 @@
 # Docs
 
-Ten live documents, in three lifecycles — **living** (revised in place, always current),
+Nine live documents, in three lifecycles — **living** (revised in place, always current),
 **append-only** (the measurement log, never edited except by a forward-pointing correction), and
 **frozen** (written once for an audience elsewhere: `outbound/`). `archive/` holds what stopped
 being living, and every file there says why and what replaced it.
@@ -20,7 +20,6 @@ others reference it rather than restating.
 | `transaction-decoupling.md` | **the design.** What we are building and why, at the level of files, structures and states. Currently v8. |
 | `architecture-plain-language.md` | **the same design without the code.** What it is and why it holds, for reading and for handing to someone else. Currently v2. |
 | `build-plan.md` | **the schedule.** Phased components, effort, design certainty, the gates, and what is deferred with its tripwire. |
-| `throughput-bottleneck.md` | **what limits throughput**, measured, and the errors that produced earlier wrong answers. |
 | `perf-constants.md` | **constants, read from source.** The single source of truth for any constant. Do not restate values elsewhere — cite this. |
 | `perf-results.md` | **the measurement log**, chronological. Entries stand as measured; a correction banner flags conclusions later overturned. |
 | `upstream-ledger.md` | **how this tree differs from upstream**, including local modifications that change behaviour. |
@@ -44,13 +43,13 @@ everything past `validation.cpp:111`. Resolve a citation by its **symbol**, not 
 **Measure at the operating point, not only at saturation.** Two conclusions in this project
 were confidently wrong because a subsystem's capacity was measured while a shared thread was
 saturated by something else, and because rates were computed over a fixed duration when the
-work ran past it. Both are recorded in `throughput-bottleneck.md`.
+work ran past it. Both are recorded in `archive/throughput-bottleneck.md`, whose own first pass made all four.
 
 ## Other directories
 
 - `outbound/` — PR descriptions, issue drafts, and messages. Text destined for elsewhere; may
   diverge from what was actually posted.
-- `archive/` — superseded or parked. `expensive-tx-test-design.md` (executed; results are in
+- `archive/` — superseded or parked; every file there carries a header saying why, what replaced it, and when. `throughput-bottleneck.md` (headline overturned by F1; its five unique measurements were logged first), `expensive-tx-test-design.md` (executed; results are in
   `perf-results.md`), `mempoolaccept-port-analysis.md` (parked: acceptance had ~3x
   headroom against the working target of the time; the v8 target is 520-2,083 tx/s, see
   `build-plan.md`), `architecture-decisions.md` (a different project — the contract platform,
