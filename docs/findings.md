@@ -33,20 +33,20 @@ Status is `stands`, `unreconciled` (two correct values, no single answer yet), o
 
 | ID | constant | value | symbol / file | status |
 |---|---|---|---|---|
-| K-1 | block size cap, upstream | 2,000,000 | `MAX_DIP0001_BLOCK_SIZE`, `consensus/consensus.h` | stands |
-| K-2 | block sigop cap | `MaxBlockSize()/50` → 40,000 at 2 MB | `MaxBlockSigOps`, `consensus/consensus.h` | stands |
-| K-3 | per-transaction size cap | 100,000 B, **consensus** when DIP0001 active | `MAX_STANDARD_TX_SIZE` via `ContextualCheckTransaction`, `validation.cpp` | stands |
-| K-4 | script cache | 524,288 entries (32 MB default, halved) | `scriptExecutionCache.setup_bytes`, `validation.cpp` | stands |
-| K-5 | relay cap per trickle | `140 × MaxBlockSize()/1e6` → 280 at 2 MB | `InvBroadcastMax`, `net_processing.cpp` | stands |
-| K-6 | trickle interval | 5 s inbound (Poisson mean), 2 s outbound, 1 s verified smartnode | `INVENTORY_BROADCAST_INTERVAL`, `net_processing.cpp` | stands |
-| K-7 | max protocol message | 3 MB | `MAX_PROTOCOL_MESSAGE_LENGTH`, `net.h` | stands |
-| K-8 | mempool default | 300 MB | `DEFAULT_MAX_MEMPOOL_SIZE`, `policy/policy.h` | stands |
-| K-9 | ancestor / descendant limits | 25 count, 101 kB each | `DEFAULT_ANCESTOR_LIMIT` etc., `validation.h` | stands |
-| K-10 | compact-block index ceiling | 65,535, an explicit deserialisation **guard**, not a wire limit (the wire form is CompactSize) | `CBlockHeaderAndShortTxIDs`, `blockencodings.h` | stands |
-| K-11 | extra payload cap | 10,000 B | `MAX_TX_EXTRA_PAYLOAD`, `consensus/consensus.h` | stands |
-| K-12 | IS wait gate | 600 s | `WAIT_FOR_ISLOCK_TIMEOUT`, `llmq/quorums_chainlocks.h` | stands |
+| K-1 | block size cap, upstream | 2,000,000 | `consensus/consensus.h:MAX_DIP0001_BLOCK_SIZE` | stands |
+| K-2 | block sigop cap | `MaxBlockSize()/50` → 40,000 at 2 MB | `consensus/consensus.h:MaxBlockSigOps` | stands |
+| K-3 | per-transaction size cap | 100,000 B, **consensus** when DIP0001 active | `validation.cpp:MAX_STANDARD_TX_SIZE`, checked in `validation.cpp:ContextualCheckTransaction` | stands |
+| K-4 | script cache | 524,288 entries (32 MB default, halved) | `validation.cpp:scriptExecutionCache.setup_bytes` | stands |
+| K-5 | relay cap per trickle | `140 × MaxBlockSize()/1e6` → 280 at 2 MB | `net_processing.cpp:InvBroadcastMax` | stands |
+| K-6 | trickle interval | 5 s inbound (Poisson mean), 2 s outbound, 1 s verified smartnode | `net_processing.cpp:INVENTORY_BROADCAST_INTERVAL` | stands |
+| K-7 | max protocol message | 3 MB | `net.h:MAX_PROTOCOL_MESSAGE_LENGTH` | stands |
+| K-8 | mempool default | 300 MB | `policy/policy.h:DEFAULT_MAX_MEMPOOL_SIZE` | stands |
+| K-9 | ancestor / descendant limits | 25 count, 101 kB each | `validation.h:DEFAULT_ANCESTOR_LIMIT` | stands |
+| K-10 | compact-block index ceiling | 65,535, an explicit deserialisation **guard**, not a wire limit (the wire form is CompactSize) | `blockencodings.h:BlockTxCount` | stands |
+| K-11 | extra payload cap | 10,000 B | `consensus/consensus.h:MAX_TX_EXTRA_PAYLOAD` | stands |
+| K-12 | IS wait gate | 600 s | `llmq/quorums_chainlocks.h:WAIT_FOR_ISLOCK_TIMEOUT` | stands |
 | K-14 | **planning** bytes per transaction, for all storage arithmetic | **400 B** → 12.6 GB/yr per sustained tx/s | a choice, not a measurement — see D-12 and F-30 | stands |
-| K-13 | mainnet quorum sizes above 600 smartnodes | IS 50; ChainLocks 200 (with `QUORUMS_200_8`) or 400 | `UpdateLLMQParams`, `chainparams.cpp` | stands |
+| K-13 | mainnet quorum sizes above 600 smartnodes | IS 50; ChainLocks 200 (with `QUORUMS_200_8`) or 400 | `chainparams.cpp:UpdateLLMQParams` | stands |
 
 ## Measured facts
 
