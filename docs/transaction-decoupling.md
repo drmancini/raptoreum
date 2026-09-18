@@ -247,14 +247,14 @@ unchanged. Only its identifier-set constructor does (`merkleblock.cpp:50-51`, us
 Three limits therefore have to be re-based, and they interact, so they are one decision.
 
 **1. The block sigop cap blocks the design outright until it is re-based.**
-`MaxBlockSigOps() = MaxBlockSize()/50` (`consensus/consensus.h:21-23`) is 40,000 at 2 MB.
+`MaxBlockSigOps() = MaxBlockSize()/50` (`consensus/consensus.h:MaxBlockSigOps`) is 40,000 at 2 MB.
 `GetLegacySigOpCount` counts `scriptPubKey` sigops per **output**
-(`consensus/tx_verify.cpp:214-223`), so an ordinary two-output payment is 2 sigops. A 2 MB
+(`consensus/tx_verify.cpp:GetLegacySigOpCount`), so an ordinary two-output payment is 2 sigops. A 2 MB
 commitment block naming 62,500 such payments carries 125,000 and is **invalid**: `CheckBlock`
 sums across the block and rejects above the cap with `DoS(100)` (`validation.cpp:3935-3941`,
 again at `:4051-4064`, and with P2SH counted at `:2374-2375`). The cap admits roughly 20,000
 transactions — **167 tx/s against a 520 tx/s design point** — and the miner simply stops
-filling (`miner.cpp:286-289`), silently.
+filling (`miner.cpp:TestPackage`), silently.
 
 This is §16.3's relay cap in a second place: a limit indexed to block *bytes*, which stop
 tracking what the block commits to the moment bodies leave the block.
@@ -2426,7 +2426,7 @@ the side that forks off. So trust-at-connect is silently catastrophic rather tha
 the root is no defence against it.
 
 **Skipping at acceptance does not merely relocate the cost.** Skipping must not populate
-`scriptExecutionCache` (it inserts only after executing, `validation.cpp:1541-1544`), so
+`scriptExecutionCache` (it inserts only after executing, `validation.cpp:scriptExecutionCache.insert`), so
 `ConnectBlock` pays cold — but cold-at-connect runs on `CCheckQueue` with thousands of checks
 queued and one wait, which is exactly the batched shape ATMP cannot have. It moves two thirds of
 acceptance off the serial message-handling thread onto the parallel pool, at the cost of

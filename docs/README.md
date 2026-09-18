@@ -53,6 +53,28 @@ plain-language companion is written. A lint that flatters you is worse than no l
 Run `./check-numbers.py --show 10` to see the worst, or `--max N` to fail in CI once a budget is
 agreed.
 
+## Citing the source
+
+A line number is not an address: any commit touching a cited file moves every anchor below it,
+and the acceptance probe alone moved everything past `validation.cpp:111` by 5 lines. So a
+citation **carries its symbol**:
+
+```
+`validation.cpp:MAX_STANDARD_TX_SIZE`          a symbol
+`validation.cpp:scriptExecutionCache.insert`   a specific use, where a symbol appears often
+`llmq/quorums_chainlocks.cpp:TrySignChainTip`  a path-qualified file
+```
+
+`check-anchors.py` resolves those against the tree and fails if one has been renamed or removed.
+**17 citations are keyed; 180 are still `file:line` and unverifiable** — that is the migration
+backlog, and `--list` prints it. New citations use the keyed form.
+
+**Auto-rewriting the old ones was tried and abandoned**, which is worth recording: inferring the
+symbol from nearby prose picks *a* symbol rather than *the* one meant, and it proposed moving
+`validation.cpp:3026` to `:5485`. A heuristic that repoints a citation confidently is worse than
+a stale number, because staleness is at least visible. Each unkeyed citation needs a human who
+knows which line the sentence was about.
+
 ## Other directories
 
 - `outbound/` — PR descriptions, issue drafts, and messages. Text destined for elsewhere; may
