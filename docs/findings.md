@@ -101,7 +101,12 @@ Status is `stands`, `unreconciled` (two correct values, no single answer yet), o
 | F-25b | the three fatal paths, gated | `VerifyDB` starts and stops early; serving declines and survives; `ConnectTip` holds the block incomplete without touching validity | `bench-rt` | stands |
 | F-25c | "not yet" must be a carried signal | returning false is non-fatal at runtime but fatal at startup — `ThreadImport` shuts down on any failed `ActivateBestChain`, and an empty state is indistinguishable from a disk error. Fixed with `CValidationState::BodiesMissing()`, four call sites | `bench-rt` + `source` | stands |
 | F-25d | read-time withholding cannot reach the interesting states | to exercise `ConnectTip` a block must be valid, unconnected and body-less, and on one node every route there disconnects across the same gap. The remaining scenarios need **accept-time** withholding and **two** nodes | `bench-rt` | stands |
-| F-29 | `DisconnectTip` on a missing body | **still open**, and doubly interesting: the path most likely to fire 0.1's kill criterion, and the reason the single-node scenarios are unreachable | — | open |
+| F-25e | `ReceivedBlockTransactions` **is** the acceptance layer | one function records five things, and they part cleanly: `nTx`, `nChainTx` and candidate entry are commitment-level and knowable from a commitment list; `nFile`/`nDataPos` and `BLOCK_HAVE_DATA` are body-level. `HaveTxsDownloaded()` reads `nChainTx`, so despite the name it is a **count, not a possession** — candidate eligibility and `LoadBlockIndex`'s re-linking work on a commitment-only block unchanged | `source` + `bench-rt` | stands |
+| F-25f | the hold-and-retry semantics already exist, for pruning | `FindMostWorkChain` already declines an absent-data chain without condemning it and re-arms it via `m_blocks_unlinked`; unchanged by the probe | `source` + `bench-rt` | stands |
+| F-25g | the whole cost was one split and **two** assert relaxations | both in `CheckBlockIndex`, both in the direction pruning already established: the `nTx`/`HAVE_DATA` equivalence, and `assert(fHavePruned)` on a body gap under a held block. The flag is re-derived from the index at load, not persisted, because the relaxation must precede the run's first `CheckBlockIndex` | `bench-rt` | stands |
+| F-25h | a commitment-only node is not a pruned node | `"pruned": false` with a genuine body gap; `getblockheader` still reports the commitment count, `getblock` declines through `IsBlockPruned`, whose 3 callers already have the right shape | `bench-rt` | stands |
+| F-25i | without a separate bodies bit the fetch layer gives up | the withheld block was re-requested twice and then dropped: with only `BLOCK_HAVE_DATA` the download logic cannot tell "need commitments" from "need bodies". The bit-256 decision confirmed from the other direction | `bench-rt` | stands |
+| F-29 | `DisconnectTip` across a body gap | **cannot arise in the bodies-required path** — connecting needs the bodies, so the gap is always above the tip. Reachable only under dual validation, where reversing a commitment block connected on a state root needs the bodies back: `DisconnectBlock` must remove the outputs the transactions created, and undo data does not carry them. `DisconnectTip` also reads before mutating and returns a plain `error()`, so a failed disconnect leaves the chainstate untouched | `source` + `bench-rt` | **settled** |
 
 ### Sizing
 
@@ -205,7 +210,7 @@ is findable.
 | what | why it matters | who answers |
 |---|---|---|
 | F-4, F-7, F-30, F-32 | four numbers with no single value | a measurement at a stated regime, or one choice recorded here |
-| F-29 | `DisconnectTip` is the probe path most likely to fire the kill criterion | phase B of 0.1 |
+| F-29 | `DisconnectTip` across a body gap is unreachable without dual validation — and is a cost dual validation had not been charged | answers from trí (D-6) |
 | F-18 at quorum 50 | the InstantSend gap is priced from a quorum a tenth the live size | 0.4, the smartnode swarm |
 | X-6 | the load shape, and whether a contract transaction is 373 B or 10 kB | trí |
 | the work cap's value | F-12 gives the constant; the budget is a choice | 1.2 |

@@ -2118,3 +2118,78 @@ it cannot fill. Two consequences for the harness:
 
 `DisconnectTip` remains the open path and is now doubly interesting: it is both the scenario most
 likely to fire the kill criterion and the reason the single-node scenarios are unreachable.
+
+### 2026-09-18 — acceptance-layer probe, phase B complete: the state already exists, for pruning
+
+Plan item 0.1, phase B. Read-time withholding could not reach the interesting states, so the
+withhold flag now acts at **acceptance**: the chosen block is accepted with its commitments and
+without its bodies, which is how a decoupled node will actually meet one. Two nodes, regtest,
+`-checkblockindex=1` (regtest's default, so every index invariant is checked on every accept).
+
+**The finding that matters: `ReceivedBlockTransactions` is the acceptance layer, in one function.**
+It does five things at once, and they part cleanly along the commitment/body line:
+
+| what it records | level | knowable from commitments alone? |
+|---|---|---|
+| `nTx` — transactions this block commits to | commitment | **yes** — the commitment list has them |
+| `nChainTx` — cumulative count, via the descendant walk | commitment | **yes** — a count, not a possession |
+| `nSequenceId`, entry into `setBlockIndexCandidates` | commitment | **yes** |
+| `nFile` / `nDataPos` — where the bodies are | body | no |
+| `BLOCK_HAVE_DATA` — the claim that we hold them | body | no |
+
+`HaveTxsDownloaded()` reads `nChainTx`, so its name lies: it is a count, not a possession, and it
+is satisfied by a commitment-only block. Which means candidate eligibility, the `assert` at the
+head of `FindMostWorkChain`'s walk, and `LoadBlockIndex`'s re-linking all work on a commitment-only
+block **unchanged**.
+
+**And the hold-and-retry semantics §2.3 asks for are already implemented — for pruning.**
+`FindMostWorkChain` already treats absent data as a third outcome beside valid and invalid: it
+declines the chain without condemning it, and re-arms it through `m_blocks_unlinked` with the
+comment "if the block arrives in the future we can try adding to setBlockIndexCandidates again."
+Nothing in it needed changing.
+
+**What it cost.** One function split, and **two** assertion relaxations — both of which pruning
+already has, and both in `CheckBlockIndex`:
+
+| invariant | what fired it | fix |
+|---|---|---|
+| `!(nStatus & BLOCK_HAVE_DATA) == (nTx == 0)`, guarded `if (!fHavePruned)` | the withheld block itself | add the new flag to the guard; the `else` branch's one-way implication `HAVE_DATA ⟹ nTx > 0` is already the right rule |
+| `assert(fHavePruned); // We must have pruned.` | the **next** block: it holds data, every parent was received, but a parent's body is absent | `assert(fHavePruned \|\| fHaveCommitmentOnly)` |
+
+The second is the interesting one — it says in as many words that only pruning can leave a body gap
+under a block you hold. Decoupling leaves the same gap. The flag is re-derived at load from the
+index itself (an entry with `nTx > 0` and no `BLOCK_HAVE_DATA`) rather than persisted, because the
+relaxation has to be in place before the run's first `CheckBlockIndex`, which happens during
+startup.
+
+**Scenario results.** All four reachable ones pass:
+
+| scenario | result |
+|---|---|
+| commitment-only block arrives | accepted; tip holds at the parent; the branch above reads `valid-headers`, **not** invalid; node alive under full consistency checks |
+| blocks above the gap | bodies held at 14, 16 and 20 with 15 absent — a real gap, and `"pruned": false` |
+| restart while incomplete | starts, re-derives the flag, comes up on the validated tip, alive |
+| withholding removed | re-arms through `m_blocks_unlinked` and converges; one active tip |
+| RPC for the withheld block | `getblockheader` answers with the commitment count; `getblock` declines via `IsBlockPruned` |
+
+**`DisconnectTip` across a body gap cannot arise in the bodies-required path**, which retires the
+scenario flagged as the likeliest to fire the kill criterion. Connecting requires the bodies, so
+the tip can never be above a block whose bodies are absent: the gap is always above the tip. It
+becomes reachable only in the **dual-validation** path, where a commitment block is connected on
+the strength of a state root — and reversing it needs the bodies back, because `DisconnectBlock`
+must remove the outputs the transactions created and undo data alone does not carry them. That is a
+cost dual validation had not been charged. Separately, `DisconnectTip` reads the block *before*
+mutating anything and returns a plain `error()` rather than aborting, so a failed disconnect leaves
+the chainstate untouched.
+
+**Verdict against 0.1's written kill criterion: no kill, and the estimate should come down.**
+Nothing in `CheckBlock`, `ContextualCheckBlock` or `ConnectBlock` was touched; no consensus rule
+was relaxed. Both relaxed assertions are index-bookkeeping invariants inside `CheckBlockIndex`,
+which is debug-gated, and both were relaxed in the direction pruning already established.
+
+**What this probe does not show.** It reaches "hold a commitment-only block without connecting it"
+and no further. There is no body store, no fetch scheduler, and no separate `BLOCK_HAVE_BODIES`
+bit. The absence of that bit is visible in the log: the withheld block was re-requested twice and
+then dropped, because with only `BLOCK_HAVE_DATA` the download logic cannot tell "need commitments"
+from "need bodies". That is the design's bit-256 decision confirmed from the other direction, and
+it is the next increment.
