@@ -1,3 +1,10 @@
+<!-- archived: 2026-09-18
+     why:      superseded as the plan by build-plan.md; its target (1,500 tx/s) and its Tier 0 framing of
+               relay as a blanket precondition are both retired (F1, D4)
+     replaced: build-plan.md owns the schedule; findings.md owns the decisions, including D8 — the relay
+               cap re-index is not a standalone upstream PR
+     keep:     its "measured as NOT needed" table is the record of what was descoped and why -->
+
 # Code changes before / around decoupling
 
 > **SUPERSEDED AS THE PLAN, 2026-09-17.** `build-plan.md` is the schedule of record: the target

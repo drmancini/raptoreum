@@ -1,3 +1,9 @@
+<!-- lifecycle: living — revised in place
+     owns:      every way this tree diverges from upstream, and the state of every PR
+     not mine:  the design, the schedule, values
+     rule:      docs/ never rides an upstream PR (D10). Check before submitting:
+                git diff $(git merge-base upstream/develop <branch>) <branch> --name-only | grep ^docs/ -->
+
 # Upstream ledger
 
 Every way this tree diverges from `Raptor3um/raptoreum:develop`, and where each piece is

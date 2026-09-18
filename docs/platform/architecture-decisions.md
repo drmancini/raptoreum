@@ -1,3 +1,10 @@
+<!-- lifecycle: living — a different subject, not archived
+     owns:      the contract-platform architecture: runtime, consensus, state layer, peg
+     not mine:  decoupling, which is this folder's other subject
+     note:      cited by transaction-decoupling §17 and build-plan phase 5, so it is referenced
+                rather than abandoned. It is the first file of the second subject; when the
+                platform work starts in earnest it gets the same treatment decoupling has. -->
+
 # Raptoreum Contract Platform — Architecture Decisions and Rationale
 
 **Status:** proposal / discussion draft

@@ -1,3 +1,9 @@
+<!-- archived: 2026-09-18
+     why:      executed; it was a test design and the tests have run
+     replaced: perf-results.md §17 and the 2026-09-18 entries carry the results
+     keep:     it states what each outcome would have meant, which is worth keeping as a worked example of
+               pre-registering a measurement -->
+
 # Test design: what does a shorter validation path actually buy?
 
 **Status:** design, revised after adversarial review. Review findings were verified against

@@ -1,3 +1,11 @@
+<!-- lifecycle: living — but see the warning below
+     owns:      the design explained without code, for reading and for handing to someone else
+     not mine:  everything else; this restates the design by construction
+     warning:   this file paraphrases numbers, which is the one thing the citation rule forbids.
+                It is kept because its audience cannot follow ID citations, and it is therefore
+                the most rot-prone document here. Treat a divergence from findings.md as this
+                file being wrong, never the other way round. -->
+
 # Transaction Decoupling on Raptoreum
 
 ## An architecture in plain language

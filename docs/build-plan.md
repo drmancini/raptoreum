@@ -1,3 +1,9 @@
+<!-- lifecycle: living — revised in place, always current
+     owns:      the schedule: what gets built, in what order, effort, design certainty, the gates
+     not mine:  the design (transaction-decoupling.md), values (findings.md), measurements (perf-results.md)
+     known debt: this file carries dated progress notes and measured figures, which its own
+                class forbids. They belong in the log and in findings; see check-numbers.py. -->
+
 # Build plan — transaction decoupling
 
 **Version 1, 17 September 2026.** Owns the **schedule**: what gets built, in what order, how
@@ -137,6 +143,19 @@ transaction class a quorum signature is the only validity rule available. See §
 | 5.2 | **Batched attestation.** One threshold signature over a Merkle root of N items, partial-conflict semantics, the mining-gate interaction. The gate for everything attestation-based: one lock costs ≥1.15 ms of BLS against ~118 µs of ECDSA saved, so break-even is 10-20 transactions per signature. Shared with InstantSend batching — build once. | 3-5 w | partly unknown |
 | 5.3 | **Admission-only shortcut.** Acceptance skips script checks for attested transactions and does not cache; `ConnectBlock` verifies cold on the parallel queue. Consensus untouched, trust boundary is the one islocks already impose, a lying quorum cannot fork. The baseline any consensus version must beat. | 2-3 w | straightforward |
 | 5.4 | **Attested transaction type.** A new `nType` whose validity rule is a quorum threshold signature over a declared result, plus the rules bounding what it may change. `ContextualCheckTransaction` whitelists types, so it is a fork either way. Blocked on three answers from trí: what is attested, what it may change, and whether ordinary payments are in scope. | 4-8 w | **unknown, scope not ours** |
+
+## Measured as not needed — the descoping record
+
+Recovered from `pre-decoupling-checklist.md` when it was archived. Each was once on the required
+list and was disproven by measurement, so each is here to stop it being rediscovered.
+
+| item | why it is off the list |
+|---|---|
+| **parallel validation / MemPoolAccept port** as a v1 blocker | acceptance is not the binding constraint (F7); and the naive version is *slower* than stock (F10) |
+| **relay ordering rewrite** (the O(backlog) heap) | `-perfinvnosort` moved throughput <1% at the operating point; the "~40% of msghand" figure came from a 300k backlog at cap 50k-100k, a regime the target never reaches |
+| **`getblocktemplate`**'s full `ConnectBlock` per poll | decoupling dissolves the hard part — a commitment block's bodies were validated at acceptance. Revisit trigger: sustained mining at scale (and see 4.4) |
+| **message-size raises** as separate work | the send loop already chunks at `MAX_INV_SZ`; no splitting needed. The `MAX_PROTOCOL_MESSAGE_LENGTH` raise is still required, as part of 1.4 |
+| **`dbcache` / `maxsigcachesize`** as acceptance fixes | swept at saturation with no effect across 13× and 16× raises, application confirmed in the node log; the ceiling is real compute. **Note:** `-maxsigcachesize` *is* required, for a different reason — C4 holds only 2.1 blocks at 8 MB (4.5) |
 
 ## Gates
 

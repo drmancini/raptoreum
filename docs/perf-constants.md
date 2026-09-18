@@ -1,3 +1,11 @@
+<!-- lifecycle: living — revised in place
+     owns:      the exhaustive source-read audit: which symbol, in which file, and the LLMQ and
+                spork tables in full
+     not mine:  a value the design relies on — findings.md is authoritative for that (C-series).
+                Where this file and findings.md disagree about a number, findings.md wins and
+                this file is stale.
+     warning:   read on perf/throughput-rig, which is not shipped RTM. See upstream-ledger.md. -->
+
 # Throughput test — §0.1 constants, read from the tree
 
 > **The rig tree is not shipped RTM.** Constants below are upstream values unless marked.
@@ -118,15 +126,21 @@ block and overwrites whatever the test chose.
 
 ## Sporks
 
-| spork | number | mainnet default |
-|---|---|---|
-| `SPORK_2_INSTANTSEND_ENABLED` | 10001 | OFF |
-| `SPORK_3_INSTANTSEND_BLOCK_FILTERING` | 10002 | OFF |
-| `SPORK_17_QUORUM_DKG_ENABLED` | 10016 | — |
-| `SPORK_19_CHAINLOCKS_ENABLED` | 10018 | OFF |
-| `SPORK_21_LOW_LLMQ_PARAMS` | 10020 | — |
-| `SPORK_23_QUORUM_ALL_CONNECTED` | 10023 | — |
-| `SPORK_25_QUORUM_POSE` | 10025 | — |
+> **These are COMPILED DEFAULTS, not what mainnet runs.** Every value in `spork.h` is
+> 4070908800 (year 2099 = off), and a spork is active when its value is *below* the current time.
+> Live mainnet was read on 2026-09-18 and is **not** the default: sporks 2, 17, 19 and 23 are ON.
+> See **F23** in `findings.md`, which is authoritative. A reader who takes this table as mainnet
+> state gets four things wrong, which already happened once.
+
+| spork | number | compiled default | mainnet (F23) |
+|---|---|---|---|
+| `SPORK_2_INSTANTSEND_ENABLED` | 10001 | OFF | **ON** (mempool signing off) |
+| `SPORK_3_INSTANTSEND_BLOCK_FILTERING` | 10002 | OFF | OFF |
+| `SPORK_17_QUORUM_DKG_ENABLED` | 10016 | OFF | **ON** |
+| `SPORK_19_CHAINLOCKS_ENABLED` | 10018 | OFF | **ON** |
+| `SPORK_21_LOW_LLMQ_PARAMS` | 10020 | OFF | OFF |
+| `SPORK_23_QUORUM_ALL_CONNECTED` | 10023 | OFF | **ON** |
+| `SPORK_25_QUORUM_POSE` | 10025 | OFF | OFF |
 
 Source `spork.h:37-45`, defaults `spork.h:74-78`. Regtest spork address:
 `yaackz5YDLnFuuX6gGzEs9EMRQGfqmNYjc` (`chainparams.cpp`, regtest section).
