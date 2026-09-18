@@ -53,8 +53,15 @@ mechanism working as intended — the lint found the largest duplication in the 
 seconds, bare bytes, MiB, `×` multipliers, unitless consensus counts, `years`, and every
 spelled-out quantity ("a few thousand", "six terabytes"), which is most of how the
 plain-language companion is written. A lint that flatters you is worse than no lint.
-Run `./check-numbers.py --show 10` to see the worst, or `--max N` to fail in CI once a budget is
-agreed.
+**The budget is now enforced, not observed:** `./check-numbers.py --max 117` is the gate, set at
+the number the folder actually carries. A new restated number fails it, which forces the choice
+the rule exists for — cite the ID, or raise the budget on purpose. `--show 10` prints the worst
+offenders.
+
+The floor is not zero and should not be: a worked example, an arithmetic derivation shown on
+purpose, and the design point stated in the document that owns the schedule are all content
+rather than duplication. `build-plan.md` is exempted for durations, since a schedule that cannot
+state weeks is not a schedule.
 
 ## Citing the source
 
@@ -69,8 +76,15 @@ citation **carries its symbol**:
 ```
 
 `check-anchors.py` resolves those against the tree and fails if one has been renamed or removed.
-**17 citations are keyed; 180 are still `file:line` and unverifiable** — that is the migration
-backlog, and `--list` prints it. New citations use the keyed form.
+A key naming a function resolves to its **definition** — in this codebase a definition starts at
+column 0 and calls are indented — so `CheckBlock` keys cleanly despite 32 occurrences. Where a
+symbol is genuinely used in many places, key the use: `scriptExecutionCache.insert`,
+`VARINT(obj.nStatus)`.
+
+**29 citations are keyed and verifying; 165 are still `file:line` and unverifiable** — that is
+the migration backlog, and `--list` prints it. New citations use the keyed form, and the
+acceptance layer's are done first because phase B of plan item 0.1 edits exactly those
+functions.
 
 **Auto-rewriting the old ones was tried and abandoned**, which is worth recording: inferring the
 symbol from nearby prose picks *a* symbol rather than *the* one meant, and it proposed moving

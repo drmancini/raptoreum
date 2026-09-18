@@ -54,15 +54,29 @@ def find_file(name: str):
 
 
 def sites(path: Path, key: str):
-    """Lines where `key` appears, ignoring comment-only lines."""
-    out = []
-    for i, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+    """Lines where `key` appears, ignoring comment-only lines.
+
+    When the key names a function, a citation almost always means its
+    definition rather than one of its call sites -- and in this codebase a
+    definition starts at column 0 while calls are indented. So if the key
+    resolves to exactly one unindented `key(` line, that is the answer and the
+    call sites are not ambiguity. Without this, `CheckBlock` reported 32
+    occurrences and could not be keyed at all.
+    """
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    defs, all_hits = [], []
+    for i, line in enumerate(lines, 1):
         if key not in line:
             continue
         if line.strip().startswith(("//", "*", "/*")):
             continue
-        out.append(i)
-    return out
+        all_hits.append(i)
+        if re.match(r"^\S.*\b" + re.escape(key.split(".")[-1]) + r"\b\s*\(", line):
+            defs.append(i)
+        elif re.match(r"^\s*(?:[\w:<>,*&\s]+)\b" + re.escape(key.split(".")[-1]) + r"\b\s*[;={]", line) \
+                and "(" not in line:
+            defs.append(i)
+    return defs if len(defs) == 1 else all_hits
 
 
 def main():

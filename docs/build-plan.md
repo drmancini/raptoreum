@@ -14,22 +14,22 @@ this one wins.
 
 ## The design point
 
-Commitments fill a 2-8 MB block every two minutes.
+Commitments fill a 2-8 MB block every two minutes (D-4).
 
-| | 2 MB of commitments | 8 MB of commitments |
-|---|---|---|
-| identifiers per block | 62,500 | 250,000 |
-| throughput | **520 tx/s** | **2,083 tx/s** |
-| body bytes per block (373 B) | 23 MB | 93 MB |
-| body bandwidth | ~195 kB/s | ~780 kB/s |
-| vs today (2 MB of bodies) | 11.6× | 46× |
+| | 2 MB of commitments | 8 MB of commitments | from |
+|---|---|---|---|
+| identifiers per block | 62,500 | 250,000 | K-1, 32 B each |
+| throughput | **520 tx/s** | **2,083 tx/s** | D-4 |
+| body bytes per block | 23 MB | 93 MB | F-30 × the count |
+| body bandwidth | ~195 kB/s | ~780 kB/s | derived |
+| vs today (2 MB of bodies) | 11.6× | 46× | K-1, F-30 |
 
 **Peaks and bursts, not sustained load** (RTM team, relayed by the owner 2026-09-17). Capacity
 is therefore sized for the burst and storage for the average — which is what keeps retention and
 the state root out of this plan. Both assumptions carry tripwires; see the last section.
 
-**One fork.** The format, the 8 MB `MaxBlockSize` and the `MAX_PROTOCOL_MESSAGE_LENGTH` raise all
-ride the same activation, with 2 MB mined by policy afterwards. Splitting them would make the
+**One fork** (D-14). The format, the 8 MB `MaxBlockSize` (K-1) and the `MAX_PROTOCOL_MESSAGE_LENGTH` raise (K-7) all
+ride the same activation, with 2 MB mined by policy afterwards (D-14). Splitting them would make the
 higher target a second hard fork and a second ecosystem event for no benefit.
 
 **One genuine unknown.** The acceptance layer. No production chain has a block whose acceptance
@@ -74,22 +74,22 @@ Nothing in phase 1 starts before 0.1 returns a verdict.
 | 1.1 | **Block format.** Second `CBlock` serialization — coinbase in full, every other entry a bare 32-byte identifier. Selector is a stream flag negotiated by service bit, never a header bit. Raw-commitment read API distinct from a materialising one; materialisation produces a fresh object so `ConnectBlock`'s own `CheckBlock` cannot short-circuit on `fChecked`. | 1-2 w | straightforward |
 | 1.2 | **Block resource budget** (§1A). Sigop cap re-based to committed count, a per-transaction work cap, and a consensus body-byte cap — one joint decision, because the sigop cap is also what bounds worst-case hashing. **0.3 measured the unit: an accurate count over *spent* scripts, since legacy counting charges an 800-input bare-multisig spend 2 sigops for 2.35 s of work; the constant is ~130 µs per sigop.** | 2-3 w | design-sensitive |
 | 1.3 | **Acceptance layer.** Having the identifiers and having the bodies become two facts: a new status bit (a persisted block-index format change), a new validity rung, and ~30 sites above `ConnectBlock` — chain selection, candidate maintenance, `CheckBlockIndex`'s invariants, `NewPoWValidBlock`, pruning, `VerifyDB`, crash replay, `-reindex`, and the `InvalidateBlock` / `MarkConflictingBlock` / `EnforceBestChainLock` interactions. Plus a durable retry queue with per-block exponential backoff that never keys off accumulated work. | **3-6 mo** | **unknown** |
-| 1.4 | **Fork envelope.** 8 MB cap and the message-length raise ride this activation; 2 MB by policy. | in 4.6 | straightforward |
+| 1.4 | **Fork envelope** (D-14). The 8 MB cap (K-1) and the message-length raise (K-7) ride this activation; 2 MB by policy. | in 4.6 | straightforward |
 
 **What cold connect costs, and why the cache is load-bearing** (measured 0.3). A full commitment
 block of *ordinary* two-in/two-out payments, when the bodies were never seen at acceptance:
-~16-20 s single-thread at 2 MB and ~65-78 s at 8 MB; ~7 s and ~28 s on a 4-thread box; ~4-5 s and
-~17-20 s on the stated 8-core Smartnode. **Warm — validated at acceptance — the same block is
-~0.8 s.** A 20-25× swing, which makes three things follow: 2.3's relay cap re-index is what keeps
+~16-20 s single-thread at 2 MB and ~65-78 s at 8 MB (F-16); ~7 s and ~28 s on a 4-thread box; ~4-5 s and
+~17-20 s on the Smartnode spec of X-5. **Warm — validated at acceptance — the same block is
+~0.8 s** (F-15b, F-16). A 20-25× swing, which makes three things follow: 2.3's relay cap re-index is what keeps
 the cache hitting, not just what makes reconstruction possible; `-maxsigcachesize` in 4.5 is
-consensus-adjacent sizing rather than tuning, since 524,288 entries is only 2.1 blocks at 8 MB;
-and the cold column is a third independent argument for mining 2 MB by policy, beside relay and
+consensus-adjacent sizing rather than tuning, since K-4's 524,288 entries is only 2.1 blocks at 8 MB;
+and the cold column is a third independent argument for mining 2 MB by policy (D-14), beside relay and
 storage.
 
-**Why 1.2 is not optional.** `MaxBlockSigOps() = MaxBlockSize()/50` is 40,000 at 2 MB, and
-`GetLegacySigOpCount` counts sigops per output, so a two-output payment is 2. A 2 MB commitment
-block naming 62,500 payments carries 125,000 sigops and is **invalid** — the cap admits about
-20,000, i.e. **167 tx/s, not 520** — and the miner silently stops filling. It is the relay cap
+**Why 1.2 is not optional** (K-2, F-13). `MaxBlockSigOps() = MaxBlockSize()/50` is 40,000 at 2 MB, and
+`GetLegacySigOpCount` counts sigops per output (F-13), so a two-output payment is 2. A 2 MB commitment
+block naming 62,500 payments carries 125,000 sigops and is **invalid** (K-2) — the cap admits about
+20,000, i.e. **167 tx/s, not 520** (K-2) — and the miner silently stops filling. It is the relay cap
 bug in a second place: a consensus limit indexed to block bytes, which stop tracking what the
 block commits to.
 
@@ -103,8 +103,8 @@ block commits to.
 | 2.4 | **New-smartnode onboarding.** Multi-source body fetch plus verification of the store at rest, so one corrupt or deliberately erasing source cannot propagate its hole to every node that joins later. | 1-2 w | straightforward |
 
 **2.2 is the tip critical path, not a history service.** A worst-case `BLOCKTXN` at the 2 MB
-design point is 62,500 × 373 B = 23 MB, a sender above 3 MiB is disconnected, and nothing in the
-compact-block path chunks. Any node ~8,400 transactions (~16 s) behind therefore loses compact
+design point is 62,500 × F-30 = 23 MB (F-33), a sender above K-7's limit is disconnected, and nothing in the
+compact-block path chunks (K-10). Any node ~8,400 transactions (~16 s) behind therefore loses compact
 reconstruction, and the whole-block fallback carries no bodies under this format.
 
 ## Phase 3 — existing-code prerequisites · 4-5 weeks, independent
@@ -114,8 +114,8 @@ Interleave anywhere. 3.1 gates 2.2; the asset fixes want to land before activati
 | # | Component | Effort | Design |
 |---|---|---|---|
 | 3.1 | **DIP8 signing-attempts process.** Deliberately skipped today, so competing blocks at one height split the quorum's signatures and no ChainLock forms. Decoupling makes that condition *schedulable* rather than a race, because identifiers arrive instantly and body release is the attacker's choice. **Gates 2.2.** | 1-2 w | straightforward |
-| 3.2 | **Persist the round-voting count at connect.** `NodeRoundVoting` reads 720 blocks of bodies with an assert and its result gates consensus. Persisting the per-block fact removes the rescan — and with it the only stated reason the window floor is 720, which then needs a new justification. | 3-5 d | straightforward |
-| 3.3 | **ChainLocks `Cleanup` rewrite.** Replace the O(mempool) `GetTransaction` walk under `cs_main` + `mempool.cs` every 30 s — 1.9 s of stall at 3M entries — with event-driven pruning. | 1 w | straightforward |
+| 3.2 | **Persist the round-voting count at connect.** `NodeRoundVoting` reads 720 blocks of bodies with an assert and its result gates consensus (R-17 retracts the claim that this sets the window floor). Persisting the per-block fact removes the rescan — and with it the only stated reason the window floor is 720, which then needs a new justification. | 3-5 d | straightforward |
+| 3.3 | **ChainLocks `Cleanup` rewrite.** Replace the O(mempool) `GetTransaction` walk under `cs_main` + `mempool.cs` every 30 s — 1.9 s of stall at 3M entries, though R-25 says it is not what caps throughput — with event-driven pruning. | 1 w | straightforward |
 | 3.4b | **Asset-cache follow-ups** — recovered from `archive/asset-cache-drag.md`, where they were the only copy: bound or evict the global in-memory cache, which grows without eviction from the `LoadAssets` floor; elide the copy for asset transactions too, since they still pay it in full; and narrow the residual surface, which after #481 is asset-typed transactions only. | 1 w | straightforward |
 | 3.4 | **Asset fixes.** Intra-block mint visibility, undo keyed by `(assetId, tx index)`, and the distribution-type check that accepts any value. No longer fork-critical now asset state is uncommitted, still real divergences. | 1 w | straightforward |
 | 3.5b | **Parallel-acceptance sizing**, recovered from `archive/mempoolaccept-port-analysis.md`: the behaviour-preserving Dash `MemPoolAccept` port alone is **1,000-1,500 lines**, which is the only sizing we have for phase 5's parallel work. | — | reference |
@@ -130,7 +130,7 @@ Interleave anywhere. 3.1 gates 2.2; the asset fixes want to land before activati
 | 4.2 | **Coverage telemetry.** Per-peer miss rates and per-*range* coverage, passive, shipped with the protocol. Honest loss is oldest-first, file-aligned, scattered, or a shrinking gap; deliberate erasure is contiguous, mid-history, aligned to nothing and stable. | 1 w | straightforward |
 | 4.3 | **Index-build paths.** Every index is built by replay today. The asset index is a pure aggregate over unspent asset outputs, so it gets a build-from-coins pass — the `-reindex`-only route is dead on a windowed node. Wallet rescan becomes range-driven, and anything returning transaction contents returns an explicit "not held here". | 1 w | straightforward |
 | 4.4 | **Mining and template.** Commitment-mode `getblocktemplate`: cache the template, drop the full `ConnectBlock` per poll (seconds of `cs_main` and tens of MB of JSON at 62,500 names). `submitblock` accepts both serializations. Mining hardware is untouched — the 80-byte header is byte-identical. | 3-4 w | in-node known; **external pool coordination is the schedule risk** |
-| 4.5 | **Constants and policy.** `maxmempool` burst-sized (≥459 MB once the ten-minute mining gate is counted, against a 300 MB default), `-maxsigcachesize`, `BLOCKTXN` chunking, compact-block index widening (~7 lines — and 62,501 *fits* `uint16_t`, which is the trap), the relay in-flight constants, and a fee floor scaling with body bytes. | 1-2 w | straightforward |
+| 4.5 | **Constants and policy.** `maxmempool` burst-sized (≥459 MB once K-12's gate is counted, against K-8's default), `-maxsigcachesize`, `BLOCKTXN` chunking, compact-block index widening (~7 lines — and 62,501 *fits* `uint16_t`, which is the trap), the relay in-flight constants, and a fee floor scaling with body bytes. | 1-2 w | straightforward |
 | 4.6 | **Migration and activation.** One `UpdateManager` bit carrying format, cap and message length. Dual-format window, old nodes' unpriced serving obligation, the downgrade surface, the no-rollback question, and an activation criterion that reads 4.2's data rather than hashrate signalling, which cannot see coverage at all. | 4-6 w | partly unknown |
 
 ## Phase 5 — attested transaction class · 10-18 weeks, trí-gated
@@ -141,8 +141,8 @@ transaction class a quorum signature is the only validity rule available. See §
 
 | # | Component | Effort | Design |
 |---|---|---|---|
-| 5.1 | **Attestation ceiling, measured properly.** Quorum of 50 with async threshold recovery (10.7× on sixteen cores) and the 100 ms `SendMessages` cadence addressed. Every existing figure comes from 3-13 member quorums. Needs 0.4. | 1-2 w | straightforward after 0.4 |
-| 5.2 | **Batched attestation.** One threshold signature over a Merkle root of N items, partial-conflict semantics, the mining-gate interaction. The gate for everything attestation-based: one lock costs ≥1.15 ms of BLS against ~118 µs of ECDSA saved, so break-even is 10-20 transactions per signature. Shared with InstantSend batching — build once. | 3-5 w | partly unknown |
+| 5.1 | **Attestation ceiling, measured properly.** Quorum of K-13's live size with async threshold recovery (F-21) and the 100 ms `SendMessages` cadence addressed. Every existing figure comes from 3-13 member quorums. Needs 0.4. | 1-2 w | straightforward after 0.4 |
+| 5.2 | **Batched attestation.** One threshold signature over a Merkle root of N items, partial-conflict semantics, the mining-gate interaction. The gate for everything attestation-based: one lock costs ≥1.15 ms of BLS (F-22) against ~118 µs of ECDSA saved (F-11), so break-even is 10-20 transactions per signature. Shared with InstantSend batching — build once. | 3-5 w | partly unknown |
 | 5.3 | **Admission-only shortcut.** Acceptance skips script checks for attested transactions and does not cache; `ConnectBlock` verifies cold on the parallel queue. Consensus untouched, trust boundary is the one islocks already impose, a lying quorum cannot fork. The baseline any consensus version must beat. | 2-3 w | straightforward |
 | 5.4 | **Attested transaction type.** A new `nType` whose validity rule is a quorum threshold signature over a declared result, plus the rules bounding what it may change. `ContextualCheckTransaction` whitelists types, so it is a fork either way. Blocked on three answers from trí: what is attested, what it may change, and whether ordinary payments are in scope. | 4-8 w | **unknown, scope not ours** |
 
@@ -173,13 +173,13 @@ Four, and each carries real information:
 
 | deferred | brought back by |
 |---|---|
-| **Retention, sharding, challenges, repair** | sustained load above ~85 tx/s, or growth crossing 1 TB per node per year |
+| **Retention, sharding, challenges, repair** | sustained load above F-32's 80 tx/s, or growth crossing 1 TB per node per year (K-14) |
 | **State root and snapshot sync** — and §7A.6's canonical asset element form with it, which was the hardest unsolved design problem | replay bootstrap becoming impractical, or the Smartnode tier thinning under storage pressure |
 | **Attributable attestation shares** | ships with retention — a challenge can only penalise a party that promised something, and a recovered threshold signature names nobody |
 | **Relay structural work and parallel acceptance — as blockers** | bursts that stop draining. A 60 s burst at 2,083 tx/s leaves ~71,000 transactions of backlog, clearing in ~80 s at the measured 900 tx/s of delivery |
 
 > **InstantSend batching (5.2) was on that list and should not have been.** Under D-7 the design
-> assumes InstantSend on, and mempool signing at 520 tx/s then needs roughly 27× the measured
+> assumes InstantSend on, and mempool signing at the design point then needs roughly 27× the measured
 > capacity (F-18) — so 5.2 is a **prerequisite of the design point**, not a deferral. Deferring it
 > would only be coherent under a decision to ship without InstantSend, which nobody has taken.
 > It keeps its number because that is where its design work sits.
@@ -188,13 +188,13 @@ Four, and each carries real information:
 ## Assumptions this plan rests on
 
 **X-1 — the target is peak, not sustained.** At the 512 GB Smartnode specified in RTM's contract
-paper, the practical sustained ceiling is ~10-30 tx/s depending on replacement cycle. Tripping it
+paper, the practical sustained ceiling is ~10-30 tx/s depending on replacement cycle (K-14, F-32). Tripping it
 brings back retention first, then the state root.
 
 **X-2 — Smartnodes hold the entire history.** This is what keeps replay bootstrap available and
 the state root optional.
 
-**Caveat on both.** `vExtraPayload` runs to `MAX_TX_EXTRA_PAYLOAD` = 10,000 B, so the 373-byte
+**Caveat on both.** `vExtraPayload` runs to K-11's 10,000 B, so F-30's 373-byte
 body figure behind every storage and bandwidth number here could be off by up to 27× once the
 contract layer's new transaction type is specified.
 
@@ -215,12 +215,12 @@ are real for the design** and stay fully priced:
 | cost | why it binds under the designed configuration |
 |---|---|
 | **every ChainLock-signing smartnode must converge** | with spork 3 on, `TrySignChainTip` refuses to sign a tip holding any transaction that is not islocked and is younger than 600 s, and `txAge` is 0 when the txid is absent entirely. Mainnet rotates a 200/400-member quorum, so in practice that is every smartnode. |
-| **`maxmempool` sized with the mining gate** | ≥459 MB at 520 tx/s once `IsTxSafeForMining` holds unlocked transactions for ten minutes, against a 300 MB default |
+| **`maxmempool` sized with the mining gate** | ≥459 MB at the design point once `IsTxSafeForMining` holds unlocked transactions for K-12's ten minutes, against K-8's default |
 | **per-node islock BLS verification** | `ProcessPendingInstantSendLocks` gates on `IsInstantSendEnabled` only, with no smartnode check — ≥1.15 ms per message, 0.6 of a core at 520 tx/s and 2.4 cores at 2,083, on the single `rtm-isman` thread |
 
 **So 5.2 (batched attestation) is a prerequisite of the design point, not a phase-5 option.**
-Mempool signing at 520 tx/s needs roughly 27× the measured signing capacity, so the batching that
-5.2 builds is what makes InstantSend survivable at any point on the 2-8 MB range. It stays
+Mempool signing at the design point needs roughly 27× the measured capacity (F-18), so the batching that
+5.2 builds is what makes InstantSend survivable anywhere on D-4's range. It stays
 numbered in phase 5 because that is where its design work sits, but it is required, not
 conditional.
 
