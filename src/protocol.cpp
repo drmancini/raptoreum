@@ -330,6 +330,8 @@ static std::string serviceFlagToStr(size_t bit) {
             return "XTHIN";
         case NODE_NETWORK_LIMITED:
             return "NETWORK_LIMITED";
+        case NODE_COMMITMENTS:
+            return "COMMITMENTS";
             // Not using default, so we get wqrned when a case is missing
     }
 

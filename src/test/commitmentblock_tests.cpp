@@ -223,12 +223,40 @@ BOOST_AUTO_TEST_CASE(the_service_bit_chooses_the_serialization) {
     BOOST_CHECK_EQUAL(BlockSerFlagsFor(ServiceFlags(NODE_NETWORK | NODE_COMMITMENTS)),
                       SER_NETWORK | SER_COMMITMENTS);
 
+    // Comparing against SER_COMMITMENTS is not enough on its own: if the constant
+    // were zero the two assertions above would both still pass while the flag
+    // selected nothing. Pin the bit, and pin that the two answers differ.
+    BOOST_CHECK(SER_COMMITMENTS != 0);
+    BOOST_CHECK_EQUAL(SER_COMMITMENTS & (SER_NETWORK | SER_DISK | SER_GETHASH), 0);
+    BOOST_CHECK(BlockSerFlagsFor(ServiceFlags(NODE_NETWORK | NODE_COMMITMENTS)) !=
+                BlockSerFlagsFor(NODE_NETWORK));
+
     // In the experimental range, so it cannot collide with an upstream assignment
     // while the format is unactivated.
     BOOST_CHECK(NODE_COMMITMENTS >= (1u << 24));
     // And it must not overlap anything already in use.
     const uint64_t inUse = NODE_NETWORK | NODE_GETUTXO | NODE_BLOOM | NODE_XTHIN | NODE_NETWORK_LIMITED;
     BOOST_CHECK_EQUAL(NODE_COMMITMENTS & inUse, 0U);
+}
+
+// The flag is declared and negotiated, and NOTHING READS IT: no Serialize in the
+// tree tests SER_COMMITMENTS (the GetType() consumers all test SER_GETHASH or
+// SER_DISK). So today it selects nothing, and this pins that rather than letting
+// the negotiation above read as working machinery. Whoever wires a real selector
+// will see this fail and must update it deliberately.
+//
+// Recorded because the docs retract the stream-flag selector (F-80..F-82, R-28b)
+// while the symbols are still here pending a decision on the replacement.
+BOOST_AUTO_TEST_CASE(the_stream_flag_currently_selects_nothing) {
+    const CBlock block = MakeBlock(4);
+
+    CDataStream plain(SER_NETWORK, PROTOCOL_VERSION);
+    plain << block;
+    CDataStream flagged(SER_NETWORK | SER_COMMITMENTS, PROTOCOL_VERSION);
+    flagged << block;
+
+    BOOST_CHECK(plain.size() == flagged.size());
+    BOOST_CHECK(std::equal(plain.begin(), plain.end(), flagged.begin()));
 }
 
 // A service bit is an unauthenticated advertisement. A peer may claim the bit and
@@ -243,6 +271,38 @@ BOOST_AUTO_TEST_CASE(advertising_the_bit_earns_no_trust) {
     BOOST_CHECK(CanReceiveCommitments(ServiceFlags(NODE_NETWORK | NODE_COMMITMENTS)));
     CBlock rebuilt;
     BOOST_CHECK(!MaterialiseBlock(c, lies, rebuilt));   // the claim changes nothing
+}
+
+// SetNull() and the default constructor leave coinbase null, and the shared_ptr
+// serializer dereferences unconditionally -- so before the guard, putting a
+// default-constructed instance on a stream segfaulted. It is the design's wire
+// type; a fault is not an acceptable way to reject one.
+BOOST_AUTO_TEST_CASE(a_null_commitment_block_inspects_safely_and_refuses_the_wire) {
+    const CCommitmentBlock c = CommitmentsFromBlock(CBlock());
+    BOOST_REQUIRE(c.IsNull());
+
+    // Every accessor must tolerate it rather than deref.
+    BOOST_CHECK_EQUAL(c.CommittedCount(), 0U);
+    BOOST_CHECK(c.Identifiers().empty());
+    bool mutated = false;
+    BOOST_CHECK(c.ComputeMerkleRoot(&mutated) == uint256());
+    BOOST_CHECK(!c.HasDuplicateIdentifiers());
+
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+    BOOST_CHECK_THROW(ss << c, std::ios_base::failure);
+}
+
+// The count check has two sides and only "too few" was covered.
+BOOST_AUTO_TEST_CASE(a_surplus_body_is_rejected_too) {
+    const CBlock block = MakeBlock(4);
+    const CCommitmentBlock c = CommitmentsFromBlock(block);
+
+    std::vector <CTransactionRef> surplus(block.vtx.begin() + 1, block.vtx.end());
+    surplus.push_back(MakeTx(999));
+    BOOST_REQUIRE(surplus.size() == c.vCommitments.size() + 1);
+
+    CBlock rebuilt;
+    BOOST_CHECK(!MaterialiseBlock(c, surplus, rebuilt));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
@@ -300,6 +360,30 @@ BOOST_AUTO_TEST_CASE(a_disk_commitment_read_rebuilds_the_block) {
     // ConnectBlock re-invokes CheckBlock and that early-returns on fChecked, so a
     // materialised block must arrive unchecked however it was obtained.
     BOOST_CHECK(!rebuilt.fChecked);
+}
+
+// ReadCommitmentBlockFromDisk skips the CBlockIndex overload (that is how it
+// bypasses the withholding predicate) and re-adds that overload's
+// hash-matches-index guard itself. Reading the tip can never exercise it, so point
+// the tip's entry at another block's bytes and require the refusal.
+BOOST_AUTO_TEST_CASE(a_commitment_read_refuses_bytes_that_are_not_the_indexed_block) {
+    CBlockIndex *tip = const_cast<CBlockIndex *>(::ChainActive().Tip());
+    const CBlockIndex *prev = tip->pprev;
+    BOOST_REQUIRE(prev != nullptr);
+    const Consensus::Params &params = Params().GetConsensus();
+
+    const int savedFile = tip->nFile;
+    const unsigned int savedPos = tip->nDataPos;
+    tip->nFile = prev->nFile;
+    tip->nDataPos = prev->nDataPos;
+
+    CCommitmentBlock c;
+    BOOST_CHECK(!ReadCommitmentBlockFromDisk(c, tip, params));
+
+    tip->nFile = savedFile;
+    tip->nDataPos = savedPos;
+    // and the restore must leave the read working, or the check above proved nothing
+    BOOST_CHECK(ReadCommitmentBlockFromDisk(c, tip, params));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

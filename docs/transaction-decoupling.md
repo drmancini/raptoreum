@@ -234,14 +234,17 @@ is not self-describing from the header and peers must agree before transfer.
 
 **Corrected — the stream flag cannot be the selector either, and the reason is not the
 flag's location.** Two mechanical facts and one structural one, found while wiring it
-(F-80). Mechanically: the receive stream's `nType` is fixed when the message is
-constructed — `net.cpp:648` builds every `CNetMessage` with `SER_NETWORK` and only
-`SetVersion` exists afterwards (`net.h:938-941`) — so an `nType` flag cannot be read;
-and `CNetMsgMaker::Make` ORs its flags into **nVersion**, not nType
-(`netmessagemaker.h:17-22`), so it cannot be written through the normal send path
-either. Structurally, and this survives moving the flag to nVersion: **both forms must
-flow on one connection**, because pre-fork history exists only whole, so "which form is
-this `BLOCK`?" is a per-message question that no per-connection state can answer.
+(F-80). Mechanically, the plumbing is absent rather than impossible: the receive stream's
+`nType` is fixed when the message is constructed — `net.cpp:648` builds every
+`CNetMessage` with `SER_NETWORK` and only `SetVersion` exists afterwards
+(`net.h:938-941`) — and `CNetMsgMaker::Make` ORs its flags into **nVersion**, not nType
+(`netmessagemaker.h:17-22`). Both are one-liners to change (`CDataStream::SetType`
+exists, `streams.h:357`), so this is a cost argument, not an impossibility one, and it
+is **not** what decides the question.
+
+What decides it is structural, and it survives moving the flag to nVersion: **both forms
+must flow on one connection**, because pre-fork history exists only whole, so "which form
+is this `BLOCK`?" is a per-message question that no per-connection state can answer.
 
 A second argument reaches the same place from the type side. A commitment block has no
 transactions, so deserializing one into a `CBlock` cannot populate `vtx`; a stream flag
@@ -261,6 +264,15 @@ which is the shape BIP152 already uses in this tree (F-82):
   command, exactly as `MSG_CMPCT_BLOCK` → `CMPCTBLOCK` works today
   (`net_processing.cpp:1737`). `GetDataMsg` states its own extension rule at
   `protocol.h:441` and is free from 32.
+
+**One hazard the replacement carries, and it is not small (F-85).** An unknown inv type
+in a `getdata` **wedges** the receiving peer in this tree: `ProcessGetData` stops at the
+first `!IsKnownType()`, never erases it, and `ProcessMessages` keeps reporting more work,
+so that peer processes nothing further from us. The capability gate is therefore
+load-bearing — and `NODE_COMMITMENTS` is an unauthenticated bit in the experimental
+range, so any other software using bit 24 would be wedged by us. That argues for an
+explicit `sendcommitments` negotiation message alongside the bit, exactly as BIP152 pairs
+`sendcmpct` with `MSG_CMPCT_BLOCK`, rather than trusting the advertisement alone.
 
 `SER_COMMITMENTS` then has no remaining job on the wire. It is kept only if the body
 store wants it for the on-disk form, where `nType` *is* settable (`CAutoFile`) — a
