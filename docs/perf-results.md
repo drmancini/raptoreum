@@ -2730,3 +2730,43 @@ restructure rather than a tweak.
 
 Both are the same class of error: a test that appears to exercise a rule while exercising nothing,
 and whose output looks like a finding about the node.
+
+**0.2 — the accept-path characterisation now pins real rules.**
+
+Moving to the p2p path (this tree still has `DEFAULT_ENABLE_BIP61 = true`, so reject messages
+carry the reason) turns nine useless `invalid`s into nine specific rules:
+
+| §2.4 row | class | the node's reason |
+|---|---|---|
+| merkle root | commitment | `bad-txnmrklroot` |
+| merkle malleation | commitment | `bad-txns-duplicate` |
+| first transaction is a coinbase | commitment | `bad-cb-missing` |
+| coinbase: **founder payment** | commitment | `bad-cb-founder-payment-not-found` |
+| coinbase: DIP3 type | commitment | `bad-txns-cb-type` |
+| a second coinbase | body | `bad-cb-multiple` |
+| `CheckTransaction`: no outputs | body | `bad-txns-vout-empty` |
+| `CheckTransaction`: negative output | body | `bad-txns-vout-negative` |
+| `CheckTransaction`: duplicate input | body | `bad-txns-inputs-duplicate` |
+
+The founder row is the one worth noting: `bad-cb-founder-payment-not-found` confirms from the
+outside that `CheckTransaction` enforces it, which is what makes F-45's `fChecked` caching a
+consensus hazard rather than a performance note.
+
+**Three harness properties, each of which silently produced a wrong answer first.**
+
+1. **Every row is a DoS-scoring block, so the node disconnects the peer.** Without reconnecting per
+   row, row one characterises and the other eight report "Not connected" — a harness that looks
+   like it works and measures nothing.
+2. **A mutation must reseal the block.** Changing a transaction and rebuilding the root from stale
+   transaction hashes leaves a root committing to the *pre-mutation* block, so the node answers
+   `bad-txnmrklroot` for a block whose real fault is elsewhere. Six of the nine rows reported the
+   merkle root until the transaction hashes were refreshed before the root was rebuilt.
+3. **The malleation check needs an even-aligned duplicate.** `ComputeMerkleRoot` compares
+   `hashes[pos]` against `hashes[pos+1]` only for **even** `pos`, so `[coinbase, tx, tx]` puts the
+   equal pair at positions 1 and 2, where it is never compared — the block passes malleation
+   entirely. `[coinbase, a, b, b]` puts it at 2 and 3 and is caught.
+
+That third one sharpens F-43b. The requirement is not "adjacent" but **even-aligned**, which is a
+narrower condition than recorded and makes identifier uniqueness a strictly necessary rung rule
+rather than a belt-and-braces one: a commitment block could carry a duplicate identifier at an odd
+boundary and satisfy every check the merkle tree performs.
