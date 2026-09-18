@@ -1457,17 +1457,52 @@ namespace llmq {
 
             bool fMoreWork{false};
 
+            // PERF INSTRUMENTATION (measurement only, no behaviour change).
+            // This loop is a single thread and it saturates at ~29 signing
+            // sessions/s while ~260/s are requested. Threshold recovery measures
+            // 3 ms median and a signature about 1 ms, so ~4 ms of the ~34 ms per
+            // session is cryptography and the rest is unaccounted. Attribute it
+            // before anyone designs a batching protocol to avoid it.
+            static int64_t tRecovered = 0, tShares = 0, tSign = 0, tSend = 0, tClean = 0;
+            static int64_t iters = 0, lastReport = 0;
+            int64_t t0 = GetTimeMicros();
+
             RemoveBannedNodeStates();
+            int64_t t1 = GetTimeMicros();
             fMoreWork |= quorumSigningManager->ProcessPendingRecoveredSigs();
+            int64_t t2 = GetTimeMicros();
             fMoreWork |= ProcessPendingSigShares(connman);
+            int64_t t3 = GetTimeMicros();
             SignPendingSigShares();
+            int64_t t4 = GetTimeMicros();
 
             if (GetTimeMillis() - lastSendTime > 100) {
                 SendMessages();
                 lastSendTime = GetTimeMillis();
             }
+            int64_t t5 = GetTimeMicros();
 
             Cleanup();
+            int64_t t6 = GetTimeMicros();
+
+            tRecovered += t2 - t1;
+            tShares    += t3 - t2;
+            tSign      += t4 - t3;
+            tSend      += t5 - t4;
+            tClean     += t6 - t5;
+            iters++;
+            if (t6 / 1000 - lastReport > 5000) {   // every 5 s
+                size_t pending;
+                { LOCK(cs); pending = pendingSigns.size(); }
+                LogPrintf("SIGSHARE-PROFILE iters=%d recoveredSigs=%dms shares=%dms sign=%dms "
+                          "send=%dms cleanup=%dms other=%dms pendingSigns=%d\n",
+                          iters, tRecovered / 1000, tShares / 1000, tSign / 1000,
+                          tSend / 1000, tClean / 1000,
+                          (t6 - t0) / 1000, pending);
+                tRecovered = tShares = tSign = tSend = tClean = 0;
+                iters = 0;
+                lastReport = t6 / 1000;
+            }
             quorumSigningManager->Cleanup();
 
             // TODO Wakeup when pending signing is needed?
