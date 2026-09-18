@@ -1,0 +1,44 @@
+#!/bin/bash
+# One entry point for swarm work, so nothing depends on the caller's cwd.
+#
+# Every ad-hoc swarm command in this project has at some point failed because the
+# shell was not in this directory: swarmctl.sh not found, hosts.tsv not found, or
+# -- worst, because it fails silently -- conf/use.conf not found, which makes the
+# rpcpassword empty and every RPC return "Could not locate RPC credentials" as if
+# the node were down.
+#
+#   ./sw rpc use getblockcount        any swarmctl subcommand
+#   ./sw m getblockcount              the wallet node on this machine (mario)
+#   ./sw maddr                        a fresh address from the wallet node
+#   ./sw mine 5                       mine n blocks from the miner to the wallet
+#   ./sw sporks                       spork state as seen by the swarm
+#   ./sw states                       smartnode state per node
+set -uo pipefail
+cd "$(dirname "$(readlink -f "$0")")"
+
+MARIO=/home/mike/rtmswarm-mario
+MINER=${MINER:-dev}
+PW=$(grep -m1 '^rpcpassword=' conf/use.conf | cut -d= -f2)
+[ -n "$PW" ] || { echo "sw: could not read rpcpassword from conf/use.conf" >&2; exit 1; }
+
+m() { "$MARIO/bin/raptoreum-cli" -regtest -datadir="$MARIO/data" -rpcport=19898 \
+        -rpcuser=swarm -rpcpassword="$PW" "$@" 2>&1; }
+
+case "${1:-}" in
+  rpc)    shift; ./swarmctl.sh rpc "$@" ;;
+  m)      shift; m "$@" ;;
+  maddr)  m getnewaddress ;;
+  mine)   n=${2:-1}; addr=$(m getnewaddress); ./swarmctl.sh rpc "$MINER" generatetoaddress "$n" "$addr" ;;
+  sporks) ./swarmctl.sh rpc "${2:-use}" spork show | tr -d '\r' | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+for k,v in sorted(d.items()): print('  %-38s %s'%(k,'ON' if v==0 else 'off'))" ;;
+  states) for a in $(./swarmctl.sh aliases); do
+            printf "  %-5s %s\n" "$a" "$(./swarmctl.sh rpc "$a" smartnode status 2>/dev/null | tr -d '\r' | python3 -c "
+import sys,json
+try:
+  d=json.load(sys.stdin); print(d.get('state','?'), d.get('status','')[:40])
+except Exception: print('no answer')")"
+          done ;;
+  *) echo "usage: $0 {rpc <alias> <method...>|m <method...>|maddr|mine [n]|sporks [alias]|states}"; exit 1 ;;
+esac
