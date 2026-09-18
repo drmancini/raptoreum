@@ -2063,3 +2063,58 @@ saturating the same thread; rates computed as `final_mempool / 120` when accepta
 no per-peer time series, so concurrent relay could not be separated from the post-offer drain; and
 an unbounded-backlog artefact from offering ~4× what could be relayed, which made a per-trickle
 `make_heap` over the whole backlog look like a peer-count effect.
+
+### 2026-09-18 — acceptance-layer probe, phase B: the third outcome, and what the harness cannot reach
+
+Plan item 0.1 phase B. A `HaveBodies(pindex)` predicate plus the three paths that were fatal in
+phase A, and one finding that cost a rebuild to see.
+
+**The three fatal paths are fixed, and two of them had a precedent to follow.**
+
+| path | phase A | now |
+|---|---|---|
+| `VerifyDB` at startup | "Corrupted block database detected. Please restart with -reindex", refuses to start | logs `block verification stopping at height 10 (bodies not held)` and **starts**, tip intact |
+| P2P serving | peer stopped at the block before, serving node died with `Posix Signal: Aborted` | peer still stops at that block; **the serving node survives** |
+| `ConnectTip` | `AbortNode`: "Failed to read block" | holds the block incomplete, leaves validity untouched |
+
+The precedent matters for 0.1's kill criterion. `VerifyDB` already stops when pruning has removed
+data, and the serving path is already gated on availability with the comment "Pruned nodes may
+have deleted the block, so check whether it's available before trying to send." Both are the same
+shape as "bodies legitimately absent", so both were extensions of an existing sanctioned state
+rather than the relaxation of a check. **No kill.**
+
+**The finding: "not yet" had to be carried, not inferred.** Returning false from `ConnectTip` with
+the state left valid lands in `ActivateBestChainStep`'s non-consensus branch, which neither calls
+`InvalidChainFound` nor aborts -- so at runtime it already means "keep the tip you can validate",
+exactly what §2.3 requires. At **startup** it is fatal: `ThreadImport` ends with
+
+```cpp
+if (!chainstate->ActivateBestChain(state, chainparams, nullptr)) { ...; StartShutdown(); return; }
+```
+
+and the node duly logged `holding it incomplete`, then `Failed to connect best block ( (code 0))`,
+then exited. An empty state is indistinguishable from a disk failure, so the reason has to travel
+with it. Added as `CValidationState::BodiesMissing()`, on the pattern `corruptionPossible` already
+uses -- a non-consensus reason carried so callers can tell one kind of "no" from another -- with
+`ThreadImport` starting on the validated tip instead of shutting down. **Four call sites: set it,
+propagate it, tolerate it at init, and log it.** That is the cost signal the criterion anticipated,
+and it is small.
+
+**What the harness cannot reach, which is the more useful result.** Withholding at *read* time
+cannot produce the state the remaining scenarios need. To exercise `ConnectTip` you need a block
+that is valid, **unconnected**, on the best header chain, and body-less -- and on a single node
+every route into that state goes through a *disconnect* across the same gap, which needs the very
+bodies being withheld. Re-running S3 quietly proved it: the node started at height 20 with nothing
+to connect, and the "holding it incomplete" line in the log was from the previous run.
+
+So the probe's remaining scenarios -- competing tip at equal work, reorg across an incomplete
+block, a ChainLock for one, `-reindex` -- need the **arrival** case: a node that receives a block
+it cannot fill. Two consequences for the harness:
+
+1. **Withhold at acceptance, not at read.** The flag must make a node refuse to store bodies for a
+   chosen block, so the state arises the way it will in production rather than by erasing
+   something already held.
+2. **Two nodes, not one.** The interesting states are all about a block arriving from a peer.
+
+`DisconnectTip` remains the open path and is now doubly interesting: it is both the scenario most
+likely to fire the kill criterion and the reason the single-node scenarios are unreachable.

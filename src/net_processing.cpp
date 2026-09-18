@@ -1676,7 +1676,20 @@ void static ProcessGetBlockData(CNode *pfrom, const CChainParams &chainparams, c
     }
     // Pruned nodes may have deleted the block, so check whether
     // it's available before trying to send.
-    if (send && (pindex->nStatus & BLOCK_HAVE_DATA)) {
+    //
+    // HaveBodies is the same question one step further on: a node holding
+    // commitments for all of history and bodies for a window has BLOCK_HAVE_DATA
+    // set for blocks it cannot materialise. Without this the read below reaches
+    // `assert(!"cannot load block from disk")` and one 37-byte getdata kills the
+    // process -- measured, not theorised: a fresh peer syncing from a node with
+    // one body withheld stopped at the block before it and took the serving node
+    // down with `Posix Signal: Aborted`.
+    //
+    // Declining is the minimum. The requester then waits out its block-download
+    // timeout, so a NOTFOUND for blocks -- which the protocol does not send
+    // today -- is follow-up work, and so is keeping a windowed node from
+    // advertising NODE_NETWORK in the first place.
+    if (send && (pindex->nStatus & BLOCK_HAVE_DATA) && HaveBodies(pindex)) {
         std::shared_ptr<const CBlock> pblock;
         if (a_recent_block && a_recent_block->GetHash() == pindex->GetBlockHash()) {
             pblock = a_recent_block;

@@ -1185,9 +1185,20 @@ static void ThreadImport(ChainstateManager &chainman, std::vector <fs::path> vIm
         for (CChainState *chainstate: WITH_LOCK(::cs_main, return chainman.GetAll())) {
             CValidationState state;
             if (!chainstate->ActivateBestChain(state, chainparams, nullptr)) {
-                LogPrintf("Failed to connect best block (%s)\n", FormatStateMessage(state));
-                StartShutdown();
-                return;
+                if (state.BodiesMissing()) {
+                    // Not a failure of this node: a block on the best header
+                    // chain is held without its bodies, so the chainstate stays
+                    // on the last tip it could validate and the block is
+                    // retried when the bodies arrive. Shutting down here would
+                    // turn a liveness problem into an outage, and the block must
+                    // never be marked invalid -- other nodes accept that chain.
+                    LogPrintf("Best chain not fully connected: bodies missing for a block on it. "
+                              "Starting on the validated tip and retrying when they arrive.\n");
+                } else {
+                    LogPrintf("Failed to connect best block (%s)\n", FormatStateMessage(state));
+                    StartShutdown();
+                    return;
+                }
             }
         }
 

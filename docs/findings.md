@@ -88,7 +88,7 @@ Status is `stands`, `unreconciled` (two correct values, no single answer yet), o
 | F-21 | threshold recovery parallelises | 10.7× at 16 threads (107 → 1,151 recoveries/s); near-linear to 4 threads; not wired to `CBLSWorker`'s async pool | `mario` | stands |
 | F-22 | islock verification is not smartnode-only | every full node verifies every islock, ≥1.15 ms per message | `source` + `quorum-rt` | stands |
 | F-23 | mainnet spork state | 2 **ON**, 3 **OFF**, 19 **ON**, 17 ON, 23 ON, 21/25 OFF; IS mempool signing **off** (spork 2 carries a timestamp, not 0) | `mainnet` 2026-09-18 | stands — and **temporary**, see X-3 |
-| F-24 | mainnet ChainLocks are not forming | best chainlock **1,122,354** against tip **1,432,200**; tip reads `chainlock: false` | `mainnet` 2026-09-18 | stands, one node — **out of scope**, see X-4 |
+| F-24 | mainnet ChainLocks are not forming | best chainlock **1,122,354** against tip **1,432,200**; tip reads `chainlock: false` | `mainnet` 2026-09-18 | stands, one node — **out of scope** (X-4). Owner's read, 2026-09-18: the nodes themselves are healthy and the signing path is the code Dash runs in production, so the likely cause is **operational — a rollout or a networking change — rather than a defect**. Recorded so nobody re-derives it as ours |
 
 ### The acceptance-layer probe
 
@@ -98,7 +98,10 @@ Status is `stands`, `unreconciled` (two correct values, no single answer yet), o
 | F-26 | P2P serving a missing body | serving node **aborts** (`assert(!"cannot load block from disk")`); the peer stops at the block before | `bench-rt` | stands |
 | F-27 | `ConnectTip` on a missing body | `AbortNode`: "Failed to read block" | `bench-rt` | stands |
 | F-28 | RPC read paths on a missing body | `error code: -1`, node survives | `bench-rt` | stands |
-| F-29 | `DisconnectTip` on a missing body | **not yet measurable** — the startup check window always covers the tip, so withholding it blocks startup first | — | open |
+| F-25b | the three fatal paths, gated | `VerifyDB` starts and stops early; serving declines and survives; `ConnectTip` holds the block incomplete without touching validity | `bench-rt` | stands |
+| F-25c | "not yet" must be a carried signal | returning false is non-fatal at runtime but fatal at startup — `ThreadImport` shuts down on any failed `ActivateBestChain`, and an empty state is indistinguishable from a disk error. Fixed with `CValidationState::BodiesMissing()`, four call sites | `bench-rt` + `source` | stands |
+| F-25d | read-time withholding cannot reach the interesting states | to exercise `ConnectTip` a block must be valid, unconnected and body-less, and on one node every route there disconnects across the same gap. The remaining scenarios need **accept-time** withholding and **two** nodes | `bench-rt` | stands |
+| F-29 | `DisconnectTip` on a missing body | **still open**, and doubly interesting: the path most likely to fire 0.1's kill criterion, and the reason the single-node scenarios are unreachable | — | open |
 
 ### Sizing
 
