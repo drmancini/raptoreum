@@ -2589,3 +2589,56 @@ unquoted to the remote shell, so every JSON argument arrived mangled and `create
 failed with a parse error from the node. Fixed by quoting each argument; `sw` is now the single
 cwd-independent entry point, because a missing `conf/use.conf` silently empties the rpcpassword and
 every RPC then reports missing credentials as if the node were down.
+
+### 2026-09-18 — InstantSend at the design point: the same load, with and without
+
+Two arms, identical offered load — 300 tx/s total (25 per node from disjoint corpus shards), 15 s
+blocks, 20 minutes, ten live smartnodes on the WAN swarm. 300 was chosen to straddle the ~280 tx/s
+ceiling a source reading predicted for un-batched InstantSend on `rtm-sigshares`.
+
+| | control: IS off | treatment: sporks 2, 3, 19 on |
+|---|---|---|
+| offered / accepted | 360,012 / 360,012, **zero rejections** | 360,012 / 360,012, **zero rejections** |
+| `rtm-sigshares` CPU | not exercised | **93.7% (use), 97.0% (c3)** — saturated |
+| total node CPU | — | 245% / 209% of one core |
+| mempool at the end | ~7,000 | **183,273 tx / 239 MB** |
+| block fill (15 s blocks) | 4,257-4,582 tx (~285-305 tx/s) | 1 tx early, then 3,699-3,905 (~247-260 tx/s) |
+| ChainLocks | n/a | **stopped forming** — a lock existed at height 1249 while idle, none during the run |
+| submitters | all exactly 1,200 s | c1 1,286 s, c4 1,299 s, c3 1,219 s — RPC backpressure |
+
+**The prediction was right, and it named the right thread.** `rtm-sigshares` signs, recovers *and*
+verifies on one thread, and at 300 tx/s it is pinned at 94-97% on every smartnode measured. That is
+**below stage 1's 520 tx/s** target (K-2), on a quorum of eight — and mainnet's is 200 of 400, where
+each member carries the same per-transaction work.
+
+**The failure mode is not graceful degradation.** Acceptance and relay are unaffected: every
+transaction offered was accepted at both arms, zero rejections. What breaks is everything
+downstream of locking:
+
+1. **Locking does not keep up at all** — sampled mempool transactions were unlocked throughout.
+2. **Blocks then starve**, because with spork 3 on, `IsTxSafeForMining` refuses any non-islocked
+   transaction younger than ten minutes (K-12). The first block after the load started carried
+   **one** transaction. Fill only recovers when transactions age past the gate, and then lands
+   13-15% below the control.
+3. **The backlog is unbounded in practice** — 183,273 transactions and 239 MB after twenty minutes,
+   still climbing, against a `maxmempool` of 1500-2000 MB on these hosts. It is bounded only by
+   eviction, which is itself a correctness problem for the transactions evicted.
+4. **ChainLocks stop.** One formed while the chain was idle; none formed during the run. So the
+   feature that turns probabilistic finality into an assertion is the first thing lost under load.
+
+**What this settles.** §17.4's "batching is the gate for every row" is no longer an inference from a
+loopback fit (F-18) — it is measured on a real network, and the thread it saturates is identified.
+It also removes a possible escape: the retroactive signing path fires **regardless** of the
+mempool-signing spork (`quorums_instantsend.cpp`, and its comment says so), so a timestamped spork 2
+— today's mainnet configuration — does not avoid this load. Only spork 2 fully off does.
+
+**The question this puts to RTM**, which no measurement here can answer: does 5.2 batched
+InstantSend ride the fork, trail it, or does **InstantSend stay off at activation**? The third option
+deletes 5.2, the 459 MB mempool sizing (K-11), the per-node verification cost and the ChainLock
+convergence requirement in one stroke. The first puts a protocol with no reference implementation
+anywhere — batch composition must be agreed across divergent mempools before a threshold signature
+can be produced — on the critical path.
+
+**Caveat on the control arm:** 20 of `use`'s transactions were rejected as already-in-chain. Those
+are twenty transactions submitted by hand earlier to test whether the corpus was still live; they
+fell inside this run's range. Nothing else was rejected in either arm.
