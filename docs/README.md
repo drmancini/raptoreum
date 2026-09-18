@@ -45,11 +45,25 @@ were confidently wrong because a subsystem's capacity was measured while a share
 saturated by something else, and because rates were computed over a fixed duration when the
 work ran past it. Both are recorded in `archive/throughput-bottleneck.md`, whose own first pass made all four.
 
+## The lint
+
+`check-numbers.py` reports numbers restated in living documents instead of cited from
+`findings.md`. It is a budget to shrink, not a list of bugs — some derivations are shown on
+purpose. **Baseline 2026-09-18: 166** (design 119, build-plan 39, plain-language 6, ledger 2).
+Run `./check-numbers.py --show 10` to see the worst, or `--max N` to fail in CI once a budget is
+agreed.
+
 ## Other directories
 
 - `outbound/` — PR descriptions, issue drafts, and messages. Text destined for elsewhere; may
   diverge from what was actually posted.
-- `archive/` — superseded or parked; every file there carries a header saying why, what replaced it, and when. `throughput-bottleneck.md` (headline overturned by F1; its five unique measurements were logged first), `expensive-tx-test-design.md` (executed; results are in
+- `platform/` — **the second subject.** `architecture-decisions.md` is the contract platform's
+  architecture, cited by the design's §17 and the plan's phase 5. It lives here rather than in
+  `archive/` because it is live work that has not started, not work that stopped.
+- `archive/` — superseded or parked; **every file carries a header giving why, what replaced it,
+  when, and why it is kept.** `throughput-bottleneck.md` (headline overturned by F1; its five
+  unique measurements were logged first), `pre-decoupling-checklist.md` (superseded as the plan;
+  its descoping record moved into `build-plan.md`), `asset-cache-drag.md` (closed — F17, PR #481), `expensive-tx-test-design.md` (executed; results are in
   `perf-results.md`), `mempoolaccept-port-analysis.md` (parked: acceptance had ~3x
   headroom against the working target of the time; the v8 target is 520-2,083 tx/s, see
   `build-plan.md`), `architecture-decisions.md` (a different project — the contract platform,

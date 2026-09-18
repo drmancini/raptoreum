@@ -1,3 +1,8 @@
+<!-- archived: 2026-09-18
+     why:      parked: acceptance is not the binding constraint (F7 against the v8 target)
+     replaced: build-plan 5.x and findings.md F10 carry the current position on parallel acceptance
+     keep:     its port-size estimate (1,000-1,500 lines) is the only sizing we have -->
+
 # Preliminary analysis: adopting Dash's MemPoolAccept into RTM
 
 > **PARKED (2026-09-16).** This port existed to enable parallel validation. Measurement has

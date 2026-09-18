@@ -1,3 +1,10 @@
+<!-- lifecycle: append-only — entries are dated and not rewritten
+     owns:      the measurement log: what was run, under what conditions, and what came out
+     not mine:  what the numbers mean for the design (transaction-decoupling.md) or which value
+                the project relies on (findings.md)
+     rule:      a conclusion later overturned gets a forward-pointing correction banner added
+                above it. It is not edited away — the retraction is the record. -->
+
 # Raptoreum throughput — measured results
 
 > **Corrections (2026-09-16).** This file is a chronological log; entries below stand as what

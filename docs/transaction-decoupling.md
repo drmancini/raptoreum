@@ -1,3 +1,9 @@
+<!-- lifecycle: living — revised in place, always current
+     owns:      the design: what decoupling is in this tree, at the level of files, symbols and states
+     not mine:  the schedule (build-plan.md), values and decisions (findings.md), how a
+                measurement was taken (perf-results.md), divergence from upstream (upstream-ledger.md)
+     numbers:   cite a findings ID. Anchors are symbol-keyed; line numbers are hints that drift. -->
+
 # Transaction Decoupling on Raptoreum Core
 
 **Version 8.** Supersedes v7. The header was left at "Version 3" through several

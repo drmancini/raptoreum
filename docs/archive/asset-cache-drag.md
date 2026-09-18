@@ -1,3 +1,9 @@
+<!-- archived: 2026-09-18
+     why:      closed: measured, fixed, and proposed upstream as #481
+     replaced: findings.md F17 carries the finding; perf-results.md carries the measurements
+     keep:     it holds the 2026-09-16 correction on the operative asset count (~2,500 pinned at restart,
+               not climbing toward 3,439), which the PR description got wrong once -->
+
 # The asset-cache deep-copy drag on mempool acceptance
 
 Every transaction that enters the mempool pays an unconditional deep copy of the
