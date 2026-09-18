@@ -769,6 +769,15 @@ void SetupServerArgs() {
                  "Test-only: mean seconds between transaction-relay trickles. "
                  "0 uses the shipped behaviour. (default: 0)",
                  ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    gArgs.AddArg("-perfwithholdbody=<hash>",
+                 "Test-only: treat this block's bodies as unavailable, however many times "
+                 "given. Probes the body-incomplete state the decoupling acceptance layer "
+                 "has to hold.",
+                 ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    gArgs.AddArg("-perfwithholdheight=<n>",
+                 "Test-only: as -perfwithholdbody, by height rather than hash, which is what "
+                 "a script can name before the block exists.",
+                 ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     gArgs.AddArg("-perfalwaystrysend",
                  "Test-only: attempt socket writes even when the epoll send-readiness flag is "
                  "false, to test whether that flag latching wedges a connection. (default: 0)",
@@ -1613,6 +1622,27 @@ bool AppInitParameterInteraction() {
     if (g_perf_inv_max || g_perf_inv_interval) {
         LogPrintf("PERF: relay trickle overridden (max=%u, interval=%u; 0 = shipped)\n",
                   g_perf_inv_max, g_perf_inv_interval);
+    }
+    for (const std::string &h: gArgs.GetArgs("-perfwithholdbody")) {
+        uint256 hash;
+        hash.SetHex(h);
+        // SetHex cannot fail, so a typo would silently withhold nothing at all
+        // -- refuse instead of measuring the wrong thing.
+        if (hash.IsNull() || hash.GetHex() != ToLower(h)) {
+            return InitError(strprintf("-perfwithholdbody=%s is not a block hash", h));
+        }
+        g_perf_withhold_hashes.insert(hash);
+    }
+    for (const std::string &n: gArgs.GetArgs("-perfwithholdheight")) {
+        int64_t height;
+        if (!ParseInt64(n, &height) || height < 0) {
+            return InitError(strprintf("-perfwithholdheight=%s is not a height", n));
+        }
+        g_perf_withhold_heights.insert((int) height);
+    }
+    if (!g_perf_withhold_hashes.empty() || !g_perf_withhold_heights.empty()) {
+        LogPrintf("PERF: withholding bodies for %d block(s) by hash and %d by height\n",
+                  (int) g_perf_withhold_hashes.size(), (int) g_perf_withhold_heights.size());
     }
     g_perf_always_try_send = gArgs.GetBoolArg("-perfalwaystrysend", false);
     g_perf_inv_nosort = gArgs.GetBoolArg("-perfinvnosort", false);

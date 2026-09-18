@@ -191,6 +191,15 @@ extern bool fSpentIndex;
  */
 extern bool g_parallel_script_checks;
 
+/** Test-only: block bodies to treat as unavailable (-perfwithholdbody=<hash>,
+ *  -perfwithholdheight=<n>). The probe for the decoupling acceptance layer:
+ *  every consumer of a block's bodies goes through ReadBlockFromDisk's
+ *  CBlockIndex overload, so failing it for a chosen block reproduces
+ *  "commitments held, bodies missing" on the shipped format, with no fork and
+ *  no second serialization. See ReadBlockFromDisk in validation.cpp. */
+extern std::set<uint256> g_perf_withhold_hashes;
+extern std::set<int> g_perf_withhold_heights;
+
 /** Test-only: run AcceptToMemoryPool's script checks on the script-check thread
  *  pool rather than inline on the calling thread (-perfparallelatmp). See the
  *  definition in validation.cpp. */

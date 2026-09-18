@@ -1929,3 +1929,49 @@ are reps=1; the three lower rows are reps=2 and agree with them. An earlier atte
 counts died on `too-long-mempool-chain, exceeds descendant size limit` because one block did not
 confirm all the funding, so the harness now mines until the mempool is empty before timing -- a
 limit on the scaffolding reading as a limit on the subject.
+
+### 2026-09-18 — acceptance-layer probe, phase A: what a missing body does to the shipped node
+
+Plan item 0.1. A test-only flag, `-perfwithholdbody=<hash>` / `-perfwithholdheight=<n>`, fails
+`ReadBlockFromDisk`'s `CBlockIndex` overload for chosen blocks. Nineteen call sites reach that one
+function -- `ConnectTip`, `DisconnectTip`, `ProcessGetBlockData`, GETBLOCKTXN, the compact-block
+announce, `VerifyDB`, `RollbackBlock`, ZMQ, the smartnode list diff and several RPCs -- so the
+flag reproduces "commitments held, bodies missing" across every consumer at once, on the shipped
+serialization, with no fork and no second format. Local regtest node on mario, 20 blocks.
+
+| path | withheld body does | severity |
+|---|---|---|
+| **`VerifyDB` at startup** | `ERROR: VerifyDB(): *** ReadBlockFromDisk failed at 10` then **"Corrupted block database detected. Please restart with -reindex"**, and the node **refuses to start** | fatal, and the advice is actively wrong for a windowed node |
+| **P2P serving** (`ProcessGetBlockData`) | a fresh peer syncing stopped at **height 9**, the block before the withheld one, and the serving node died: **`Posix Signal: Aborted`** -- the `assert(!"cannot load block from disk")` | fatal, remote-triggered, confirms A1 |
+| **`ConnectTip`** | `*** Failed to read block` / `Failed to connect best block (code 0)` -- `AbortNode` | fatal |
+| RPC read paths (`getblock` v0, `getblockstats`) | `error code: -1`, node survives | graceful already |
+
+**`DisconnectTip` could not be isolated**, for a reason that is itself a finding: the startup check
+window always includes the tip, so withholding the tip's body blocks startup before any disconnect
+can be attempted. It needs the phase-B predicate in `VerifyDB` before it can be tested at all.
+
+**Against 0.1's kill criterion: no kill, and the cost signal is small.** None of the four paths
+needs an *invariant relaxed*. Each needs the same thing -- consult a have-bodies predicate before
+reading:
+
+- `VerifyDB` skips blocks it knows it does not hold, and treats a missing body as corruption only
+  when the index says it should be there. That is a new state beside the old one, not a weakened
+  check, which is the distinction the kill criterion turns on.
+- `ProcessGetBlockData` declines rather than asserts, and a windowed node stops advertising
+  `NODE_NETWORK`.
+- `ConnectTip` returns "not yet" instead of `AbortNode`.
+
+**The one genuinely open path is `DisconnectTip`.** A node can be *compelled* to disconnect a block
+whose body it lacks -- that is §14.2's A2, where ChainLock enforcement moves the tip -- and unlike
+the other three there is no obvious "decline" available: the chain has to move. Phase B has to
+answer it, and it is the most likely place for the kill criterion to fire.
+
+**Phase A cost:** one flag, 40 lines, one afternoon. **Phase B** -- the two-state split, the
+predicate, and the remaining scenarios (restart while incomplete, peer churn, competing tip at
+equal work, ChainLock on an incomplete block, reorg across one, `-reindex`) -- is the 3-5 day item.
+On today's code those scenarios all terminate in one of the four rows above, which is why they need
+the split before they say anything new.
+
+**Trap for whoever runs this next:** `-checkblocks=0` means *all* blocks, not none. Use
+`-checkblocks=1`, or the startup verification hits the withheld body and the run measures the
+scaffolding.
