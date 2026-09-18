@@ -2642,3 +2642,39 @@ can be produced — on the critical path.
 **Caveat on the control arm:** 20 of `use`'s transactions were rejected as already-in-chain. Those
 are twenty transactions submitted by hand earlier to test whether the corpus was still live; they
 fell inside this run's range. Nothing else was rejected in either arm.
+
+### 2026-09-18 — 0.2 opening: the characterisation baseline is not this branch
+
+Three findings before a single assertion was written, all about what "characterise the node" has to
+mean here.
+
+**1. The perf rig branch cannot be the baseline.** Against master it carries:
+
+| delta | size |
+|---|---|
+| `MAX_DIP0001_BLOCK_SIZE` 2,000,000 → **8,000,000** | 1 line, enormous consequence |
+| the 0.1 acceptance probe in `validation.cpp` | **165 lines**, 12 references to `HaveBodies` / `g_perf_withhold` |
+| `validation.h`, `consensus/validation.h` | 42 and 27 lines |
+
+Characterising here would pin *the rig* as though it were the node (F-46b), and the block-size delta
+is not inert — every size, sigop and fill assertion would encode 8 MB. So 0.2 runs against a clean
+detached worktree at master, which also makes the rig deltas explicit knobs rather than invisible
+background.
+
+**2. A detached worktree is required, not a branch one.** `git worktree add <path> master` refuses
+when master is checked out elsewhere — it is, in a separate build tree on this machine. `--detach`
+at master's commit is the way, and it avoids disturbing a checkout that belongs to someone else.
+
+**3. The baseline needs the rig's `depends` prefix and its exact `CXXFLAGS`.** A plain `./configure`
+dies with "Boost is not available". The working invocation, recovered from the rig's own
+`config.log`, points `CONFIG_SITE` and `--prefix` at `depends/x86_64-pc-linux-gnu` and passes
+`CXXFLAGS='-g -O2 -include stdexcept -include cstdint -include cstring'` — those forced includes are
+what let this codebase compile under modern GCC. The depends tree is prebuilt libraries and is
+independent of the source tree, so a second worktree can share it rather than rebuild it.
+
+**What the first test pins.** `test/functional/feature_characterise_accept.py` submits a valid block
+with exactly one rule violated, for each row of §2.4, and records the node's own rejection reason.
+It is deliberately a characterisation and not a specification: a mutation that is *accepted* is a
+finding rather than a test failure, because it means the rule is not enforced where §2.4 assumes it
+is. The rows are split as §2.4 splits them — commitment-checkable (the rung can keep it) versus
+body-dependent (it has to move to connect time, and three of those have no connect-time home).
