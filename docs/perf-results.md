@@ -2678,3 +2678,55 @@ It is deliberately a characterisation and not a specification: a mutation that i
 finding rather than a test failure, because it means the rule is not enforced where §2.4 assumes it
 is. The rows are split as §2.4 splits them — commitment-checkable (the rung can keep it) versus
 body-dependent (it has to move to connect time, and three of those have no connect-time home).
+
+**0.2, continued — the baseline took three attempts, and the reason is a finding in itself.**
+
+`master` turned out to be the wrong baseline twice over. It is **v2.0.03.01** against the rig
+branch's and `upstream/develop`'s **v2.0.04.01**, so characterising it would pin a superseded
+revision. And its functional test framework **cannot run at all**: `test_framework/messages.py` does
+`import dash_hash`, while the module actually published is `raptoreum_hash`, so every test dies at
+import.
+
+That second problem is not master's alone — `upstream/develop` has it too. This is **not a
+discovery**: it is precisely what the nine open PRs fix, and those fixes live on our branch awaiting
+review upstream. The only consequence for 0.2 is mechanical.
+
+The baseline that is both upstream-equivalent in consensus and actually runnable is therefore a
+composition: **`src/` from `upstream/develop`, `test/` from our branch.** That is what 0.2
+characterises against — 2 MB block size, no probe, working harness.
+
+**0.2, first characterisation run — the harness works, and `submitblock` is the wrong door.**
+
+Nine rows of §2.4 submitted as otherwise-valid blocks with exactly one rule broken. Every one is
+rejected, so no rule in the set is silently unenforced. But the *reasons* are nearly useless:
+
+| row | node's reason |
+|---|---|
+| merkle root | `invalid` |
+| merkle malleation | `bad-qc-missing` ← harness, not the rule |
+| coinbase: founder payment | `invalid` |
+| coinbase: DIP3 type | `invalid` |
+| a second coinbase | `invalid` |
+| `CheckTransaction`: no outputs / negative value / duplicate input | `invalid` |
+
+**`submitblock` collapses almost every block-level failure to `invalid`.** Characterisation needs the
+specific reason — pinning "this block fails" is worthless when the point is *which rule* fired and
+whether a later change moved it. The p2p path carries the real reason, which is how
+`feature_block.py` asserts `bad-txnmrklroot` and friends. That is the next step, and it is a
+restructure rather than a tweak.
+
+**Two traps found the hard way, both of which manufacture false findings.**
+
+1. **Regtest's founder payment starts at height 500.** Below it the amount is zero and the coinbase
+   has a single output, so a mutation that strips the founder output is a **no-op on an unmutated
+   block** — and the node correctly accepts it. The first run reported "founder payment: ACCEPTED",
+   which reads as "this consensus rule is not enforced". It was nothing being tested at all. Priming
+   past 500 makes the row real, and it then rejects.
+2. **A hand-built regtest block inside a DKG mining window must carry the null quorum commitments.**
+   `create_coinbase` does not add them, so blocks are rejected `bad-qc-missing` from height 10
+   (`dkgInterval` 30, `dkgMiningWindowStart` 10) regardless of the mutation under test — which is
+   what the malleation row is still reporting. Either pick heights outside the window or add the
+   commitments.
+
+Both are the same class of error: a test that appears to exercise a rule while exercising nothing,
+and whose output looks like a finding about the node.

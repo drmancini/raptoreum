@@ -26,6 +26,7 @@ MAX_DIP0001_BLOCK_SIZE and the 0.1 probe's changes to validation.cpp, so
 characterising there would pin the rig rather than the node (F-46b).
 """
 from test_framework.blocktools import create_block, create_coinbase, create_transaction
+from io import BytesIO
 from test_framework.messages import CBlock, CTransaction, CTxIn, CTxOut, COutPoint, ToHex
 from test_framework.script import CScript, OP_TRUE, OP_CHECKSIG, OP_RETURN
 from test_framework.test_framework import BitcoinTestFramework
@@ -41,16 +42,37 @@ class CharacteriseAcceptTest(BitcoinTestFramework):
         node = self.nodes[0]
         self.observed = {}
 
-        self.log.info("priming a chain to spend from")
-        self.coinbase_key_height = 1
+        # Let the NODE build the priming chain. Hand-built blocks are rejected with
+        # bad-qc-missing from height 10: regtest opens a DKG mining window and a
+        # block inside it must carry the null quorum commitments, which
+        # create_coinbase does not add. And the wallet supplies the transactions
+        # for the mutations -- already signed and valid -- so each mutation is the
+        # only fault in the block, which is the whole point.
+        self.log.info("priming past the founder-payment start height (500)")
         addr = node.getnewaddress()
-        node.generatetoaddress(200, addr)
+        # Past 500: regtest's founder payment starts there (FounderPayment(..., 500, ...)),
+        # and below it the amount is zero and the coinbase has a single output -- so a
+        # mutation that strips the founder output is a no-op on an unmutated block,
+        # which reads as "the rule is not enforced" when nothing was tested at all.
+        node.generatetoaddress(550, addr)
+        self.pool = []
+        for _ in range(8):
+            txid = node.sendtoaddress(node.getnewaddress(), 1)
+            tx = CTransaction()
+            tx.deserialize(BytesIO(bytes.fromhex(node.getrawtransaction(txid))))
+            tx.rehash()
+            self.pool.append(tx)
+        # The pool stays UNCONFIRMED on purpose: mining it would spend those inputs
+        # and every reuse would fail as inputs-missing-or-spent, which is not the
+        # rule under test. A hand-built base block carries only the coinbase, so
+        # the mempool never leaks into it.
         self.tip_hash = int(node.getbestblockhash(), 16)
         self.tip_height = node.getblockcount()
         self.tip_time = node.getblock(node.getbestblockhash())["time"]
+        self.next_tx = 0
+        self.log.info("  tip %d, %d valid transactions in the pool", self.tip_height, len(self.pool))
 
         # --- commitment-checkable rows: a commitment block could still do these ---
-        self.check("header: proof of work", self.mutate_pow)
         self.check("merkle root", self.mutate_merkle_root)
         self.check("merkle malleation, duplicate transaction", self.mutate_duplicate_tx)
         self.check("first transaction is a coinbase", self.mutate_no_coinbase)
@@ -67,7 +89,17 @@ class CharacteriseAcceptTest(BitcoinTestFramework):
         self.log.info("characterised rejection reasons (docs/transaction-decoupling.md 2.4)")
         for name, got in self.observed.items():
             self.log.info("  %-44s %s" % (name, got))
+        self.log.info("  not characterisable on regtest: header proof of work")
+        self.log.info("    minimal difficulty means an unsolved header usually meets the target,")
+        self.log.info("    so the mutation cannot express the rule being violated")
         self.log.info("=" * 68)
+
+        accepted = [n for n, g in self.observed.items() if g.startswith("ACCEPTED")]
+        broken = [n for n, g in self.observed.items() if g.startswith("HARNESS")]
+        assert not broken, "harness could not express: %s" % ", ".join(broken)
+        assert not accepted, (
+            "these rules are NOT enforced at accept time, though section 2.4 assumes "
+            "they are: %s" % ", ".join(accepted))
 
     # ---- harness -----------------------------------------------------------
 
@@ -83,24 +115,26 @@ class CharacteriseAcceptTest(BitcoinTestFramework):
         return self.nodes[0].submitblock(ToHex(block))
 
     def check(self, name, mutate):
-        block = self.base_block()
-        mutate(block)
-        block.solve()
-        got = self.submit(block)
+        try:
+            block = self.base_block()
+            mutate(block)
+            block.solve()
+            got = self.submit(block)
+        except Exception as e:
+            # A harness error is not a node behaviour; say which it is.
+            self.observed[name] = "HARNESS ERROR: %s" % e
+            self.log.info("  %-44s -> %s", name, self.observed[name])
+            return
         self.observed[name] = got if got is not None else "ACCEPTED (no rejection)"
         self.log.info("  %-44s -> %s", name, self.observed[name])
-        # A mutation that is accepted is the finding, not a test failure: it means
-        # the rule is not enforced here and the design must not assume it is.
-        assert got is not None, (
-            "%s: the node ACCEPTED a block that violates this rule -- "
-            "section 2.4 assumes it is checked at accept time" % name)
+
+    def take_tx(self):
+        """A valid, signed, already-confirmed transaction to place in a block."""
+        tx = self.pool[self.next_tx]
+        self.next_tx += 1
+        return tx
 
     # ---- mutations, one rule each ------------------------------------------
-
-    def mutate_pow(self, block):
-        # Left unsolved: nothing else about the block is wrong.
-        block.nNonce = 0
-        block.solve = lambda: None
 
     def mutate_merkle_root(self, block):
         block.hashMerkleRoot += 1
@@ -110,12 +144,12 @@ class CharacteriseAcceptTest(BitcoinTestFramework):
         # `mutated` flag detects. A duplicate in NON-adjacent positions passes it
         # (F-43b), which is why the commitment format needs identifier
         # uniqueness as its own rule.
-        tx = create_transaction(block.vtx[0], 0, b"", 1, CScript([OP_TRUE]))
+        tx = self.take_tx()
         block.vtx += [tx, tx]
         block.hashMerkleRoot = block.calc_merkle_root()
 
     def mutate_no_coinbase(self, block):
-        block.vtx = block.vtx[1:] or [create_transaction(block.vtx[0], 0, b"", 1, CScript([OP_TRUE]))]
+        block.vtx = [self.take_tx()]
         block.hashMerkleRoot = block.calc_merkle_root()
 
     def mutate_founder_payment(self, block):
@@ -144,21 +178,21 @@ class CharacteriseAcceptTest(BitcoinTestFramework):
 
     def mutate_tx_no_outputs(self, block):
         tx = CTransaction()
-        tx.vin.append(CTxIn(COutPoint(block.vtx[0].sha256, 0), b"", 0xffffffff))
+        tx.vin.append(CTxIn(COutPoint(self.take_tx().sha256, 0), b"", 0xffffffff))
         tx.vout = []
         tx.calc_sha256()
         block.vtx.append(tx)
         block.hashMerkleRoot = block.calc_merkle_root()
 
     def mutate_tx_negative_value(self, block):
-        tx = create_transaction(block.vtx[0], 0, b"", 1, CScript([OP_TRUE]))
+        tx = self.take_tx()
         tx.vout[0].nValue = -1
         tx.calc_sha256()
         block.vtx.append(tx)
         block.hashMerkleRoot = block.calc_merkle_root()
 
     def mutate_tx_duplicate_input(self, block):
-        tx = create_transaction(block.vtx[0], 0, b"", 1, CScript([OP_TRUE]))
+        tx = self.take_tx()
         tx.vin.append(tx.vin[0])
         tx.calc_sha256()
         block.vtx.append(tx)
