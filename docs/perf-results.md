@@ -1850,3 +1850,82 @@ should be re-read once the stall is diagnosed: it may be the fix, or it may be u
 > node verifies every islock. The ChainLock stall is recorded here for one reason only: it is why
 > 0.4's swarm bring-up, rather than mainnet observation, is the route to quorum measurements.
 > **Do not open a diagnosis of it.**
+
+### 2026-09-18 — multisig validation cost, and the sigop counter that charges nothing for it
+
+The CHECKMULTISIG arm `bench_inputs.py` could not reach (`bench_sigops.py`, same isolated
+regtest node on bowser). The legacy interpreter has no `BASE` sighash cache, so `CheckSig`
+recomputes the whole-transaction sighash once per public key **tried**. Two encodings of the same
+1-of-15, because the node's accounting treats them completely differently.
+
+**A detail that inverted the first run.** `OP_CHECKMULTISIG` reads pubkeys from the top of the
+stack downwards -- `ikey` starts at `stacktop(-2)`, the *last* key the script pushed
+(`interpreter.cpp`, the `while (fSuccess && nSigsCount > 0)` loop) -- so keys are tried in
+**reverse script order**. Signing with the last key matches on the first attempt. The first run
+did exactly that and reported P2SH 1-of-15 as *cheaper per input than P2PKH*, which is what
+exposed the error. Signing with `KEYS[0]` forces all fifteen attempts; both cases are reported
+below because they cost the same in counted sigops and 16x different in reality.
+
+**P2SH 1-of-15** -- `GetP2SHSigOpCount` charges the redeem script's accurate count, 15 per input.
+
+| inputs | bytes | first key matches | all 15 tried | us/input, all tried | counted sigops | us per counted sigop |
+|---|---|---|---|---|---|---|
+| 10 | 6,401 | 1.2 ms | 28.0 ms | 2,800 | 152 | 184 |
+| 25 | 15,890 | 2.9 ms | 60.7 ms | 2,426 | 377 | 161 |
+| 50 | 31,706 | 5.8 ms | 93.3 ms | 1,865 | 752 | 124 |
+| 100 | 63,327 | 12.6 ms | 192.0 ms | 1,920 | 1,502 | 128 |
+| 150 | 94,952 | 19.7 ms | 298.7 ms | 1,992 | 2,252 | 133 |
+
+**Bare 1-of-15** -- `OP_1 <15 keys> OP_15 OP_CHECKMULTISIG` as the scriptPubKey. The scriptSig is
+`OP_0 <sig>`, which holds no sigop opcodes, and the spent scriptPubKey is never examined at spend
+time, so `GetTransactionSigOpCount` charges **zero**. The two counted sigops below are this
+transaction's own two P2PKH outputs, and they are the same whether it has 25 inputs or 800.
+
+| inputs | bytes | delta_ms | us/input | counted sigops | us per counted sigop |
+|---|---|---|---|---|---|
+| 25 | 2,937 | 67.4 | 2,695 | 2 | 33,685 |
+| 50 | 5,800 | 92.1 | 1,842 | 2 | 46,043 |
+| 100 | 11,524 | 190.9 | 1,909 | 2 | 95,462 |
+| 200 | 22,992 | 423.2 | 2,116 | 2 | 211,588 |
+| 400 | 45,912 | 939.4 | 2,349 | 2 | 469,721 |
+| 800 | 91,691 | **2,353.7** | 2,942 | **2** | 1,176,827 |
+
+**Four findings.**
+
+1. **The 15-key multiplier is real and it is ~16x.** P2SH 1-of-15 costs 120 us/input when the
+   first key tried matches and 1,900-2,000 us/input when all fifteen are tried. Same bytes, same
+   counted sigops.
+2. **This is where the quadratic term finally shows.** In the bare sweep, us/input climbs
+   1,842 -> 1,909 -> 2,116 -> 2,349 -> **2,942** as the transaction grows from 5.8 kB to 92 kB,
+   because each input now hashes 15 x the whole transaction. `bench_inputs.py` could not see this
+   on P2PKH, where one sighash per input is swamped by the ECDSA beside it. At the 100 kB ceiling
+   the size-dependent term is roughly 40% of the cost.
+3. **One transaction can cost 2.35 seconds and be charged 2 sigops.** 800 bare 1-of-15 inputs in
+   91,691 bytes. `MaxBlockSigOps` is 40,000, so the counter permits twenty thousand such
+   transactions; block size permits about twenty-one, which is **~49 s of validation for a 2 MB
+   block charged ~42 sigops of a 40,000 budget**. Bare 15-key multisig is non-standard so it does
+   not relay -- a miner can still mine it, and a miner is who fills blocks.
+4. **P2SH, by contrast, is bounded.** At 15 counted sigops per input and ~130 us per counted
+   sigop, the 40,000 cap holds a maximally P2SH-multisig-loaded 2 MB block to about **5.2 s** of
+   validation. The counter works there because `GetP2SHSigOpCount` charges the redeem script.
+
+**What this settles for the block resource budget (§1A of the design).**
+
+The unit cannot be legacy sigops, and cannot be legacy + P2SH either. `GetLegacySigOpCount` sums
+the sigops of the outputs a transaction **creates** plus its scriptSigs, so a 650-input P2PKH
+transaction counts 2 and an 800-input bare multisig transaction counts 2. `GetP2SHSigOpCount`
+adds spend-side cost for P2SH prevouts **only**. Bare multisig spends fall through both.
+
+So the per-transaction rule has to charge **an accurate count over every spent scriptPubKey**, not
+just P2SH ones -- which is a view-dependent quantity, checkable in `ConnectBlock` and not from a
+body alone, exactly as §1A says of the P2SH term. With that unit, the measured constant is
+**~130 us per sigop of work**, plus a size-dependent term worth about 40% more at the 100 kB
+ceiling. Today's worst case is ~49 s per 2 MB block; a 2 MB *commitment* block naming 62,500 such
+transactions implies **~41 hours** unless the budget bounds it, which is the unbounded-committed-
+work hazard in measured form.
+
+**Caveats.** One box with SHA extensions, which flatters the hashing half. The extended bare rows
+are reps=1; the three lower rows are reps=2 and agree with them. An earlier attempt at the high
+counts died on `too-long-mempool-chain, exceeds descendant size limit` because one block did not
+confirm all the funding, so the harness now mines until the mempool is empty before timing -- a
+limit on the scaffolding reading as a limit on the subject.
