@@ -33,6 +33,14 @@ LIVING = [
     "platform/architecture-decisions.md",
 ]
 
+# A document that owns a subject must be allowed to state it. build-plan owns
+# the schedule, so effort in days, weeks and months is its content, not a
+# restated finding — counting those was the lint marking a document down for
+# doing its job.
+OWNED = {
+    "build-plan.md": re.compile(r"\b\d[\d,]*(?:\.\d+)?\s*(?:d|w|weeks?|days?|months?|mo)\b"),
+}
+
 UNIT = (r"(?:tx/s|locks/s|recoveries/s|msg/s|ms|µs|us|ns|s|[kKMGT]i?B|B/s|B\b|sigops|%|"
         r"weeks?|days?|months?|hours?|years?|tx|blocks?|entries|inputs?|outputs?|nodes?|×)")
 NUMBER = re.compile(r"\b\d[\d,]*(?:\.\d+)?\s*" + UNIT + r"\b")
@@ -47,7 +55,7 @@ SECTION = re.compile(r"§[\d.]+[A-Za-z]?")
 SPELLED = re.compile(r"\b(?:thousand|million|billion|terabytes?|gigabytes?|megabytes?|hundreds?|dozens?|twice|tenfold)\b", re.I)
 
 
-def scan(path: Path):
+def scan(path: Path, name: str = ""):
     """Yield (lineno, line) for lines that restate a number without a citation."""
     in_fence = False
     in_comment = False
@@ -69,6 +77,11 @@ def scan(path: Path):
             continue
         if FINDING_ID.search(line):
             continue
+        owned = OWNED.get(name)
+        if owned is not None:
+            nums = [m.group(0) for m in NUMBER.finditer(line)]
+            if nums and all(owned.match(n) for n in nums) and not SPELLED.search(line):
+                continue
         # A bare section or code anchor beside a number is usually a pointer to
         # where the number is established, which is the behaviour we want.
         if ANCHOR.search(line) and not NUMBER.search(ANCHOR.sub("", line)):
@@ -92,7 +105,7 @@ def main():
         if not p.exists():
             print(f"{name:<40} {'MISSING':>8}")
             continue
-        hits = list(scan(p))
+        hits = list(scan(p, name))
         total += len(hits)
         print(f"{name:<40} {len(hits):>8}")
         for n, line in hits[: a.show]:

@@ -349,27 +349,27 @@ none depends on byte offsets. Nothing in `src/assets/` reads a block from disk a
 Above it, the boundary is `AcceptBlock`, which validates bodies, persists the block and
 makes it a chain candidate before any connection happens:
 
-- `validation.cpp:4332-4333` — `CheckBlock` and `ContextualCheckBlock`, both iterating
+- `validation.cpp:CheckBlock` and `validation.cpp:ContextualCheckBlock`, both iterating
   bodies: `3885` block byte size, `3889-3893` coinbase placement, `3897`
   `CheckTransaction`, `3904` `GetLegacySigOpCount`, `4020` `IsFinalTx`, `4022`
   `ContextualCheckTransaction`, `4045` `vtx[0]->nType`
-- `validation.cpp:4349` — `SaveBlockToDisk`, before connection
-- `validation.cpp:3717-3723` — `ReceivedBlockTransactions` sets `nTx = vtx.size()`, sets
+- `validation.cpp:SaveBlockToDisk`, before connection
+- `validation.cpp:ReceivedBlockTransactions` sets `nTx = vtx.size()`, sets
   `BLOCK_HAVE_DATA`, raises validity to `BLOCK_VALID_TRANSACTIONS`; `3742` inserts into
   `setBlockIndexCandidates`
-- `validation.cpp:3127` — `FindMostWorkChain` treats absence of `BLOCK_HAVE_DATA` as
+- `validation.cpp:FindMostWorkChain` treats absence of `BLOCK_HAVE_DATA` as
   missing data. That flag *is* "connectable".
-- `validation.cpp:3026-3027` — `ConnectTip` treats a failed `ReadBlockFromDisk` as
+- `validation.cpp:ConnectTip` treats a failed `ReadBlockFromDisk` as
   `AbortNode`
-- `validation.cpp:5365-5413` — `CheckBlockIndex` asserts
+- `validation.cpp:CheckBlockIndex` asserts
   `HAVE_DATA` implies `nTx > 0` implies `VALID_TRANSACTIONS` implies candidacy
 
 So a body-incomplete block either gets `BLOCK_HAVE_DATA`, becomes a candidate, is
 selected, and shuts the node down when connection reads it back; or it is held out of
 that flag, and roughly thirty call sites above `ConnectBlock` must learn a new state.
 
-**Corrected.** `nStatus` bit 128 is `BLOCK_CONFLICT_CHAINLOCK` (`chain.h:132`), used at
-fourteen sites and persisted as `VARINT` (`chain.h:365`), so existing databases already
+**Corrected.** `nStatus` bit 128 is `BLOCK_CONFLICT_CHAINLOCK` (`chain.h:BLOCK_CONFLICT_CHAINLOCK`), used at
+fourteen sites and persisted as `VARINT` (`chain.h:VARINT(obj.nStatus)`), so existing databases already
 have it set on chainlock-conflicting headers. **Proposed: bit 256.**
 
 **Corrected.** `BLOCK_VALID_TRANSACTIONS` is defined at `chain.h:112-116` as transactions
@@ -379,12 +379,11 @@ accept time, so the validity ladder gains a rung.
 
 ### 2.2 A trap
 
-`CheckBlock` caches: `validation.cpp:3857` returns early on `block.fChecked` and `3911`
-sets it. If a commitment-mode check marks an object that is later filled in place,
+`CheckBlock` caches: `validation.cpp:fChecked` is checked on entry and set on success. If a commitment-mode check marks an object that is later filled in place,
 `ConnectBlock`'s own `CheckBlock` at `2099` short-circuits and the per-transaction and
 sigop checks never run on the connect path. **Materialisation must produce a fresh
 object.** `PartiallyDownloadedBlock::FillBlock` already calls `CheckBlock` after
-assembly (`blockencodings.cpp:203`), which is the right place for it.
+assembly (`blockencodings.cpp:FillBlock`), which is the right place for it.
 
 ### 2.3 The give-up rule
 
@@ -1137,8 +1136,9 @@ to copy.
 > bursts and that Smartnodes will hold everything, so **capacity is sized for the burst and
 > storage for the average**, and the decision below stands as written.
 >
-> **The tripwire is §8.5's, unchanged: sustained load above roughly 85 tx/s, or growth crossing
-> 1 TB per node per year.** At the 512 GB spec the practical sustained ceiling is ~10-30 tx/s
+> **The tripwire is F-32: sustained load above 80 tx/s, which is the same thing as growth
+> crossing 1 TB per node per year at K-14's planning size.** Three values for it were in
+> circulation — 100, 85 and 79 — which is what D-12 settled by fixing the planning size first. At the 512 GB spec the practical sustained ceiling is ~10-30 tx/s
 > depending on replacement cycle. One caveat on every figure here: `vExtraPayload` runs to
 > `MAX_TX_EXTRA_PAYLOAD` = 10,000 B (`consensus/consensus.h:25`), so the 373-byte body
 > assumption could be off by up to 27x once the contract layer's new transaction type is
@@ -1294,7 +1294,7 @@ rate gives years of notice. Watching the Smartnode count gives weeks.
 #### Growth per Smartnode, and when to act
 
 At roughly 400 bytes per transaction, full replication costs each Smartnode about
-**12.6 GB per year per sustained transaction per second**.
+**K-14's 12.6 GB per year per sustained transaction per second** (F-31).
 
 | Sustained throughput | Per Smartnode, per year | Assessment |
 |---|---|---|
@@ -1304,7 +1304,8 @@ At roughly 400 bytes per transaction, full replication costs each Smartnode abou
 | 500 tx/s | 6.3 TB | Untenable |
 | 2,600 tx/s | 32.8 TB | Tier empties |
 
-Full replication holds to roughly **100 transactions per second sustained**. The headline
+Full replication holds to **F-32's 80 transactions per second sustained** — an earlier revision
+said 100, computed before D-12 fixed the planning size. The headline
 target in the scaling document is about 26 times past that, so deferral is safe for a
 modest contract layer and unsafe for the one that document was written for. Which case
 applies is not yet known, and §12 lists it as an open question for that reason.
