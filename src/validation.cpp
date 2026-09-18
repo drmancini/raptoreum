@@ -1127,6 +1127,31 @@ bool ReadBlockFromDisk(CBlock &block, const CBlockIndex *pindex, const Consensus
     return true;
 }
 
+bool ReadCommitmentBlockFromDisk(CCommitmentBlock &cblock, const CBlockIndex *pindex,
+                                 const Consensus::Params &consensusParams) {
+    // Note what is NOT here: the g_perf_withhold_* check ReadBlockFromDisk performs.
+    // A node that cannot produce a block's bodies can still produce its
+    // commitments, and a caller that only needs identifiers must not be refused
+    // because the bodies are gone. Reading via the FlatFilePos overload rather
+    // than the CBlockIndex one is what skips that check, so the hash-matches-index
+    // guard the latter provides is repeated below.
+    FlatFilePos blockPos;
+    {
+        LOCK(cs_main);
+        blockPos = pindex->GetBlockPos();
+    }
+
+    CBlock stored;
+    if (!ReadBlockFromDisk(stored, blockPos, consensusParams))
+        return false;
+    if (stored.GetHash() != pindex->GetBlockHash())
+        return error("%s: GetHash() doesn't match index for %s at %s", __func__,
+                     pindex->ToString(), blockPos.ToString());
+
+    cblock = CommitmentsFromBlock(stored);
+    return true;
+}
+
 double ConvertBitsToDouble(unsigned int nBits) {
     int nShift = (nBits >> 24) & 0xff;
 

@@ -453,6 +453,22 @@ bool ReadBlockFromDisk(CBlock &block, const FlatFilePos &pos, const Consensus::P
 
 bool ReadBlockFromDisk(CBlock &block, const CBlockIndex *pindex, const Consensus::Params &consensusParams);
 
+/** Read a block's commitment form: header, coinbase in full, and one 32-byte
+ *  identifier per remaining transaction.
+ *
+ *  Distinct from ReadBlockFromDisk by CONTRACT, not merely by return type. A node
+ *  must be able to answer for its commitments while holding no bodies at all --
+ *  that asymmetry is the state the whole design creates, so the two reads cannot
+ *  be one function with a flag. Concretely, this one deliberately does not consult
+ *  the body-withholding predicate ReadBlockFromDisk honours: withheld bodies fail
+ *  the materialising read and must not fail this one.
+ *
+ *  Today every block on disk is stored whole, so the implementation projects from
+ *  the stored block. When the body store lands the projection is replaced; callers
+ *  do not change, which is the point of drawing the boundary now. */
+bool ReadCommitmentBlockFromDisk(CCommitmentBlock &cblock, const CBlockIndex *pindex,
+                                 const Consensus::Params &consensusParams);
+
 bool UndoReadFromDisk(CBlockUndo &blockundo, const CBlockIndex *pindex);
 
 /** Functions for validating blocks and updating the block tree */
