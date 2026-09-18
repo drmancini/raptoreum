@@ -1757,3 +1757,82 @@ why the N=1 row reads 900 us/input and should be ignored. Regtest with zero asse
 per-ATMP asset-cache copy is in these numbers (on mainnet that is 2.0-3.2 ms per call). Two
 runs, reps 2 and 5. The bench node is left running at `/data/rtm-bench` on bowser for the
 multisig arm.
+
+### 2026-09-18 — mainnet spork state, and ChainLocks have not formed in ~14 months
+
+First look at live mainnet configuration rather than compiled defaults, on a production node
+(RPC as the `coins` user; the cookie is 0600 so this needed the operator). `IsSporkActive` is
+`value < GetAdjustedTime()` (`spork.cpp:210-220`), so a past timestamp means ON and 4070908800
+(year 2099) means OFF.
+
+| spork | value | state |
+|---|---|---|
+| `SPORK_2_INSTANTSEND_ENABLED` | 1731085882 (2024-11-08) | **ON** |
+| `SPORK_3_INSTANTSEND_BLOCK_FILTERING` | 4070908800 | **OFF** |
+| `SPORK_17_QUORUM_DKG_ENABLED` | 1669826638 (2022-11-30) | ON |
+| `SPORK_19_CHAINLOCKS_ENABLED` | 1715612303 (2024-05-13) | **ON** |
+| `SPORK_21_LOW_LLMQ_PARAMS` | 4070908800 | OFF |
+| `SPORK_22_SPECIAL_TX_FEE` | 25700 | value-carrying, set |
+| `SPORK_23_QUORUM_ALL_CONNECTED` | 1665887472 | ON |
+| `SPORK_25_QUORUM_POSE` | 4070908800 | **OFF** |
+| `SPORK_9_SUPERBLOCKS_ENABLED` | 4070908800 | OFF |
+
+**What this settles about four costs the decoupling plan had priced.**
+
+- **The ChainLock safety walk is skipped.** It is gated on `IsInstantSendEnabled() &&
+  RejectConflictingBlocks()` (`quorums_chainlocks.cpp:304`), and `RejectConflictingBlocks()`
+  requires spork 3 (`quorums_instantsend.cpp:1703-1711`), which is off. So the requirement that
+  every ChainLock-signing smartnode hold every transaction in the last six blocks is **inert on
+  mainnet as configured**. A member signs its own connected tip regardless -- which still means
+  it held that block's bodies, so §3's fallback argument is unaffected.
+- **There is no ten-minute mining gate.** `IsTxSafeForMining` returns true immediately when
+  `RejectConflictingBlocks()` is false (`quorums_chainlocks.cpp:465-468`). The 459 MB
+  `maxmempool` figure derived from holding 312,000 transactions for 600 s is therefore not a
+  current constraint; burst arrival volume is the only driver.
+- **InstantSend is enabled but signs nothing in the mempool.**
+  `IsInstantSendMempoolSigningEnabled()` is `GetSporkValue(SPORK_2) == 0`
+  (`quorums_instantsend.cpp:1699-1701`) and the value is a timestamp, not zero. So islocks arise
+  only through the retroactive path at block connect. The tip's coinbase reads
+  `instantlock: false`. Per-node islock BLS verification (>=1.15 ms per message, 0.6 of a core
+  at 520 tx/s) is therefore **latent rather than current** -- one spork value away.
+- **And that is why it cannot simply be switched on.** Enabling mempool signing at the design
+  point would need roughly 27x the measured signing capacity (§16.5).
+
+**The finding nobody was looking for: ChainLocks are not forming.**
+
+| | |
+|---|---|
+| `getbestchainlock` | height **1,122,354**, valid signature, `known_block: true` |
+| `getbestblockhash` | height **1,432,200** |
+| gap | **309,846 blocks**, about 430 days at a 2-minute target |
+| tip block | `"chainlock": false` |
+
+Spork 19 has been on since 2024-05-13, so ChainLocks were presumably forming and then stopped
+around July 2025. RTM's own contract paper sells 51%-attack immunity on this mechanism
+("an attacker would need to control over 60% of the active Smartnodes"), and it is not
+currently operative.
+
+**Caveat: one node, one observation.** `getbestchainlock` reports what that node knows, and a
+node that missed the messages would look the same. The tip's `chainlock: false` corroborates it.
+A second production host would make it solid.
+
+**Hypotheses, cheapest explanation first, none verified.**
+
+1. **`SPORK_25_QUORUM_POSE` is off**, so non-participating smartnodes are never punished or
+   rotated out. Quorums can accumulate members that never sign, and a 60% threshold then becomes
+   unreachable without anything logging an error.
+2. **A quorum-params transition.** `UpdateLLMQParams` moves the ChainLock type from
+   `llmq400_60` to `llmq200_60` once `QUORUMS_200_8` activates (`chainparams.cpp:1104-1109`), and
+   that activation is counted by `NodeRoundVoting`'s 720-block body scan -- the same scan the
+   plan removes in 3.2.
+3. **DKG failure.** Spork 17 being on does not prove sessions complete.
+
+`quorum list`, `smartnode count` and `quorum dkgstatus` would separate these: live quorums of
+the ChainLock type point at signing, an empty set points at formation and moves hypothesis 1 to
+the front.
+
+**What it changes for decoupling.** The manufactured-quorum-split hazard (§3A.7, C2) is about
+making a condition schedulable in a mechanism that is currently not running at all, which lowers
+its urgency and raises the prior that the LLMQ layer needs work before decoupling adds load to
+it. The DIP8 signing-attempts process (plan item 3.1) keeps its place, but its justification
+should be re-read once the stall is diagnosed: it may be the fix, or it may be unrelated.

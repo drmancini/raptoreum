@@ -145,9 +145,20 @@ the state root optional.
 body figure behind every storage and bandwidth number here could be off by up to 27× once the
 contract layer's new transaction type is specified.
 
-**Conditional on 0.3.** If sporks 2, 3 and 19 are live on mainnet, three priced items become real
-rather than inert: every full node BLS-verifies every islock (`ProcessPendingInstantSendLocks`
-gates on `IsInstantSendEnabled` only, with no smartnode check) at ≥1.15 ms each — 0.6 of a core
-at 520 tx/s and 2.4 cores at 2,083, on one thread — which pulls 5.2 into the main build; the
-`maxmempool` figure needs the ten-minute mining gate in it; and convergence becomes mandatory for
-every ChainLock-signing smartnode rather than only for pools.
+**Answered by 0.3 on 2026-09-18** (mainnet spork state read from a production node; see
+`perf-results.md`). Sporks **2 and 19 are ON, 3 is OFF**, and InstantSend mempool signing is off
+because spork 2 carries a timestamp rather than `0`. So three items that were priced as real are
+**inert as mainnet is configured**: the ChainLock safety walk is skipped, so convergence is not
+mandatory for ChainLock signers; there is no ten-minute mining gate, so the 459 MB `maxmempool`
+figure loses its driver and burst volume is the only one; and no islocks are produced except
+retroactively, so per-node islock verification is **latent** — it arrives the moment spork 2's
+value is set to `0`, and that is also why it cannot be switched on at the design point without
+5.2.
+
+**And 0.3 found something outside its brief: ChainLocks have not formed in ~14 months.** Best
+chainlock height 1,122,354 against a tip of 1,432,200 — 309,846 blocks, with the tip reading
+`chainlock: false` — while spork 19 has been on since May 2024. One node's view, corroborated by
+the tip but not yet by a second host. Three candidate causes are recorded in `perf-results.md`,
+with `SPORK_25_QUORUM_POSE` being off as the cheapest explanation. **This reorders nothing in the
+plan yet, but it raises the prior that the LLMQ layer needs work before decoupling adds load to
+it, and 3.1's justification should be re-read once the stall is diagnosed.**
