@@ -50,7 +50,7 @@ interleaved. Estimates include tests and were revised upward twice under adversa
 
 ## Phase 0 — de-risk before committing · 6-8 weeks
 
-Nothing in phase 1 starts before **0.1c** settles the rung. **Settled 2026-09-18** — the bit is settled and inseparable from the fetch layer (F-38, F-40); the rung sits after the commitment-checkable checks, and the gap R-28 exposed is **three** rules, not a category (F-43, F-44) — one of them `bad-txns-oversize`, the very cap §1A's body-byte argument leans on. 0.1 returned its verdict on 2026-09-18 — no kill — but it reached that verdict by withholding a block it had already validated (F-25e3), so the question that decides the *encoding* is still open, and it is a de-risking question, not a build one.
+Nothing in phase 1 starts before **0.1c** settles the rung. **Settled 2026-09-18** — the bit is settled and inseparable from the fetch layer (F-38, F-40); the rung sits after the commitment-checkable checks, and the gap R-28 exposed is **three** rules, not a category (F-43, F-44) — one of them `bad-txns-oversize`, the very cap §1A's body-byte argument leans on. 0.1 returned its verdict on 2026-09-18 — no kill — though it reached that verdict by withholding a block it had already validated (F-25e3), which is why the rung was settled by audit rather than probe. **The encoding is now decided too (D-16): no new ordinal.** `BLOCK_VALID_TRANSACTIONS` is granted as commitment-valid and the three uncovered rules move to the connect path, which avoids renumbering three persisted values and migrating every index entry on disk.
 
 > **0.1's kill criterion, written down before it runs.** The acceptance layer is **not
 > tractable**, and §15 becomes the design, if making any probe scenario safe requires
