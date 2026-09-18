@@ -1,6 +1,6 @@
 # Docs
 
-Seven live documents, in three lifecycles — **living** (revised in place, always current),
+Six live documents, in three lifecycles — **living** (revised in place, always current),
 **append-only** (the measurement log, never edited except by a forward-pointing correction), and
 **frozen** (written once for an audience elsewhere: `outbound/`). `archive/` holds what stopped
 being living, and every file there says why and what replaced it.
@@ -18,7 +18,6 @@ others reference it rather than restating.
 |---|---|
 | `findings.md` | **what we know.** Every number and decision this project relies on, one line each, with the regime it was measured in and a status. **Living docs cite an ID (F12, C7, A1, D4, R9); they do not restate a value.** |
 | `transaction-decoupling.md` | **the design.** What we are building and why, at the level of files, structures and states. Currently v8. |
-| `architecture-plain-language.md` | **the same design without the code.** What it is and why it holds, for reading and for handing to someone else. Currently v2. |
 | `build-plan.md` | **the schedule.** Phased components, effort, design certainty, the gates, and what is deferred with its tripwire. |
 | `perf-constants.md` | **where a constant lives in the source** — the exhaustive symbol-and-file audit, plus the LLMQ and spork tables in full. `findings.md` is authoritative for a *value*; this says where to find it. |
 | `perf-results.md` | **the measurement log**, chronological. Entries stand as measured; a correction banner flags conclusions later overturned. |
@@ -47,8 +46,7 @@ work ran past it. Both are recorded in `archive/throughput-bottleneck.md`, whose
 
 `check-numbers.py` reports numbers restated in living documents instead of cited from
 `findings.md`. It is a budget to shrink, not a list of bugs — some derivations are shown on
-purpose. **Baseline 2026-09-18: 227** — design 149, build-plan 46, plain-language 24, ledger 4,
-platform 4. The first pass reported 166; the cross-check showed the regex was blind to bare
+purpose. **Baseline 2026-09-18: 204** — design 149, build-plan 47, ledger 4, platform 4. The first pass reported 166; the cross-check showed the regex was blind to bare
 seconds, bare bytes, MiB, `×` multipliers, unitless consensus counts, `years`, and every
 spelled-out quantity ("a few thousand", "six terabytes"), which is most of how the
 plain-language companion is written. A lint that flatters you is worse than no lint.
@@ -65,7 +63,7 @@ agreed.
 - `archive/` — superseded or parked; **every file carries a header giving why, what replaced it,
   when, and why it is kept.** `throughput-bottleneck.md` (headline overturned by F1; its five
   unique measurements were logged first), `pre-decoupling-checklist.md` (superseded as the plan;
-  its descoping record moved into `build-plan.md`), `asset-cache-drag.md` (closed — F17, PR #481), `expensive-tx-test-design.md` (executed; results are in
+  its descoping record moved into `build-plan.md`), `asset-cache-drag.md` (closed — F-17, PR #481), `architecture-plain-language.md` (a prose copy of a living document is two clocks; its §§1-2 are still the best short explanation of the design), `expensive-tx-test-design.md` (executed; results are in
   `perf-results.md`), `mempoolaccept-port-analysis.md` (parked: acceptance had ~3x
   headroom against the working target of the time; the v8 target is 520-2,083 tx/s, see
   `build-plan.md`), `architecture-decisions.md` (a different project — the contract platform,
