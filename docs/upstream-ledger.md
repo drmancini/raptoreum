@@ -165,7 +165,7 @@ Lives in `perf/throughput-rig` and nowhere else.
 | `-perfalwaystrysend` | send-latch bypass probe |
 | per-node `SocketHandler` state logging | livelock diagnosis |
 | `test/perf/*` | the whole rig: corpus, generator, collector, analysis |
-| `docs/perf-results.md`, `docs/transaction-decoupling.md`, `docs/perf-constants.md` | research write-ups |
+| `docs/` — **the whole directory**, 17 files | the design, the build plan, the measurement log, research write-ups. Upstream has `doc/` (singular) and no `docs/` at all; ours was created 2026-09-13. **None of it may ride an upstream PR** — see the check recorded above. |
 
 ## Housekeeping notes
 

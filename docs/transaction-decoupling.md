@@ -15,8 +15,18 @@ revisions; the content is what the revision number tracks, not this line.
 **What this is.** Not an argument for decoupling. A description of what decoupling
 *would be* in this tree, at the level of files, structures and states.
 
-**Basis.** `ft/functional-test-suite` off upstream `master` == tag `2.0.3.01`. Every
-claim about existing behaviour cites a file and line and was read, not recalled.
+**Basis.** `perf/throughput-rig`, which is `develop` plus the functional-test series and the
+local perf modifications listed in `upstream-ledger.md`. Every claim about existing behaviour
+was read rather than recalled, and cites a **symbol** with a line number as a hint.
+
+> **Line numbers here are hints, not addresses, and they drift.** An earlier revision said the
+> basis was `ft/functional-test-suite` off tag `2.0.3.01`; that was wrong, and the anchors never
+> resolved there — at both the tag and `upstream/develop`, `validation.cpp:419` is
+> `if (expired != 0) {`, not the `MAX_STANDARD_TX_SIZE` check this document cites. The anchors
+> were only ever valid on this branch, which carries +334 lines against upstream in the five
+> most-cited files, and every commit that touches `validation.cpp` shifts them again: the probe
+> commit `78ac22962` alone moved everything past line 111 by 5 and past 1082 by 19. **Resolve a
+> citation by its symbol name, not its line.**
 Proposed behaviour is labelled **Proposed**. Unverified claims are labelled
 **Assumption**. Claims from v1 that turned out to be wrong are labelled **Corrected**
 and kept, because the corrections are load-bearing.
@@ -112,18 +122,15 @@ claim is its own failure:
 
 ### The alternative, retained as a fallback
 
-- **The commitment format** (§1–§13). Blocks carry identifiers; bodies live outside. Buys capacity.
-  Its first step is §12 Q1: **probe the acceptance layer before building anything on it.**
-- **Build whole, split after** (§15). Blocks are unchanged on the wire; nodes split them for
-  storage. Buys the storage reduction and none of the capacity, and removes the acceptance layer
-  along with most of §14. Its first step is §15.4: **build the body store and the fetch protocol,
-  which need no fork.**
+**Build whole, split after** (§15) stays in this document for one purpose: it is what the design
+becomes if §12 Q1 finds the acceptance layer intractable. Blocks are unchanged on the wire, nodes
+split them for storage, and the acceptance layer disappears along with most of §14 — as does the
+capacity the target requires, which is why it is the fallback and not the plan.
 
-**These are not contradictory instructions.** Under §15 the body store and fetch protocol do not
-depend on the acceptance layer, so building them does not violate Q1's rule. **But the choice is
-unmade**, and the rest of this document is written from the commitment design's point of view
-because that is the order it was written in, not because the question is settled. §15 has also not
-had the adversarial pass §14 gave the main design.
+Two things to know if it is ever reached. Its first step is §15.4 — the body store and the fetch
+protocol, which need no fork and which the commitment design needs anyway, so neither is wasted.
+And §15 has never had the adversarial pass §14 gave the main design, so it is less examined than
+its brevity suggests.
 
 ---
 
@@ -1160,7 +1167,14 @@ problem, and engineering rather than design.
 
 ### 8.2 What this makes mandatory
 
-**The UTXO commitment root stops being optional.** A node holding only a recent window
+**The UTXO commitment root stops being optional — SUPERSEDED IN v8, see §7A.3.** This argument
+holds only while a windowed node's sole route to a validated tip is a snapshot. Under the v8
+assumptions (Smartnodes hold the whole chain; the target is peak rather than sustained) a new node
+can replay from the Smartnode tier and then prune, so the root is **optional** and the tiers exist
+without it. The paragraph is kept because it states exactly what has to become false for the root
+to be required again, which is §7A.3's first tripwire.
+
+A node holding only a recent window
 cannot replay the chain from genesis, because replay needs every body. Its only route to a
 validated tip is a snapshot verified against the chain itself. This tree has
 `dumptxoutset` (`rpc/blockchain.cpp:2794`) and `SnapshotMetadata` (`node/utxo_snapshot.h`)
@@ -1634,7 +1648,8 @@ or merely postponed.
 
 **3. How is the state commitment built?** §8.2. The primitive is missing here and the
 reference exists (Kaspa: MuHash plus UTXO commitments, §11A). Needs designing for both the
-coins set and asset state, and it gates whether the mining and full tiers exist at all.
+coins set and asset state. **v8: no longer gates the tiers** — replay-then-prune from the
+Smartnode tier does (§7A.3) — so this is deferred with its tripwires rather than open.
 
 **4. Migration and activation.** Sketched only — §13.H lists the pieces and §14.5 gives the
 activation attack; neither is a plan. The scaling document
@@ -1669,7 +1684,7 @@ incentives, repair, erasure coding. Recoverable later because the chain keeps th
 
 Ten. Two of them deliver value on their own and depend on nothing here.
 
-### A. State commitment and snapshot sync — *prerequisite, independently useful*
+### A. State commitment and snapshot sync — *deferred in v8, independently useful*
 
 - Incremental accumulator over the coins set (MuHash backport; Kaspa is the working
   proof-of-work reference, §11A). This tree has only `hash_serialized_2`, which cursors
@@ -1705,7 +1720,7 @@ mining and ordinary tiers of §0 cannot exist without it.
 
 **Ships alone.** Gates any throughput increase whether or not decoupling happens — and
 §16.5 promotes it from "independently useful" to a blocker at the 2 MB design point, not
-only at 10 MB.
+only at the upper stage.
 
 ### C. Block format and serialization
 
@@ -1811,7 +1826,7 @@ hard fork: **intra-block asset state visibility** (B8) and **asset undo keyed pe
 
 And four constants or mechanisms that block testing rather than activation, all measured
 rather than reasoned — see §16.6 for the numbers: the **relay cap re-index** (required at
-2 MB, not only at 10 MB), **`maxmempool`**, **`MAX_PROTOCOL_MESSAGE_LENGTH`**, and
+2 MB, not only at the upper stage), **`maxmempool`**, **`MAX_PROTOCOL_MESSAGE_LENGTH`**, and
 **template production**. The relay re-index is the one that is a design requirement rather
 than a tuning change, because reconstruction from identifiers is only possible against a
 pending set that has actually converged.
@@ -1819,7 +1834,7 @@ pending set that has actually converged.
 ### Dependency shape
 
 ```
-A ──────────────────────────────► (tiers exist)
+A ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─► (deferred in v8; tiers exist via replay-then-prune)
 B ──────────────────────────────► (volume survivable, quorum can converge)
 J ──────────────────────────────► (coverage measurable)
 
@@ -2125,6 +2140,20 @@ already pay for themselves.
 
 ## 16. Measured inputs (2026-09-13, extended 2026-09-15)
 
+> **READ THE TARGET BEFORE THE ARITHMETIC (v8).** This section was written against an earlier
+> working target of **5,000 tx/s** with a **10 MB** block, and its derived figures still carry
+> those numbers: 600,000 transactions per interval, 19.2 MB of commitments, ~876 MB of mempool,
+> "~2,600 tx/s" as the upper stage. **The measurements stand; the arithmetic built on them is
+> retired.** The v8 design point is commitments filling a **2-8 MB** block, i.e. **520 to
+> 2,083 tx/s** — so where this section says 5,000 tx/s, the current top of range is 2,083, and
+> where it says 10 MB, it is 8 MB. Two translations worth having in hand: a full 8 MB commitment
+> block names **250,000** transactions, not 600,000, and needs **~1.8 GB** of mempool for a
+> ten-minute backlog, not 876 MB.
+>
+> Nothing here is re-derived in place, deliberately: this is a measurement section living inside
+> a design document, which is the structural problem `build-plan.md` exists to fix. It belongs in
+> the measurement log, and moving it is pending.
+
 Everything above reasoned about throughput qualitatively. These numbers are measured on
 a real node — Raptoreum Core 2.0.4.1, `develop` plus the functional-test series, on a
 12-core Ryzen 9 with the load generator on a separate machine. Full method and evidence
@@ -2185,7 +2214,7 @@ union across all peers contributed nothing over the best single peer. A node mis
 transaction cannot route around it, because every peer it could ask is missing the same
 one. The fix is necessarily the rate constant or the ordering, and can never be topology.
 
-**And it is not deferrable to the 10 MB stage.** The cap is indexed to block *bytes*, and
+**And it is not deferrable to the upper stage.** The cap is indexed to block *bytes*, and
 under decoupling block bytes are 32 × transaction count whatever the block size limit is.
 So a 2 MB decoupled block commits to ~62,500 transactions — a throughput of ~520 tx/s —
 while the relay cap stays at the 2 MB figure of ~75 tx/s. Coverage falls from about 170%
@@ -2325,7 +2354,7 @@ coinbase and a Merkle path, with no polling and no JSON marshalling of 600,000 i
 Holding the block size at 2 MB isolates the problems well. It does not sidestep the relay
 one.
 
-| | 2 MB decoupled | 10 MB decoupled |
+| | 2 MB decoupled | 8 MB decoupled (v8; the column was written for 10 MB) |
 |---|---|---|
 | throughput implied | ~520 tx/s | ~2,600 tx/s |
 | relay re-index (§16.3) | **required** | **required** |
