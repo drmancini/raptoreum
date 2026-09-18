@@ -9,7 +9,10 @@
 
 > **Corrections (2026-09-16).** This file is a chronological log; entries below stand as what
 > was measured *at the time*, but three conclusions drawn from them were later overturned.
-> The current picture is `docs/throughput-bottleneck.md`.
+> The current picture is `findings.md` (values and their regimes) and `transaction-decoupling.md`
+> (what they mean). `throughput-bottleneck.md`, which this banner used to name, was archived on
+> 2026-09-18 — its own headline had been overturned; its unique measurements are in the
+> 2026-09-18 back-entry below.
 >
 > * **The ~5,600 tx/s ceiling is high.** Rates were computed over a fixed duration while
 >   acceptance ran on past the offer (still accepting 3,088 tx/s at t=130s, 640 at t=147s).
@@ -1949,7 +1952,7 @@ serialization, with no fork and no second format. Local regtest node on mario, 2
 | path | withheld body does | severity |
 |---|---|---|
 | **`VerifyDB` at startup** | `ERROR: VerifyDB(): *** ReadBlockFromDisk failed at 10` then **"Corrupted block database detected. Please restart with -reindex"**, and the node **refuses to start** | fatal, and the advice is actively wrong for a windowed node |
-| **P2P serving** (`ProcessGetBlockData`) | a fresh peer syncing stopped at **height 9**, the block before the withheld one, and the serving node died: **`Posix Signal: Aborted`** -- the `assert(!"cannot load block from disk")` | fatal, remote-triggered, confirms A1 |
+| **P2P serving** (`ProcessGetBlockData`) | a fresh peer syncing stopped at **height 9**, the block before the withheld one, and the serving node died: **`Posix Signal: Aborted`** -- the `assert(!"cannot load block from disk")` | fatal, remote-triggered, confirms the security review's A1 |
 | **`ConnectTip`** | `*** Failed to read block` / `Failed to connect best block (code 0)` -- `AbortNode` | fatal |
 | RPC read paths (`getblock` v0, `getblockstats`) | `error code: -1`, node survives | graceful already |
 
@@ -1987,7 +1990,7 @@ scaffolding.
 
 Back-entry, not a new measurement. `throughput-bottleneck.md` was retired because its headline
 conclusion — "the v1 target of 1,500 tx/s is reachable on the current single-threaded design,
-with headroom" — was overturned by the twelve-node WAN swarm (F1: relay delivers ~930 tx/s), and
+with headroom" — was overturned by the twelve-node WAN swarm (F-1: relay delivers ~930 tx/s), and
 a live document leading with a dead conclusion is the worst thing in a folder. But five of its
 measurements exist nowhere else, and one of them is load-bearing for a deferral in the build
 plan. They are recorded here so the archive copy is history rather than the only source.
@@ -2011,7 +2014,7 @@ host load was 9.4-11.5 on a 24-thread box, so the limit is the per-node `msghand
 the test host.
 
 **Why it matters now:** this is the only evidence that the ~930 tx/s measured on the WAN swarm
-(F1) is a property of that topology and hardware rather than of the code — eight nodes on
+(F-1) is a property of that topology and hardware rather than of the code — eight nodes on
 loopback converge fully at twice that rate. The build plan defers the relay structural work on
 exactly that reasoning, so deleting this measurement would leave the deferral unsupported.
 
@@ -2046,13 +2049,13 @@ contends with `msghand`.
 handler takes one message per peer per pass ("Just take one message", `ProcessMessages`), and the
 requesting peer issues **single-entry getdata messages** — measured 40,555 one-entry getdatas
 against 1 batched. So 1,405 / 1,205 / 698 tx/s at 1/4/8 peers is `accepted/N`, and above the cap
-the limiter is the handler loop rather than relay capacity. Supports F6.
+the limiter is the handler loop rather than relay capacity. Supports F-6.
 
 **5. The stock cap is fully explained, to the byte.** `InvBroadcastMax()` = 140 × 2 = **280**
-entries per trickle on a Poisson timer averaging 5 s → 56 tx/s per inbound peer (C5, C6). Every
+entries per trickle on a Poisson timer averaging 5 s → 56 tx/s per inbound peer (K-5, K-6). Every
 inv payload on the link measured exactly **10,083 B = 3 + 280 × 36**. The 47-65 spread across
 runs is Poisson trickle-count noise, ~±18% at one sigma over 150 s, not a second mechanism. This
-is one of the three values in F4 and the only one with a mechanism attached.
+is the mechanism behind F-4, and the reason the 74.7 figure is not used.
 
 **And the four errors of that document's first pass**, which README's second standing warning
 points at and which are worth keeping as a checklist: relay capacity measured while ingestion was

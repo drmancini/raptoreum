@@ -34,12 +34,18 @@ LIVING = [
     "platform/architecture-decisions.md",
 ]
 
-UNIT = r"(?:tx/s|locks/s|recoveries/s|msg/s|ms|µs|us|ns|[kKMGT]B|B/s|sigops|%|weeks?|days?|months?|hours?|tx|blocks?|entries)"
+UNIT = (r"(?:tx/s|locks/s|recoveries/s|msg/s|ms|µs|us|ns|s|[kKMGT]i?B|B/s|B\b|sigops|%|"
+        r"weeks?|days?|months?|hours?|years?|tx|blocks?|entries|inputs?|outputs?|nodes?|×)")
 NUMBER = re.compile(r"\b\d[\d,]*(?:\.\d+)?\s*" + UNIT + r"\b")
-FINDING_ID = re.compile(r"\b[CFADR]\d+\b")
+# Hyphenated so they cannot collide with the security review's attack labels (A1, B1,
+# C1...), the accumulator example's D0, or "R = N * D^-1".
+FINDING_ID = re.compile(r"\b[KFXDR]-\d+[a-z]?\b")
 # A file:line or file:symbol anchor is a citation, not a restated value.
 ANCHOR = re.compile(r"`[\w/.\-]+\.(?:cpp|h|py|sh|md):[\w\d]+")
 SECTION = re.compile(r"§[\d.]+[A-Za-z]?")
+# Spelled-out quantities hide from a digit-based regex, and the plain-language
+# companion is written almost entirely in them.
+SPELLED = re.compile(r"\b(?:thousand|million|billion|terabytes?|gigabytes?|megabytes?|hundreds?|dozens?|twice|tenfold)\b", re.I)
 
 
 def scan(path: Path):
@@ -60,7 +66,7 @@ def scan(path: Path):
             if "-->" in line:
                 in_comment = False
             continue
-        if not NUMBER.search(line):
+        if not NUMBER.search(line) and not SPELLED.search(line):
             continue
         if FINDING_ID.search(line):
             continue
