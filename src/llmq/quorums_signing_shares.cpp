@@ -20,6 +20,16 @@
 
 #include <cxxtimer.hpp>
 
+// PERF INSTRUMENTATION (measurement only). Where does ~3.8 s per signature go
+// once the backlog is deep? Split the per-item cost, and separate WAITING for
+// cs from working under it -- that is what tells contention from algorithmic
+// cost, and reasoning about the code has twice given the wrong answer.
+namespace sigprof {
+    std::atomic<int64_t> nCreate{0}, nProcess{0}, nSessions{0};
+    std::atomic<int64_t> nQuorumNodes{0}, nLockWait{0}, nUnderLock{0}, nRecover{0};
+    std::atomic<int64_t> nItems{0};
+}
+
 namespace llmq {
 
     CSigSharesManager *quorumSigSharesManager = nullptr;
@@ -698,6 +708,7 @@ namespace llmq {
         bool canTryRecovery = false;
 
         // prepare node set for direct-push in case this is our sig share
+        int64_t tq0 = GetTimeMicros();
         std::set <NodeId> quorumNodes;
         if (!CLLMQUtils::IsAllMembersConnectedEnabled(llmqType) &&
             sigShare.getQuorumMember() == quorum->GetMemberIndex(WITH_LOCK(activeSmartnodeInfoCs,
@@ -705,12 +716,18 @@ namespace llmq {
             quorumNodes = connman.GetSmartnodeQuorumNodes(sigShare.getLlmqType(), sigShare.getQuorumHash());
         }
 
+        sigprof::nQuorumNodes += GetTimeMicros() - tq0;
+
         if (quorumSigningManager->HasRecoveredSigForId(llmqType, sigShare.getId())) {
             return;
         }
 
         {
+            int64_t tw0 = GetTimeMicros();
             LOCK(cs);
+            int64_t tw1 = GetTimeMicros();
+            sigprof::nLockWait += tw1 - tw0;
+            struct UnderLock { int64_t t0; ~UnderLock(){ sigprof::nUnderLock += GetTimeMicros() - t0; } } _ul{tw1};
 
             if (!sigShares.Add(sigShare.GetKey(), sigShare)) {
                 return;
@@ -741,7 +758,9 @@ namespace llmq {
         }
 
         if (canTryRecovery) {
+            int64_t tr0 = GetTimeMicros();
             TryRecoverSig(quorum, sigShare.getId(), sigShare.getMsgHash());
+            sigprof::nRecover += GetTimeMicros() - tr0;
         }
     }
 
@@ -1499,6 +1518,18 @@ namespace llmq {
                           iters, tRecovered / 1000, tShares / 1000, tSign / 1000,
                           tSend / 1000, tClean / 1000,
                           (t6 - t0) / 1000, pending);
+                int64_t nI = sigprof::nItems.exchange(0);
+                LogPrintf("SIGSHARE-SPLIT items=%d create=%dms process=%dms sessions=%dms "
+                          "quorumNodes=%dms lockWait=%dms underLock=%dms recover=%dms perItem=%dus\n",
+                          nI,
+                          sigprof::nCreate.exchange(0) / 1000,
+                          sigprof::nProcess.exchange(0) / 1000,
+                          sigprof::nSessions.exchange(0) / 1000,
+                          sigprof::nQuorumNodes.exchange(0) / 1000,
+                          sigprof::nLockWait.exchange(0) / 1000,
+                          sigprof::nUnderLock.exchange(0) / 1000,
+                          sigprof::nRecover.exchange(0) / 1000,
+                          nI ? (t4 - t3) / nI : 0);
                 tRecovered = tShares = tSign = tSend = tClean = 0;
                 iters = 0;
                 lastReport = t6 / 1000;
@@ -1525,11 +1556,17 @@ namespace llmq {
         }
 
         for (auto &[pQuorum, id, msgHash]: v) {
+            int64_t ta = GetTimeMicros();
             auto opt_sigShare = CreateSigShare(pQuorum, id, msgHash);
+            int64_t tb = GetTimeMicros();
+            sigprof::nCreate += tb - ta;
+            sigprof::nItems++;
 
             if (opt_sigShare.has_value() && opt_sigShare->sigShare.Get().IsValid()) {
                 auto sigShare = *opt_sigShare;
                 ProcessSigShare(sigShare, connman, pQuorum);
+                int64_t tc = GetTimeMicros();
+                sigprof::nProcess += tc - tb;
 
                 if (CLLMQUtils::IsAllMembersConnectedEnabled(pQuorum->params.type)) {
                     LOCK(cs);
@@ -1539,6 +1576,7 @@ namespace llmq {
                     session.nextAttemptTime = 0;
                     session.attempt = 0;
                 }
+                sigprof::nSessions += GetTimeMicros() - tc;
             }
         }
     }
