@@ -10,7 +10,8 @@
 > 3x headroom — so parallel validation is not on the v1 path and neither is this port. The
 > "~2.8x" figure below is an *estimate* derived from `-perfskipsigs` and has never been
 > tested against a real parallel implementation. Revisit only for a higher-throughput v2.
-> Current picture: `docs/throughput-bottleneck.md`.
+> Current picture: `findings.md` for the values (F-7, F-10) and `build-plan.md` for where
+> parallel acceptance now sits.
 
 Scope: what it brings, what it touches, key risks, rough size. Based on reading RTM's
 current acceptance path (`validation.cpp`) against Dash master's `MemPoolAccept`
