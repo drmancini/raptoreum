@@ -414,25 +414,40 @@ coinbase in full, and the list of identifiers — can perform it.
 | check | in | needs | verdict |
 |---|---|---|---|
 | proof of work, header sanity | `CheckBlockHeader` | header | **commitment** |
+| parent known, difficulty, median time, checkpoints | `ContextualCheckBlockHeader` | header chain | **commitment** |
 | **merkle root** | `CheckBlock` | the identifier list | **commitment** — this is the one the format is made of |
-| duplicate-transaction mutation, CVE-2012-2459 | `CheckBlock` | the identifier list | **commitment** |
+| merkle malleation (`mutated`) | `CheckBlock` | the identifier list | **commitment**, but see below — it is not set-uniqueness |
 | block size limits | `CheckBlock`, `ContextualCheckBlock` | the block as serialized | **commitment**, with the meaning re-based per §1A |
 | first transaction is a coinbase | `CheckBlock` | the coinbase | **commitment** |
-| BIP34 height in the coinbase | `ContextualCheckBlock` | the coinbase | **commitment** |
-| DIP3 coinbase is a CbTx (`bad-cb-type`) | `ContextualCheckBlock` | the coinbase | **commitment** |
+| coinbase `CheckTransaction`: length, no asset, **founder payment** | `CheckBlock` | the coinbase **and the height** | **commitment** |
+| coinbase finality and `bad-txns-cb-type` | `ContextualCheckBlock` | the coinbase | **commitment** |
+| DIP3 coinbase is a CbTx (`bad-cb-type`) | `ContextualCheckBlock` | the coinbase | **commitment**, and it has **no** connect-time home — it must stay at the rung |
+| ~~BIP34 height in the coinbase~~ | `ContextualCheckBlock` | — | **dead code**: guarded `BIP34Enabled && !fDIP0003Active_context`, and DIP3 is enabled on all four networks |
+| CbTx height (`bad-cbtx-height`) | `CheckCbTx` via `ProcessSpecialTxsInBlock` | the coinbase payload | commitment-*checkable*, but runs only at **connect** today — a candidate to hoist |
 | no *other* transaction is a coinbase (`bad-cb-multiple`) | `CheckBlock` | every input list | **body** |
-| `CheckTransaction` per transaction | `CheckBlock` | every transaction | **body** |
+| `CheckTransaction` for `vtx[1..]` | `CheckBlock` | every transaction | **body** |
 | legacy sigop count | `CheckBlock`, `ContextualCheckBlock` | every script | **body** |
 | `nLockTime` finality (`bad-txns-nonfinal`) | `ContextualCheckBlock` | every transaction | **body** |
-| type and version (`bad-txns-type`, `bad-txns-cb-type`) | `ContextualCheckTransaction` | every transaction | **body** |
+| type and version (`bad-txns-type`) | `ContextualCheckTransaction` | every transaction | **body** |
+| **`bad-txns-oversize`** (K-6's per-transaction cap) | `ContextualCheckTransaction` | every transaction | **body** |
 | special transactions, CbTx merkle roots | `ProcessSpecialTxsInBlock` | every transaction | body — **already runs at connect** |
 
-Six of the thirteen are answerable from the commitment block alone, and they are not a trivial six:
-proof of work, the merkle root, mutation, size, and both coinbase rules. **The rung sits exactly
-there** — a commitment block can honestly certify that it is a well-formed block committing to a
-specific, non-duplicated set of identifiers, at a specific height, with a valid coinbase.
+Nine rows are answerable from the commitment block alone — and one more, BIP34's height rule, would be
+except that it is **dead code**: its guard excludes it wherever DIP3 is active, which is everywhere. **The rung
+sits after the commitment rows**: a commitment block can honestly certify that it is a well-formed block, with a
+valid coinbase paying the founder correctly, committing to a specific identifier list at a height.
 
-**And the body-dependent set is nearly all covered at connect already.** `ConnectBlock` re-invokes
+Two qualifications the enumeration exposed, both about the merkle row:
+
+- **`mutated` is not set-uniqueness.** `ComputeMerkleRoot` flags mutation only when it finds an *adjacent equal
+  pair* at some level. An identifier list like `[A, B, A, C]` passes it, and today such a block dies at connect
+  as a double spend. A commitment format must add **identifier uniqueness** as its own rung rule — trivial on a
+  list of identifiers, and no longer covered by anything downstream.
+- **The carried coinbase must be bound to the tree.** Nothing today checks that the coinbase a commitment block
+  carries is the transaction the first identifier names, because today they cannot differ. The format needs
+  `id[0] == hash(coinbase)` as a new rule, or the coinbase is free-floating.
+
+**And the body-dependent set is nearly all covered at connect already.****And the body-dependent set is nearly all covered at connect already.** `ConnectBlock` re-invokes
 `CheckBlock`, so `bad-cb-multiple`, `CheckTransaction` and the sigop count are re-checked when the
 bodies are in hand. That leaves **exactly two rules with no connect-time home**, because
 `ConnectBlock` deliberately does not re-invoke `ContextualCheckBlock`:
@@ -440,24 +455,41 @@ bodies are in hand. That leaves **exactly two rules with no connect-time home**,
 1. `nLockTime` finality — `bad-txns-nonfinal`
 2. transaction type and version — `bad-txns-type`, `bad-txns-cb-type`
 
-So the honest scope of the problem R-28 exposed is two rules, not a category. Either move them to
-the connect path, or re-invoke `ContextualCheckBlock` there — noting that the comment explaining
-why it is not re-invoked is about *upgrade* behaviour after a consensus rule change, which is a
-different concern from a rule that has genuinely never run yet.
+So the honest scope of the problem R-28 exposed is **three rules**, not a category:
 
-**One trap the enumeration exposes.** `CheckBlock` begins `if (block.fChecked) return true;` and
-sets `fChecked` after a full pass, so `ConnectBlock`'s re-check is skipped for a block object that
-was already checked in memory. Today that is safe — the object was checked with its bodies present.
-Under decoupling a block assembled from commitments plus fetched bodies **must not inherit
-`fChecked` from the commitment-only pass**, or the body half is never checked at all. It is one
-flag, and it is the difference between the design working and silently accepting anything.
+1. `nLockTime` finality — `bad-txns-nonfinal`.
+2. transaction type and version — `bad-txns-type`. Partly covered: a `nVersion == 3` transaction with an unknown
+   type dies at connect in `CheckSpecialTx`. Uncovered are `nVersion < 3` carrying a non-zero type, and
+   `nVersion > 3`.
+3. **`bad-txns-oversize`**, the per-transaction size cap (K-6) — the one that matters most. It lives in `policy.h` but is
+   `DoS(100)` on the block path, so it is consensus. Its only connect-time counterpart is `CheckTransaction`'s
+   same-named check against `MAX_LEGACY_BLOCK_SIZE`, an order of magnitude looser (F-44b): a transaction far above
+   K-6's cap would connect. It
+   is also the exact limit §1A's body-byte argument multiplies against, and the bound on quadratic sighash cost
+   (K-6). Losing it silently is the worst outcome on this list.
 
-**A second, smaller one.** Both size checks read `block.vtx.size() > MaxBlockSize()` — a
-transaction *count* compared against a *byte* limit. Today it is a harmless weak bound, because a
-transaction cannot be small enough for the count to reach the byte cap first. Under the commitment format the count is the thing
-that grows, and this comparison silently becomes a real limit at a value nobody chose. Same class as
-the relay cap and the sigop cap (K-9, F-30): a constant indexed to bytes that stops tracking what
-the block commits to.
+Either move all three to the connect path, or re-invoke `ContextualCheckBlock` there — noting that the comment
+explaining why it is not re-invoked is about *upgrade* behaviour after a consensus rule change, and that
+`-reindex-chainstate` already skips it today, so "a rule that never runs" is an existing situation rather than a
+new category.
+
+**One trap the enumeration exposes, and it is already live.** `CheckBlock` begins
+`if (block.fChecked) return true;` and sets the flag after a full pass, so `ConnectBlock`'s re-check is skipped
+for a block object already checked in memory. That is not merely a hazard for a future design — the flag
+**caches a verdict that depends on an argument it does not record**. `CheckBlock` takes `nHeight`, derives the
+block reward from it, and enforces the **founder payment** rule, whose only enforcement point in the whole
+codebase is this function. And `ProcessNewBlock` calls it with `ChainActive().Tip()->nHeight + 1`, computed
+*before* it takes `cs_main` — a guess. Every block arriving as a new tip is then connected from that object, with
+both later `CheckBlock` calls short-circuited. So a design that assembles a block in stages must ensure the flag
+does not survive assembly, and the reason is not hypothetical: the mechanism for caching a height-dependent
+consensus answer across a change of height is already in place.
+
+**A second, smaller one.** Both size checks read `block.vtx.size() > MaxBlockSize()` — a transaction *count*
+compared against a *byte* limit. It is genuinely inert today and stays inert under any commitment serialization
+that charges at least one byte per identifier, because the OR'd byte arm always trips first. It becomes a real
+limit only if the byte arm is dropped. Two siblings bind far earlier on an identifier list and are worth naming
+now: the compact-block path caps identifiers at `MaxBlockSize()/MIN_TRANSACTION_SIZE`, and merkle blocks cap
+transactions at `MaxBlockSize()/60` (K-10's 65,535 binds before either).
 
 ---
 
