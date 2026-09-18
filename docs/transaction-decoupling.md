@@ -267,7 +267,7 @@ consensus.
 | limit | re-based to | constraint that picks the value |
 |---|---|---|
 | block sigop budget | committed identifier count | total worst-case block hashing stays at or under today's ~4 GB |
-| per-transaction work | `sigops × size` | caps the quadratic term per transaction; calibrate with `bench_inputs.py` |
+| per-transaction work | accurate sigops over **spent** scripts × size | caps the quadratic term per transaction. **Measured 2026-09-18: ~130 µs per sigop of work, plus ~40% more from the size term at the 100 kB ceiling.** |
 | block body bytes | committed identifier count | bounds both the fetch and the permanent storage one block can impose |
 
 **No declared coinbase field is needed for any of it.** Bodies are self-authenticating, so a
@@ -275,6 +275,19 @@ prefix whose accumulated work or bytes exceeds the cap already proves the block 
 aborts the fetch. `sum == declared` buys nothing over `<= MAX`, and a declared field would be
 a miner-chosen number exactly as §7 says of the fee total. §7's "total body byte size" field
 is therefore dropped — but **the rule it was standing in for survives here.**
+
+**Which sigops — measured 2026-09-18, and neither existing counter will do.**
+`GetLegacySigOpCount` sums the sigops of the outputs a transaction *creates* plus its scriptSigs,
+so a 650-input P2PKH transaction counts 2 — and an 800-input bare-multisig transaction also counts
+2 while taking **2.35 seconds** to validate, because `CheckSig` recomputes the whole-transaction
+sighash once per public key tried and nothing examines the spent scriptPubKey.
+`GetP2SHSigOpCount` adds spend-side cost for P2SH prevouts only, so it prices P2SH 1-of-15
+correctly — 15 per input, ~130 µs each, holding a maximally loaded 2 MB block to ~5.2 s — and
+prices bare multisig at nothing. A 2 MB block of bare-multisig spends is ~49 s of validation
+charged ~42 sigops of a 40,000 budget; the same count as *commitments* implies ~41 hours. **So the
+rule charges an accurate count over every spent scriptPubKey, not just P2SH ones.** Bare 15-key
+multisig is non-standard and does not relay, but a miner can mine it, and a miner is who fills
+blocks. See `perf-results.md`.
 
 **Per-transaction is the checkable unit.** A node cannot know what a commitment block implies
 before fetching; it can reject each body as it arrives. The one term needing the UTXO view is
