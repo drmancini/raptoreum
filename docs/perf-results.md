@@ -2912,3 +2912,47 @@ retry feedback loop is a **strong inference** from `send=730ms` over 170 s plus 
 it is consistent with everything observed but is not separately instrumented. Confirming it means
 counting re-requests for sessions already signed, which is the natural next step and would also
 size the fix.
+
+### 2026-09-18 — the bounded-batch patch fails, and that is the useful result
+
+I proposed the fix implied by the previous entry — bound `SignPendingSigShares` to 32 items per pass
+so the work loop reaches `SendMessages` between chunks — built it, deployed it to one swarm node, and
+ran the identical 300 tx/s load. **It does not work**, and why is worth more than the patch.
+
+Patched node, same load, over one run:
+
+```
+iters=46  shares=249ms   sign=0ms        send=95ms   pendingSigns=0
+iters=13  shares=1179ms  sign=7104ms     send=48ms   pendingSigns=9487
+iters=1   shares=76ms    sign=21298ms    send=120ms  pendingSigns=21275
+iters=1   shares=100ms   sign=122993ms   send=498ms  pendingSigns=115873
+```
+
+It begins exactly as the diagnosis predicted — the loop cycles dozens of times per window and the
+queue sits at zero. Then it tips, and at the end **one iteration of at most 32 signatures took 123
+seconds: about 3.8 s per signature**, against the 1-2 ms measured when the queue is shallow.
+
+**So the per-item cost is not constant — it rises with the depth of the backlog**, by more than three
+orders of magnitude. The system is **bistable**: healthy until it tips, then unrecoverable, because
+every unit of backlog makes the next signature slower, which deepens the backlog. Bounding the batch
+cannot help, because batch size was never the quantity that mattered.
+
+**This retracts the previous entry's conclusion.** "Capacity exceeds demand" is true only at shallow
+queue depth. At depth, capacity collapses far below demand. F-73 is corrected accordingly.
+
+**What is measured, and what is not.** Measured: `SignPendingSigShares` remains ~99% of the thread;
+per-item cost scales catastrophically with backlog; `rtm-sigshares` is pinned at 100.0% while the
+rest of the node is idle at 101.5% of one core total, so by then it is not even receiving.
+**Not established:** *why* per-item cost grows. `ProcessSigShare` takes `LOCK(cs)` once per item and
+there are 22 such sites in the file, with the network threads contending; the maps that lock guards
+grow with the backlog, which would make each hold longer. That is a coherent story and it is **not
+proven** — it needs the lock held-time instrumented, or the per-item work counted against queue
+depth.
+
+**What it means for the plan.** 5.2's premise — that un-batched InstantSend cannot reach the design
+point — survives, but for a different reason than anyone wrote down: not the cost of the
+cryptography, and not the batch size, but a **superlinear collapse under backlog**. A fix has to
+remove that superlinearity or shed load before the tip, and neither is the batching protocol 5.2
+describes. The honest position for RTM: this is a node-level defect with a known signature and an
+unproven cause, and it should be diagnosed before a consensus-level protocol is designed to work
+around it.
