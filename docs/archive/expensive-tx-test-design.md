@@ -1,5 +1,8 @@
 <!-- archived: 2026-09-18
-     why:      executed; it was a test design and the tests have run
+     why:      partly executed. Tracks 0 and 3 ran (perf-results §17 and the asset-cache
+               entries). Track 1's -perfverifyrepeat knob was never built and Track 2's
+               special-transaction corpora never ran, so those two are unexecuted design,
+               not history
      replaced: perf-results.md §17 and the 2026-09-18 entries carry the results
      keep:     it states what each outcome would have meant, which is worth keeping as a worked example of
                pre-registering a measurement -->

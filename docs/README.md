@@ -1,6 +1,6 @@
 # Docs
 
-Nine live documents, in three lifecycles — **living** (revised in place, always current),
+Seven live documents, in three lifecycles — **living** (revised in place, always current),
 **append-only** (the measurement log, never edited except by a forward-pointing correction), and
 **frozen** (written once for an audience elsewhere: `outbound/`). `archive/` holds what stopped
 being living, and every file there says why and what replaced it.
@@ -20,13 +20,11 @@ others reference it rather than restating.
 | `transaction-decoupling.md` | **the design.** What we are building and why, at the level of files, structures and states. Currently v8. |
 | `architecture-plain-language.md` | **the same design without the code.** What it is and why it holds, for reading and for handing to someone else. Currently v2. |
 | `build-plan.md` | **the schedule.** Phased components, effort, design certainty, the gates, and what is deferred with its tripwire. |
-| `perf-constants.md` | **constants, read from source.** The single source of truth for any constant. Do not restate values elsewhere — cite this. |
+| `perf-constants.md` | **where a constant lives in the source** — the exhaustive symbol-and-file audit, plus the LLMQ and spork tables in full. `findings.md` is authoritative for a *value*; this says where to find it. |
 | `perf-results.md` | **the measurement log**, chronological. Entries stand as measured; a correction banner flags conclusions later overturned. |
 | `upstream-ledger.md` | **how this tree differs from upstream**, including local modifications that change behaviour. |
-| `pre-decoupling-checklist.md` | **the pre-work record.** What was measured before the build plan existed, and what has been explicitly descoped and why. Superseded as *the plan* by `build-plan.md`. |
-| `asset-cache-drag.md` | the per-ATMP asset-cache copy: measurement, fix, and follow-ups. |
 
-## Two standing warnings
+## Three standing warnings
 
 **This branch is not shipped RTM.** `perf/throughput-rig` carries committed local modifications
 that change behaviour — `MAX_DIP0001_BLOCK_SIZE` is 8 MB here against 2 MB upstream, which changes
@@ -49,7 +47,11 @@ work ran past it. Both are recorded in `archive/throughput-bottleneck.md`, whose
 
 `check-numbers.py` reports numbers restated in living documents instead of cited from
 `findings.md`. It is a budget to shrink, not a list of bugs — some derivations are shown on
-purpose. **Baseline 2026-09-18: 166** (design 119, build-plan 39, plain-language 6, ledger 2).
+purpose. **Baseline 2026-09-18: 227** — design 149, build-plan 46, plain-language 24, ledger 4,
+platform 4. The first pass reported 166; the cross-check showed the regex was blind to bare
+seconds, bare bytes, MiB, `×` multipliers, unitless consensus counts, `years`, and every
+spelled-out quantity ("a few thousand", "six terabytes"), which is most of how the
+plain-language companion is written. A lint that flatters you is worse than no lint.
 Run `./check-numbers.py --show 10` to see the worst, or `--max N` to fail in CI once a budget is
 agreed.
 

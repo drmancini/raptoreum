@@ -116,7 +116,9 @@ Interleave anywhere. 3.1 gates 2.2; the asset fixes want to land before activati
 | 3.1 | **DIP8 signing-attempts process.** Deliberately skipped today, so competing blocks at one height split the quorum's signatures and no ChainLock forms. Decoupling makes that condition *schedulable* rather than a race, because identifiers arrive instantly and body release is the attacker's choice. **Gates 2.2.** | 1-2 w | straightforward |
 | 3.2 | **Persist the round-voting count at connect.** `NodeRoundVoting` reads 720 blocks of bodies with an assert and its result gates consensus. Persisting the per-block fact removes the rescan — and with it the only stated reason the window floor is 720, which then needs a new justification. | 3-5 d | straightforward |
 | 3.3 | **ChainLocks `Cleanup` rewrite.** Replace the O(mempool) `GetTransaction` walk under `cs_main` + `mempool.cs` every 30 s — 1.9 s of stall at 3M entries — with event-driven pruning. | 1 w | straightforward |
+| 3.4b | **Asset-cache follow-ups** — recovered from `archive/asset-cache-drag.md`, where they were the only copy: bound or evict the global in-memory cache, which grows without eviction from the `LoadAssets` floor; elide the copy for asset transactions too, since they still pay it in full; and narrow the residual surface, which after #481 is asset-typed transactions only. | 1 w | straightforward |
 | 3.4 | **Asset fixes.** Intra-block mint visibility, undo keyed by `(assetId, tx index)`, and the distribution-type check that accepts any value. No longer fork-critical now asset state is uncommitted, still real divergences. | 1 w | straightforward |
+| 3.5b | **Parallel-acceptance sizing**, recovered from `archive/mempoolaccept-port-analysis.md`: the behaviour-preserving Dash `MemPoolAccept` port alone is **1,000-1,500 lines**, which is the only sizing we have for phase 5's parallel work. | — | reference |
 | 3.5 | **Already proposed upstream.** Per-ATMP asset-cache deep copy (#481) and the socket-handler busy loop (#480), both open against `develop`. | — | submitted |
 | 3.6 | **Stale anchors.** `nMinimumChainWork` at block 421457, a `defaultAssumeValid` written with a letter `o` so it parses to zero, a top checkpoint at 394273. Low priority, but they are the floor under any eclipse argument. | 1 d | straightforward |
 
@@ -151,11 +153,11 @@ list and was disproven by measurement, so each is here to stop it being rediscov
 
 | item | why it is off the list |
 |---|---|
-| **parallel validation / MemPoolAccept port** as a v1 blocker | acceptance is not the binding constraint (F7); and the naive version is *slower* than stock (F10) |
+| **parallel validation / MemPoolAccept port** as a v1 blocker | acceptance is not the binding constraint (F-7); and the naive version is *slower* than stock (F-10) |
 | **relay ordering rewrite** (the O(backlog) heap) | `-perfinvnosort` moved throughput <1% at the operating point; the "~40% of msghand" figure came from a 300k backlog at cap 50k-100k, a regime the target never reaches |
 | **`getblocktemplate`**'s full `ConnectBlock` per poll | decoupling dissolves the hard part — a commitment block's bodies were validated at acceptance. Revisit trigger: sustained mining at scale (and see 4.4) |
 | **message-size raises** as separate work | the send loop already chunks at `MAX_INV_SZ`; no splitting needed. The `MAX_PROTOCOL_MESSAGE_LENGTH` raise is still required, as part of 1.4 |
-| **`dbcache` / `maxsigcachesize`** as acceptance fixes | swept at saturation with no effect across 13× and 16× raises, application confirmed in the node log; the ceiling is real compute. **Note:** `-maxsigcachesize` *is* required, for a different reason — C4 holds only 2.1 blocks at 8 MB (4.5) |
+| **`dbcache` / `maxsigcachesize`** as acceptance fixes | swept at saturation with no effect across 13× and 16× raises, application confirmed in the node log; the ceiling is real compute. **Note:** `-maxsigcachesize` *is* required, for a different reason — K-4 holds only 2.1 blocks at 8 MB (4.5) |
 
 ## Gates
 
@@ -174,16 +176,22 @@ Four, and each carries real information:
 | **Retention, sharding, challenges, repair** | sustained load above ~85 tx/s, or growth crossing 1 TB per node per year |
 | **State root and snapshot sync** — and §7A.6's canonical asset element form with it, which was the hardest unsolved design problem | replay bootstrap becoming impractical, or the Smartnode tier thinning under storage pressure |
 | **Attributable attestation shares** | ships with retention — a challenge can only penalise a party that promised something, and a recovered threshold signature names nobody |
-| **Relay structural work, parallel acceptance, InstantSend batching — as blockers** | bursts that stop draining. A 60 s burst at 2,083 tx/s leaves ~71,000 transactions of backlog, clearing in ~80 s at the measured 900 tx/s of delivery |
+| **Relay structural work and parallel acceptance — as blockers** | bursts that stop draining. A 60 s burst at 2,083 tx/s leaves ~71,000 transactions of backlog, clearing in ~80 s at the measured 900 tx/s of delivery |
+
+> **InstantSend batching (5.2) was on that list and should not have been.** Under D-7 the design
+> assumes InstantSend on, and mempool signing at 520 tx/s then needs roughly 27× the measured
+> capacity (F-18) — so 5.2 is a **prerequisite of the design point**, not a deferral. Deferring it
+> would only be coherent under a decision to ship without InstantSend, which nobody has taken.
+> It keeps its number because that is where its design work sits.
 | **Bounded prefill** | nothing depends on it; a latency optimisation |
 
 ## Assumptions this plan rests on
 
-**A1 — the target is peak, not sustained.** At the 512 GB Smartnode specified in RTM's contract
+**X-1 — the target is peak, not sustained.** At the 512 GB Smartnode specified in RTM's contract
 paper, the practical sustained ceiling is ~10-30 tx/s depending on replacement cycle. Tripping it
 brings back retention first, then the state root.
 
-**A2 — Smartnodes hold the entire history.** This is what keeps replay bootstrap available and
+**X-2 — Smartnodes hold the entire history.** This is what keeps replay bootstrap available and
 the state root optional.
 
 **Caveat on both.** `vExtraPayload` runs to `MAX_TX_EXTRA_PAYLOAD` = 10,000 B, so the 373-byte

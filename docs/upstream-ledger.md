@@ -94,6 +94,19 @@ git fetch upstream ft/breaking-up && git log --oneline upstream/develop..FETCH_H
 > `--force-with-lease`. The GitHub mirror synced on the push and `#481` now proposes three files:
 > `src/Makefile.bench.include`, `src/bench/assets_cache_copy.cpp`, `src/validation.cpp`.
 >
+> **Both PR bodies were edited on the upstream repo, 2026-09-18, each on explicit instruction.**
+> Recorded here because this document owns the state of every PR and a body edit leaves no trace
+> in git:
+>
+> | PR | edit | why |
+> |---|---|---|
+> | #481 | dropped the trailing "See docs/asset-cache-drag.md." | the amended commit no longer adds that file, so the body cited something the PR does not contain |
+> | #480 | replaced "Any throughput ceiling measured on an affected node is a measurement of this bug" with a form qualified to core-constrained nodes, citing the counterfactual | our own measurement disproved the unqualified claim: reverting the fix took the socket thread from 12% to 84% of a core and left throughput unchanged within noise, because the spin is on the socket thread while the bottleneck is the message handler |
+>
+> Both are edits to text we authored; neither touches code or refs. **D-10 applies: nothing on
+> upstream without asking first**, and an instruction to fix one thing is not standing
+> authorisation for the next.
+>
 > **Check before submitting anything else:** `git diff $(git merge-base upstream/develop <branch>)
 > <branch> --name-only | grep ^docs/` must be empty. The other ten branches are clean.
 >
