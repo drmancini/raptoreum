@@ -449,7 +449,7 @@ Two qualifications the enumeration exposed, both about the merkle row:
 
 **And the body-dependent set is nearly all covered at connect already.****And the body-dependent set is nearly all covered at connect already.** `ConnectBlock` re-invokes
 `CheckBlock`, so `bad-cb-multiple`, `CheckTransaction` and the sigop count are re-checked when the
-bodies are in hand. That leaves **exactly two rules with no connect-time home**, because
+bodies are in hand. That leaves **exactly three rules with no connect-time home** (F-44), because
 `ConnectBlock` deliberately does not re-invoke `ContextualCheckBlock`:
 
 1. `nLockTime` finality — `bad-txns-nonfinal`
