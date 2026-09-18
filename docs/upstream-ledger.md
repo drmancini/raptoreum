@@ -76,7 +76,8 @@ git fetch upstream ft/breaking-up && git log --oneline upstream/develop..FETCH_H
 > or it reports "No commits between", which reads like a branch problem rather than a lookup one.
 
 > **Our own docs must never ride an upstream PR** (found and fixed 2026-09-18). `#481` was
-> proposing `docs/asset-cache-drag.md` -- 61 lines of our internal measurement notes -- in the
+> proposing `docs/asset-cache-drag.md` (now `docs/archive/asset-cache-drag.md`) -- 61 lines of
+> our internal measurement notes -- in the
 > same commit as the fix, in a folder **upstream does not have**: upstream carries `doc/`
 > (singular; Doxyfile, REST-interface, release-notes) and has no `docs/` at all. Ours was created
 > 2026-09-13 and is entirely this project's.

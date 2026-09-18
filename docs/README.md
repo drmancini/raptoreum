@@ -96,6 +96,12 @@ knows which line the sentence was about.
 
 - `outbound/` — PR descriptions, issue drafts, and messages. Text destined for elsewhere; may
   diverge from what was actually posted.
+**Archived files are frozen as written.** Their internal cross-references use the paths and
+framing that were current when they were archived, and are deliberately not updated — an archive
+that gets edited is not an archive. Each one's header says what replaced it, and that header is
+the only part maintained. Where a *banner* was added after the fact and has since gone stale, the
+banner is fixed; the body is not.
+
 - `platform/` — **the second subject.** `architecture-decisions.md` is the contract platform's
   architecture, cited by the design's §17 and the plan's phase 5. It lives here rather than in
   `archive/` because it is live work that has not started, not work that stopped.
