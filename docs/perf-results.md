@@ -2358,6 +2358,11 @@ retention interaction.
 
 ### 2026-09-18 — 0.1c, the rung probe: there is no rung, there is a bit and a fetch
 
+> **CORRECTED — the headline is retracted. See the correction entry below.** "There is no rung"
+> rested on `ConnectBlock` re-checking what `BLOCK_VALID_TRANSACTIONS` certifies. It does not:
+> its own comment says it does not re-invoke `ContextualCheckBlock`. The bit findings stand; the
+> rung question is reopened, and convergence here was restart-driven, not live.
+
 The question 0.1 did not reach: a commitment-only block cannot honestly hold
 `BLOCK_VALID_TRANSACTIONS`, so what does it hold? Two encodings were on the table. Reading
 `chain.h` killed both and suggested a third.
@@ -2427,3 +2432,72 @@ many-peer fetch), competing tip at equal work, reorg onto a branch with a gap, C
 gap, `-reindex`, and the **migration** this bit implies — a pre-bit datadir loads with
 `HAVE_BODIES` clear on every entry, which the new "active chain ⇒ HAVE_BODIES" assertion would fire
 on immediately. A one-pass upgrade at first load is the obvious fix and is unwritten.
+
+### 2026-09-18 — correction: 0.1c's headline is retracted, and three defects it hid
+
+Second adversarial review, with reproductions. The bit findings survive. The conclusion that made
+them interesting does not.
+
+**Retracted: "no rung is needed".** The argument was that `BLOCK_VALID_TRANSACTIONS` leaves only
+two body properties and `ConnectBlock` re-checks them anyway. `ConnectBlock`'s own comment says
+otherwise, verbatim: *"We don't currently (re-)invoke ContextualCheckBlock() or
+ContextualCheckBlockHeader() here."* And the list came from the `chain.h` enum comment, which omits
+`ContextualCheckBlock` entirely. Body-dependent rules enforced **only** at accept time:
+
+| rule | where |
+|---|---|
+| `nLockTime` finality (`bad-txns-nonfinal`) | `ContextualCheckBlock` — connect checks only BIP68 sequence locks, and says so |
+| coinbase must be a CbTx under DIP3 (`bad-cb-type`) | `CheckCbTxMerkleRoots` returns true for a non-CbTx coinbase |
+| `bad-txns-type` | `ContextualCheckTransaction` |
+| BIP34 height, `bad-txns-oversize` | `ContextualCheckBlock` |
+
+`CheckBlock` *is* re-run at connect — but only when `block.fChecked` is false, so the in-memory
+path skips it. So a commitment block holding `VALID_TRANSACTIONS` without its bodies would connect
+a block with a non-final transaction or a non-CbTx coinbase that today is rejected. **The rung
+question is reopened**, and the reason it was answered wrongly is the same reason 0.1's answer was
+wrong: the probe validates a body it holds and then flips a bit, so it cannot test the rung at all.
+That limitation has now produced a wrong conclusion twice, which makes it the probe's defining
+constraint rather than a caveat.
+
+**"Two added assertions" was one.** `m_chain.Contains ⇒ HAVE_BODIES` is not an invariant. Pruning
+removes bodies from blocks that stay connected — and worse, the assertion forbids **the design's
+own steady state**, commitments for all of history with bodies for a window. Dropped, and
+`PruneOneBlockFile` now clears the bit alongside `BLOCK_HAVE_DATA`, since pruning deletes the file
+the bodies live in. Verified on a pruned regtest node at height 1,200: prune to 800, zero
+assertions, restart clean.
+
+**The ledger was missing a recovery rule, and that is where silence could have entered.** The two
+narrowed guards skip the candidacy and unlinked assertions for a descendant of a body gap — so
+such a block was checked by *nothing*. Added: a block we can build on, above a gap, outranking the
+tip and not a candidate, must be parked in `m_blocks_unlinked` — the body-gap analogue of the rule
+pruning already has.
+
+**Three defects in the probe code, one fatal.**
+
+1. **`ReceivedBlockBodies` dropped a guard its sibling has** and made a block a candidate while its
+   parent was still header-only, tripping `FindMostWorkChain`'s `assert(HaveTxsDownloaded())` — a
+   **production** assertion, not a debug one. Reproduced by the review: header for the parent,
+   commitments for the child, restart, bodies for the child → `Aborted (core dumped)`, under both
+   `-checkblockindex=0` and `=1`. This is F-25j, the out-of-order case, and the answer was that the
+   node dies. Fixed and the reproduction re-run: no abort in either variant.
+2. **A still-withheld re-arrival re-wrote the block** — the withhold branch fell through to
+   `SaveBlockToDisk` and `ReceivedBlockTransactions`, giving a second on-disk copy and a fresh
+   `nSequenceId` for the block and every descendant, which is precisely what the design took care
+   not to do. Fixed by ordering the already-stored case first.
+3. **The fetch fix does not converge with a live peer.** The withhold flags are parsed once at
+   init, so every "bodies arrived" result in the entry above came from a **restart** — which resets
+   every peer's `pindexLastCommonBlock`. Measured by the review with a live peer: exactly two
+   requests for the gap block, then flat; a fresh peer bought exactly one more. F-25e2 is
+   unfixed — the cursor still advances past the gap because blocks above it have bodies and a
+   counted `nChainTx`. **The probe asks each peer once and gives up.**
+
+**And one hypothesis worth running.** Not re-stamping `nSequenceId` was meant to preserve
+first-seen order, but it lets a block whose *commitments* arrived early keep an earlier id than an
+equal-work rival that arrived whole — so when its bodies land it displaces an already-connected
+equal-work tip, which unmodified code never does. A miner could reserve a tie by announcing
+commitments early and bodies late. Re-stamping changes the tie one way and not re-stamping changes
+it the other; neither is "unchanged", and F-35 named only the first.
+
+**What stands from 0.1c.** The bit costs no relaxed assertions. Chain selection, restart and the
+pruned-node case all hold. The bit and the fetch layer are one deliverable — reinforced, since the
+fetch as built does not deliver. What does not stand: that the rung can be avoided.
