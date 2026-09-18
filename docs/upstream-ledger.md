@@ -195,3 +195,16 @@ Lives in `perf/throughput-rig` and nowhere else.
   into the rig, expect to resolve that as an already-applied change; take develop's version.
 - When `develop` moves: rebase each open topic branch onto it (small), then merge the new
   `develop` into `perf/throughput-rig`.
+
+## Outbound drafts
+
+### InstantSend backlog collapse — DRAFT, UNPOSTED (18 Sep 2026)
+
+`outbound/instantsend-backlog-collapse.md`. A note to trí reporting that InstantSend collapses
+bistably under sustained load on the WAN swarm — 1-2 ms per signature at shallow queue depth,
+~3.8 s at depth — with the cause **explicitly unproven** and the two measurements that would settle
+it. Includes a reproduction recipe.
+
+**Nothing has been posted or sent.** It exists for the owner to send, edit or discard. Raised because
+it changes whether batched InstantSend is a prerequisite for the throughput target, and it would be
+wrong to design consensus machinery around an undiagnosed node-level behaviour.
