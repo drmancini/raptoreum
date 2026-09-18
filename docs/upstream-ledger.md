@@ -69,6 +69,34 @@ git fetch upstream ft/breaking-up && git log --oneline upstream/develop..FETCH_H
 > topic branches live on the `drmancini` fork, so `gh pr create` needs `--head drmancini:<branch>`
 > or it reports "No commits between", which reads like a branch problem rather than a lookup one.
 
+> **Our own docs must never ride an upstream PR** (found and fixed 2026-09-18). `#481` was
+> proposing `docs/asset-cache-drag.md` -- 61 lines of our internal measurement notes -- in the
+> same commit as the fix, in a folder **upstream does not have**: upstream carries `doc/`
+> (singular; Doxyfile, REST-interface, release-notes) and has no `docs/` at all. Ours was created
+> 2026-09-13 and is entirely this project's.
+>
+> It was also redundant three ways. The safety argument (`CheckSpecialTx` returns before
+> dereferencing, so the elided copy changes no acceptance decision) belongs at the call site and
+> is already a comment there; the cost curve belongs in `src/bench/assets_cache_copy.cpp`, which
+> the same PR adds and which is the permanent instrument; and the narrative and figures were
+> already in the PR description (`outbound/pr-asset-cache.md`), which is where a reviewer reads
+> them. Keeping it would have handed upstream a file in our voice carrying figures -- "mainnet
+> currently holds 3,439 assets" -- that go stale in their tree with nobody to own them.
+>
+> Fixed by amending the single commit (`3c8fce87b` -> `e5fe8d01b`), which also drops the trailing
+> "See docs/asset-cache-drag.md." from the message, then force-pushing to Gitea with
+> `--force-with-lease`. The GitHub mirror synced on the push and `#481` now proposes three files:
+> `src/Makefile.bench.include`, `src/bench/assets_cache_copy.cpp`, `src/validation.cpp`.
+>
+> **Check before submitting anything else:** `git diff $(git merge-base upstream/develop <branch>)
+> <branch> --name-only | grep ^docs/` must be empty. The other ten branches are clean.
+>
+> A related trap worth stating once: comparing a topic branch against `upstream/develop`'s **tip**
+> makes every branch look like it reverts whatever landed on develop since it was cut. GitHub
+> diffs a PR against its **merge base**, so use `git merge-base` for anything you intend to
+> believe. All eleven branches are one commit behind develop and none of them touches the file
+> that commit changed.
+
 > **Open issue on the ft series (found 2026-09-16):** `feature_llmq_is_cl_conflicts.py`
 > fails 3/3 standalone on `ft/09` at line 174 (`getrawtransaction` on rawtx1 → `-5 No such
 > transaction`). This contradicts the "passes three of three on its own" note in
