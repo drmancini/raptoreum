@@ -2870,3 +2870,45 @@ batching protocol nobody has built".
 `SignPendingSigShares`, `SendMessages` — and report where the 34 ms goes. Recovery is already
 timed; the other three are not. Until that runs, "the ceiling is not cryptographic" is supported by
 arithmetic and the recovery measurement, and the specific cause is **not** established.
+
+### 2026-09-18 — the InstantSend ceiling, attributed: an unbounded batch starves its own send path
+
+`WorkThreadMain` instrumented (timers per step, no behaviour change), deployed to one swarm node,
+300 tx/s with InstantSend on. The profile is unambiguous:
+
+```
+iters=1  recoveredSigs=0ms  shares=0ms  sign=169788ms  send=730ms  cleanup=530ms  pendingSigns=153991
+```
+
+**`SignPendingSigShares` is ~99% of the thread.** Recovery 0 ms (consistent with F-70's 3 ms
+median), inbound share processing 0 ms, sending 730 ms across nearly three minutes. And `iters=1` —
+**one loop iteration ran for 170 seconds.**
+
+**The mechanism.** `SignPendingSigShares` begins `v = std::move(pendingSigns)`: it takes the
+**entire** queue — which is unbounded — and loops over every entry. At 154,000 pending that is
+minutes inside a single call, and for the whole of it the thread never reaches `SendMessages` or
+`ProcessPendingSigShares`. So the node **produces signature shares it does not send**, ignores the
+shares arriving from other members, and the sessions time out. Timed-out sessions are requested
+again, which pushes more work into the same queue.
+
+That is a feedback loop, and it explains the shape of everything measured earlier: the queue growing
+at ~230/s, the mempool blowup (F-54), ChainLocks dying first (F-56), and the ~34 ms per share
+(F-70's unexplained remainder) — which was never a per-share cost at all, but the average of a
+thread oscillating between fast signing and long periods of producing nothing anyone receives.
+
+**Within the batch, signing runs at crypto speed**: ~170 s for ~74,000-154,000 shares is 1-2 ms
+each, which is a BLS signature and nothing more. So the thread's *capacity* is several hundred
+signs per second against a measured demand of ~260 sessions/s (F-53's arithmetic). **Capacity
+exceeds demand.** The backlog is not a shortage of compute; it is work that is done and then not
+delivered, and therefore asked for again.
+
+**What this changes.** 5.2 batched InstantSend was scoped as a prerequisite because un-batched
+signing "cannot reach the design point". On this evidence the limit is a loop that should bound its
+batch and interleave sending — which is ordinary engineering with no protocol, no fork and no
+ecosystem event. **Stage 1's 520 tx/s may be reachable without 5.2 at all.**
+
+**Confidence.** The profile is measured and the attribution to `SignPendingSigShares` is direct. The
+retry feedback loop is a **strong inference** from `send=730ms` over 170 s plus the queue's growth —
+it is consistent with everything observed but is not separately instrumented. Confirming it means
+counting re-requests for sessions already signed, which is the natural next step and would also
+size the fix.
