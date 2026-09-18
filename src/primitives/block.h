@@ -113,6 +113,80 @@ public:
 };
 
 
+/**
+ * A block as it travels under transaction decoupling: the header, the coinbase in
+ * full, and one 32-byte identifier for each remaining transaction, in block order.
+ *
+ * The coinbase is carried whole because a block cannot be judged without it -- the
+ * founder payment, the CbTx type and the height all live there -- and because
+ * carrying it means the merkle root binds it automatically. If instead the list
+ * held an identifier for the coinbase too, a separate rule would be needed to tie
+ * the carried transaction to that identifier; this way there is nothing to tie.
+ *
+ * What this form CAN certify on its own is the commitment-checkable half of
+ * BLOCK_VALID_TRANSACTIONS: proof of work, the merkle root, size, the coinbase in
+ * every respect. What it cannot is anything about the transactions it only names.
+ */
+class CCommitmentBlock : public CBlockHeader {
+public:
+    CTransactionRef coinbase;
+    std::vector <uint256> vCommitments;   //!< identifiers for vtx[1..], in block order
+
+    CCommitmentBlock() { SetNull(); }
+
+    SERIALIZE_METHODS(CCommitmentBlock, obj
+    )
+    {
+        READWRITEAS(CBlockHeader, obj);
+        READWRITE(obj.coinbase);
+        READWRITE(obj.vCommitments);
+    }
+
+    void SetNull() {
+        CBlockHeader::SetNull();
+        coinbase.reset();
+        vCommitments.clear();
+    }
+
+    bool IsNull() const { return coinbase == nullptr; }
+
+    //! How many transactions the block commits to, coinbase included.
+    size_t CommittedCount() const { return coinbase ? 1 + vCommitments.size() : 0; }
+
+    //! The merkle leaves, in block order: the coinbase's own hash, then the identifiers.
+    std::vector <uint256> Identifiers() const;
+
+    //! Recompute the merkle root from the identifiers alone. Equals
+    //! BlockMerkleRoot() of the block this was built from.
+    uint256 ComputeMerkleRoot(bool *mutated = nullptr) const;
+
+    //! Do the identifiers repeat? The merkle tree cannot answer this -- it compares
+    //! hashes only at even positions, so a duplicate at an odd boundary passes --
+    //! and the answer matters because a block naming the same transaction twice is
+    //! not a block anyone can fill.
+    bool HasDuplicateIdentifiers() const;
+
+    std::string ToString() const;
+};
+
+/** Build the commitment form of a full block. */
+CCommitmentBlock CommitmentsFromBlock(const CBlock &block);
+
+/**
+ * Rebuild a full block from its commitments and the bodies it names.
+ *
+ * `bodies` must be the transactions for vCommitments, in the same order. Returns
+ * false if any identifier does not match, which is the only thing a node has to go
+ * on when a peer answers a body request.
+ *
+ * The result is a FRESH CBlock, so fChecked is false by construction. That matters:
+ * CheckBlock returns early on fChecked, and a materialised block that inherited the
+ * flag from its commitment-only pass would never have its bodies checked at all.
+ */
+bool MaterialiseBlock(const CCommitmentBlock &commitments,
+                      const std::vector <CTransactionRef> &bodies,
+                      CBlock &blockOut);
+
 /** Describes a place in the block chain to another node such that if the
  * other node doesn't have the same branch, it can find a recent common trunk.
  * The further back it is, the further before the fork it may be.

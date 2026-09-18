@@ -2956,3 +2956,42 @@ remove that superlinearity or shed load before the tip, and neither is the batch
 describes. The honest position for RTM: this is a node-level defect with a known signature and an
 unproven cause, and it should be diagnosed before a consensus-level protocol is designed to work
 around it.
+
+### 2026-09-18 — 1.1 begun: the commitment block, and what it costs
+
+First increment of the block format. `CCommitmentBlock` — header, coinbase in full, one 32-byte
+identifier per remaining transaction — with a `SER_COMMITMENTS` stream flag (bit 3, free), the
+raw/materialising split the plan asks for, and eleven unit tests. All green; the suite's only
+failure is `miner_tests`, red since 2022 (F-34).
+
+**Three results worth recording.**
+
+**1. The merkle root survives the form exactly.** Verified for blocks of 1, 2, 3, 4, 5, 17 and 64
+transactions: the root computed from the identifiers alone equals `BlockMerkleRoot()` of the block
+they came from. This is the property the whole design rests on, and it holds because the tree only
+ever hashed identifiers.
+
+**2. Carrying the coinbase whole removes a rule the design was going to need.** F-43b called for
+`id[0] == hash(coinbase)` to bind the carried coinbase to the tree. If the identifier list covers
+only `vtx[1..]` and the coinbase travels in full, its own hash *is* the first leaf — so there is
+nothing to bind and no rule to enforce. Pinned by a test: change the coinbase and the root moves.
+**Identifier uniqueness is still required** (F-43b's other half), because the tree compares hashes
+at even positions only; the suite pins both the case it catches and the case it misses.
+
+**3. What the format actually saves, which is less flattering than it sounds.** Each named
+transaction costs **exactly 32 bytes**, independent of what it names — asserted directly, by
+comparing an 8-entry block with a 9-entry one. But the *ratio* is the ratio of a body to 32 bytes:
+
+| body size | commitment form versus full block |
+|---|---|
+| minimal 1-in/1-out (~61 B) | under 2× — the header and carried coinbase eat most of the saving |
+| ~373 B, the design's 2-in/2-out assumption | better than 5× |
+
+The first row is the finding. An assertion written as "less than half the size" **failed** on
+minimal transactions, and it was the assertion that was wrong, not the code: the test had encoded a
+realistic-body assumption while using minimum-size fixtures. Decoupling's benefit is proportional
+to body size, so any figure quoted for it has to say which body size it assumes.
+
+`MaterialiseBlock` returns a **fresh** `CBlock`, so `fChecked` is false by construction, and a test
+asserts that even when handed an object with the flag already set — F-45 addressed in the format
+rather than left to callers.
