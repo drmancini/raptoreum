@@ -21,8 +21,8 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
-FUNDER=eur                       # the only node holding spendable coin
-QSIZE=${QSIZE:-10}               # quorum size; 10 of 12 leaves real selection to do
+FUNDER=eur                       # historical: the wallet now lives on mario, outside the set
+QSIZE=${QSIZE:-10}               # quorum size; 10 of 11 smartnodes leaves selection something to do
 QTHRESH=${QTHRESH:-6}            # threshold -- also sets minSize and dkgBadVotesThreshold
 MANIFEST=smartnodes.json
 IPS=/tmp/claude-1002/-home-mike-forge-projects/43306fc0-14f0-4b9a-aba5-5c3d8fa3b9a7/scratchpad/swarm-ips.json
@@ -53,35 +53,55 @@ PY
 }
 
 # ---- stage: register -------------------------------------------------------
-# register_fund creates the collateral output INSIDE the ProRegTx, so there is no
-# separate funding transaction to track and no window where a 10 RTM output is
-# sitting unlocked. The real collateral outpoint is read back from protx info,
-# because it is not the one any sendtoaddress would have produced.
+# register_fund moves the collateral into an output it creates itself, so the
+# collateral outpoint is not one any sendtoaddress produced. It draws the funds
+# from fundAddress, which must already hold coin -- see the note inside.
 stage_register(){
   [ -f "$MANIFEST" ] || { echo "run '$0 keys' first"; exit 1; }
   echo "=== registering smartnodes (this changes the chain) ==="
   python3 - "$MANIFEST" <<'PY'
-import json,subprocess,sys
+import json,subprocess,sys,time
 m=json.load(open(sys.argv[1]))
 def rpc(*a):
     r=subprocess.run(["./swarmctl.sh","rpc","eur",*a],capture_output=True,text=True)
     return r.stdout.strip(), r.returncode
-for a in sorted(m):
+def mine(n):
+    addr,_=rpc("getnewaddress")
+    subprocess.run(["./swarmctl.sh","mine","eur",str(n)],capture_output=True,text=True)
+
+# register_fund draws the collateral from fundAddress -- and if fundAddress is
+# omitted it falls back to payoutAddress, so a funded address is required either
+# way. One shared pot does not work: the first ProRegTx spends its UTXO and the
+# change lands on a wallet change address, leaving the pot empty for the second.
+# So give every node its own funded address, each with a single UTXO big enough
+# for the 10 RTM collateral plus fee.
+todo=[a for a in sorted(m) if not m[a].get("protx")]
+for a in todo:
+    if not m[a].get("fund_addr"):
+        addr,_=rpc("getnewaddress")
+        txid,rc=rpc("sendtoaddress",addr,"11")
+        if rc!=0 or len(txid)!=64: sys.exit("funding %s failed: %s"%(a,txid[:200]))
+        m[a]["fund_addr"]=addr
+        print("  %-5s funded %s"%(a,addr))
+json.dump(m,open(sys.argv[1],"w"),indent=1)
+print("--- mining to confirm funding ---")
+mine(1); time.sleep(5)
+
+for a in todo:
     n=m[a]
-    if n.get("protx"): print("  %-5s already registered"%a); continue
-    addr,_=rpc("getnewaddress"); owner,_=rpc("getnewaddress")
-    voting,_=rpc("getnewaddress"); rewards,_=rpc("getnewaddress")
-    out,rc=rpc("protx","register_fund",addr,"10","%s:19899"%n["ip"],
-               owner,n["bls_public"],voting,"0",rewards,addr,"true")
+    coll,_=rpc("getnewaddress"); owner,_=rpc("getnewaddress")
+    voting,_=rpc("getnewaddress"); payout,_=rpc("getnewaddress")
+    out,rc=rpc("protx","register_fund",coll,"10","%s:19899"%n["ip"],
+               owner,n["bls_public"],voting,"0",payout,n["fund_addr"],"true")
     if rc!=0 or len(out)!=64:
-        print("  %-5s FAILED: %s"%(a,out[:180])); continue
-    n.update(protx=out,owner=owner,voting=voting,rewards=rewards,collateral_addr=addr)
+        print("  %-5s FAILED: %s"%(a,out.replace(chr(10)," ")[:160])); continue
+    n.update(protx=out,owner=owner,voting=voting,payout=payout,collateral_addr=coll)
     print("  %-5s protx=%s"%(a,out[:16]+"..."))
     json.dump(m,open(sys.argv[1],"w"),indent=1)
 PY
-  echo "--- mining to confirm ---"
+  echo "--- mining to confirm registrations ---"
   ./swarmctl.sh mine "$FUNDER" 2 >/dev/null
-  sleep 6
+  sleep 8
   echo "smartnode list: $(rpc "$FUNDER" smartnodelist json | grep -c proTxHash || echo 0) entries"
 }
 
@@ -91,18 +111,36 @@ PY
 stage_enable(){
   [ -f "$MANIFEST" ] || { echo "run '$0 keys' first"; exit 1; }
   echo "=== enabling smartnode mode (quorum ${QSIZE}/${QTHRESH}) ==="
+  # Every registered node must actually RUN as a smartnode. One that is in the
+  # deterministic list but not in smartnode mode still gets selected for quorums
+  # and then contributes nothing, which fails the DKG for everyone in it.
+  #
+  # So all twelve run as smartnodes and the wallet lives elsewhere: raptoreumd
+  # refuses outright with "You can not start a smartnode with wallet enabled",
+  # which no config can argue with. mario holds the wallet and the keys to every
+  # collateral, and is deliberately not in the registered set.
   for a in $(aliases); do
     sec=$(python3 -c "import json;print(json.load(open('$MANIFEST'))['$a']['bls_secret'])" 2>/dev/null)
     [ -n "$sec" ] || { echo "  $a: no key in manifest, skipping"; continue; }
     tgt=$(awk -v A="$a" '$1==A{print $2}' hosts.tsv)
     base=$(awk -v A="$a" '$1==A{print $6}' hosts.tsv)
+    # The datadir is $base/data and the config lives inside it -- see swarmctl.sh,
+    # which passes -datadir=$b/data -conf=$b/data/raptoreum.conf. Writing to
+    # $base/raptoreum.conf instead creates a file the node never reads, and every
+    # step still succeeds, so the stage reports success while changing nothing.
+    ip=$(python3 -c "import json;print(json.load(open('$MANIFEST'))['$a']['ip'])")
+    conf="$base/data/raptoreum.conf"
     ssh -o BatchMode=yes "$tgt" "
-      f=$base/raptoreum.conf
-      cp -n \$f \$f.pre-smartnode 2>/dev/null
-      grep -v '^smartnodeblsprivkey=\|^llmqtestparams=' \$f > \$f.new
-      printf 'smartnodeblsprivkey=%s\nllmqtestparams=%s:%s\n' '$sec' '$QSIZE' '$QTHRESH' >> \$f.new
-      mv \$f.new \$f
-    " && echo "  $a: configured" || echo "  $a: FAILED"
+      test -f $conf || { echo MISSING; exit 3; }
+      cp -n $conf $conf.pre-smartnode 2>/dev/null
+      grep -v '^smartnodeblsprivkey=\|^llmqtestparams=\|^disablewallet=\|^externalip=' $conf > $conf.new &&
+      printf 'smartnodeblsprivkey=%s\nllmqtestparams=%s:%s\nexternalip=%s\n' '$sec' '$QSIZE' '$QTHRESH' '$ip' >> $conf.new &&
+      mv $conf.new $conf &&
+      grep -c '^smartnodeblsprivkey=' $conf
+    " >/tmp/.sn.$a 2>&1
+    got=$(tr -d '\r\n' </tmp/.sn.$a)
+    if [ "$got" = "1" ]; then echo "  $a: configured"; else echo "  $a: FAILED ($got)"; fi
+    rm -f /tmp/.sn.$a
   done
   echo "--- restarting ---"
   ./swarmctl.sh stop >/dev/null; sleep 8; ./swarmctl.sh start >/dev/null; sleep 20
