@@ -2770,3 +2770,28 @@ That third one sharpens F-43b. The requirement is not "adjacent" but **even-alig
 narrower condition than recorded and makes identifier uniqueness a strictly necessary rung rule
 rather than a belt-and-braces one: a commitment block could carry a duplicate identifier at an odd
 boundary and satisfy every check the merkle tree performs.
+
+**0.2 — the equal-work tie-break, pinned.**
+
+The only behaviour the 0.1 probe was measured to *change* (F-35, F-42), and the one place 1.3 can
+alter what a node does without altering what it accepts. Characterised on the baseline:
+
+- Two valid blocks on the same parent, so identical work. **The first seen wins**, and the second
+  does not displace it on arrival.
+- The loser stays known as a chain tip at **equal height**, with status `valid-headers` — it has
+  data but was never connected.
+- The ordering lives in `CBlockIndexWorkComparator`: work, then lower `nSequenceId`, then pointer
+  address. `nSequenceId` is assigned in `ReceivedBlockTransactions`, which is why it means
+  first-seen and why 1.3 touches it.
+
+1.3 threatens this from both directions, which is the reason to pin it rather than reason about it.
+**Re-stamping**: `ReceivedBlockTransactions` runs again when bodies arrive and re-assigns
+`nSequenceId` to the block and its whole descendant subtree, so a branch that arrived first can lose
+a tie it had already won. **Not re-stamping**: a block whose commitments arrived early keeps that
+early id, so when its bodies land it can displace an equal-work rival that was already connected —
+which unmodified code never does, and which a miner could exploit by announcing commitments early
+and bodies late. Neither option is "unchanged"; this test makes the difference visible either way.
+
+One harness note reused from the accept-path work: the test seeks a height whose *next* block is
+outside the DKG mining window, because a hand-built block inside it is rejected `bad-qc-missing`
+whatever else is true of it (F-63).
