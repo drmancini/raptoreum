@@ -404,6 +404,61 @@ but the plumbing beneath it: a body store, a fetch scheduler, and a status bit t
 holding the commitments from holding the bodies, which the probe did without and which is why its
 withheld block was re-requested twice and then dropped (F-25i).
 
+### 2.4 What the accept path actually checks, and where the rung goes
+
+Written after two wrong answers to the rung question, both produced by arguing from an enum
+comment instead of from the code (R-28). This is the enumeration: every check between
+`AcceptBlockHeader` and `ConnectBlock`, classified by whether a **commitment block** — header,
+coinbase in full, and the list of identifiers — can perform it.
+
+| check | in | needs | verdict |
+|---|---|---|---|
+| proof of work, header sanity | `CheckBlockHeader` | header | **commitment** |
+| **merkle root** | `CheckBlock` | the identifier list | **commitment** — this is the one the format is made of |
+| duplicate-transaction mutation, CVE-2012-2459 | `CheckBlock` | the identifier list | **commitment** |
+| block size limits | `CheckBlock`, `ContextualCheckBlock` | the block as serialized | **commitment**, with the meaning re-based per §1A |
+| first transaction is a coinbase | `CheckBlock` | the coinbase | **commitment** |
+| BIP34 height in the coinbase | `ContextualCheckBlock` | the coinbase | **commitment** |
+| DIP3 coinbase is a CbTx (`bad-cb-type`) | `ContextualCheckBlock` | the coinbase | **commitment** |
+| no *other* transaction is a coinbase (`bad-cb-multiple`) | `CheckBlock` | every input list | **body** |
+| `CheckTransaction` per transaction | `CheckBlock` | every transaction | **body** |
+| legacy sigop count | `CheckBlock`, `ContextualCheckBlock` | every script | **body** |
+| `nLockTime` finality (`bad-txns-nonfinal`) | `ContextualCheckBlock` | every transaction | **body** |
+| type and version (`bad-txns-type`, `bad-txns-cb-type`) | `ContextualCheckTransaction` | every transaction | **body** |
+| special transactions, CbTx merkle roots | `ProcessSpecialTxsInBlock` | every transaction | body — **already runs at connect** |
+
+Six of the thirteen are answerable from the commitment block alone, and they are not a trivial six:
+proof of work, the merkle root, mutation, size, and both coinbase rules. **The rung sits exactly
+there** — a commitment block can honestly certify that it is a well-formed block committing to a
+specific, non-duplicated set of identifiers, at a specific height, with a valid coinbase.
+
+**And the body-dependent set is nearly all covered at connect already.** `ConnectBlock` re-invokes
+`CheckBlock`, so `bad-cb-multiple`, `CheckTransaction` and the sigop count are re-checked when the
+bodies are in hand. That leaves **exactly two rules with no connect-time home**, because
+`ConnectBlock` deliberately does not re-invoke `ContextualCheckBlock`:
+
+1. `nLockTime` finality — `bad-txns-nonfinal`
+2. transaction type and version — `bad-txns-type`, `bad-txns-cb-type`
+
+So the honest scope of the problem R-28 exposed is two rules, not a category. Either move them to
+the connect path, or re-invoke `ContextualCheckBlock` there — noting that the comment explaining
+why it is not re-invoked is about *upgrade* behaviour after a consensus rule change, which is a
+different concern from a rule that has genuinely never run yet.
+
+**One trap the enumeration exposes.** `CheckBlock` begins `if (block.fChecked) return true;` and
+sets `fChecked` after a full pass, so `ConnectBlock`'s re-check is skipped for a block object that
+was already checked in memory. Today that is safe — the object was checked with its bodies present.
+Under decoupling a block assembled from commitments plus fetched bodies **must not inherit
+`fChecked` from the commitment-only pass**, or the body half is never checked at all. It is one
+flag, and it is the difference between the design working and silently accepting anything.
+
+**A second, smaller one.** Both size checks read `block.vtx.size() > MaxBlockSize()` — a
+transaction *count* compared against a *byte* limit. Today it is a harmless weak bound, because a
+transaction cannot be small enough for the count to reach the byte cap first. Under the commitment format the count is the thing
+that grows, and this comparison silently becomes a real limit at a value nobody chose. Same class as
+the relay cap and the sigop cap (K-9, F-30): a constant indexed to bytes that stops tracking what
+the block commits to.
+
 ---
 
 ## 3. The tip regime
