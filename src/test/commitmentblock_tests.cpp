@@ -5,6 +5,8 @@
 #include <consensus/merkle.h>
 #include <primitives/block.h>
 #include <protocol.h>
+#include <chainparams.h>
+#include <validation.h>
 #include <streams.h>
 #include <tinyformat.h>
 #include <test/test_raptoreum.h>
@@ -241,6 +243,63 @@ BOOST_AUTO_TEST_CASE(advertising_the_bit_earns_no_trust) {
     BOOST_CHECK(CanReceiveCommitments(ServiceFlags(NODE_NETWORK | NODE_COMMITMENTS)));
     CBlock rebuilt;
     BOOST_CHECK(!MaterialiseBlock(c, lies, rebuilt));   // the claim changes nothing
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+// The read API split, against a real chain on disk. The two reads differ by
+// contract: a node holding no bodies must still answer for its commitments. If
+// both reads fail together the split is decoration, so the test is the asymmetry
+// itself rather than either read in isolation.
+BOOST_FIXTURE_TEST_SUITE(commitmentblock_read_tests, TestChain100Setup)
+
+BOOST_AUTO_TEST_CASE(commitments_readable_when_bodies_are_not) {
+    const CBlockIndex *pindex = ::ChainActive().Tip();
+    const Consensus::Params &params = Params().GetConsensus();
+
+    // Baseline: with bodies held, both reads answer and agree on the block.
+    CBlock whole;
+    BOOST_REQUIRE(ReadBlockFromDisk(whole, pindex, params));
+    CCommitmentBlock c;
+    BOOST_REQUIRE(ReadCommitmentBlockFromDisk(c, pindex, params));
+    BOOST_CHECK_EQUAL(c.GetHash().ToString(), pindex->GetBlockHash().ToString());
+    BOOST_CHECK_EQUAL(c.CommittedCount(), whole.vtx.size());  // coinbase included
+    BOOST_CHECK_EQUAL(c.vCommitments.size(), whole.vtx.size() - 1);
+
+    // Now withhold this block's bodies -- the probe's predicate, which is how
+    // "commitments held, bodies missing" is reachable before the body store exists.
+    g_perf_withhold_hashes.insert(pindex->GetBlockHash());
+
+    CBlock denied;
+    BOOST_CHECK(!ReadBlockFromDisk(denied, pindex, params));  // materialising read refused
+
+    CCommitmentBlock still;
+    BOOST_CHECK(ReadCommitmentBlockFromDisk(still, pindex, params));  // commitments still answer
+    BOOST_CHECK_EQUAL(still.GetHash().ToString(), pindex->GetBlockHash().ToString());
+    BOOST_CHECK(still.Identifiers() == c.Identifiers());
+
+    g_perf_withhold_hashes.erase(pindex->GetBlockHash());
+}
+
+// A commitment read must carry enough to rebuild the block, so pair it with the
+// bodies and check the round trip end to end through disk.
+BOOST_AUTO_TEST_CASE(a_disk_commitment_read_rebuilds_the_block) {
+    const CBlockIndex *pindex = ::ChainActive().Tip();
+    const Consensus::Params &params = Params().GetConsensus();
+
+    CBlock whole;
+    BOOST_REQUIRE(ReadBlockFromDisk(whole, pindex, params));
+    CCommitmentBlock c;
+    BOOST_REQUIRE(ReadCommitmentBlockFromDisk(c, pindex, params));
+
+    std::vector <CTransactionRef> bodies(whole.vtx.begin() + 1, whole.vtx.end());
+    CBlock rebuilt;
+    BOOST_REQUIRE(MaterialiseBlock(c, bodies, rebuilt));
+    BOOST_CHECK_EQUAL(rebuilt.GetHash().ToString(), whole.GetHash().ToString());
+    BOOST_CHECK_EQUAL(rebuilt.hashMerkleRoot.ToString(), whole.hashMerkleRoot.ToString());
+    // ConnectBlock re-invokes CheckBlock and that early-returns on fChecked, so a
+    // materialised block must arrive unchecked however it was obtained.
+    BOOST_CHECK(!rebuilt.fChecked);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
