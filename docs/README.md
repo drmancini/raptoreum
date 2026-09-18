@@ -18,6 +18,7 @@ others reference it rather than restating.
 |---|---|
 | `findings.md` | **what we know.** Every number and decision this project relies on, one line each, with the regime it was measured in and a status. **Living docs cite an ID (F12, C7, A1, D4, R9); they do not restate a value.** |
 | `transaction-decoupling.md` | **the design.** What we are building and why, at the level of files, structures and states. Currently v8. |
+| `phase0-verdict.md` | **the commit decision.** What phase 0 asked, what it answered, the estimate that follows, and the one open question that belongs to RTM. **Frozen** once the decision is taken — a later change of mind gets its own record, it does not edit this one. |
 | `build-plan.md` | **the schedule.** Phased components, effort, design certainty, the gates, and what is deferred with its tripwire. |
 | `perf-constants.md` | **where a constant lives in the source** — the exhaustive symbol-and-file audit, plus the LLMQ and spork tables in full. `findings.md` is authoritative for a *value*; this says where to find it. |
 | `perf-results.md` | **the measurement log**, chronological. Entries stand as measured; a correction banner flags conclusions later overturned. |
