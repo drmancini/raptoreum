@@ -46,7 +46,10 @@ work ran past it. Both are recorded in `archive/throughput-bottleneck.md`, whose
 
 `check-numbers.py` reports numbers restated in living documents instead of cited from
 `findings.md`. It is a budget to shrink, not a list of bugs — some derivations are shown on
-purpose. **Baseline 2026-09-18: 204** — design 149, build-plan 47, ledger 4, platform 4. The first pass reported 166; the cross-check showed the regex was blind to bare
+purpose. **Baseline 2026-09-18: 158** — design 103, build-plan 47, ledger 4, platform 4. It fell from 204
+when the design's §16 was rewritten: a measurement section had grown inside a design document,
+and replacing its tables with ID citations removed 46 restated numbers in one pass. That is the
+mechanism working as intended — the lint found the largest duplication in the folder. The first pass reported 166; the cross-check showed the regex was blind to bare
 seconds, bare bytes, MiB, `×` multipliers, unitless consensus counts, `years`, and every
 spelled-out quantity ("a few thousand", "six terabytes"), which is most of how the
 plain-language companion is written. A lint that flatters you is worse than no lint.

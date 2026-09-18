@@ -2144,239 +2144,94 @@ already pay for themselves.
 
 ---
 
-## 16. Measured inputs (2026-09-13, extended 2026-09-15)
+## 16. What the measurements require of the design
 
-> **READ THE TARGET BEFORE THE ARITHMETIC (v8).** This section was written against an earlier
-> working target of **5,000 tx/s** with a **10 MB** block, and its derived figures still carry
-> those numbers: 600,000 transactions per interval, 19.2 MB of commitments, ~876 MB of mempool,
-> "~2,600 tx/s" as the upper stage. **The measurements stand; the arithmetic built on them is
-> retired.** The v8 design point is commitments filling a **2-8 MB** block, i.e. **520 to
-> 2,083 tx/s** — so where this section says 5,000 tx/s, the current top of range is 2,083, and
-> where it says 10 MB, it is 8 MB. Two translations worth having in hand: a full 8 MB commitment
-> block names **250,000** transactions, not 600,000, and needs **~1.8 GB** of mempool for a
-> ten-minute backlog, not 876 MB.
->
-> Nothing here is re-derived in place, deliberately: this is a measurement section living inside
-> a design document, which is the structural problem `build-plan.md` exists to fix. It belongs in
-> the measurement log, and moving it is pending.
+**This is the section that distinguishes this document from a proposal.** Every design point
+below was measured before it was asserted, and where a measurement contradicted an earlier
+position the position was withdrawn — fourteen times so far, listed as the R-series in
+`findings.md`. Three companion documents carry the parts that do not belong here: **values and
+their regimes** in `findings.md` (a number without the conditions it was measured under is not a
+finding), **the runs themselves** in `perf-results.md`, and **the schedule** in `build-plan.md`.
+What stays here is the reasoning from measurement to consequence.
 
-Everything above reasoned about throughput qualitatively. These numbers are measured on
-a real node — Raptoreum Core 2.0.4.1, `develop` plus the functional-test series, on a
-12-core Ryzen 9 with the load generator on a separate machine. Full method and evidence
-in `perf-results.md`.
+Every figure in this section is a citation. If a number appears here as a literal, that is a bug.
 
-### 16.1 What the node can already do
+### 16.1 Which constraint binds, in order
 
-| | |
-|---|---|
-| mempool acceptance ceiling | **~4,400-4,500 tx/s sustained** (per-second peaks ~5,200 early, decaying as the mempool grows; an earlier ~5,600 figure divided by a fixed duration while acceptance ran on past the offer) |
-| sustained 10 minutes at 5,000 offered | 4,884 tx/s, no eviction |
-| holding a 3,000,000-transaction backlog | **4.07 GB** mempool, 4.54 GB RSS |
-| cost per 373-byte transaction | 1,471 bytes accounted, 1,641 resident |
+`findings.md` carries the ranking, and its shape is the point. At the 2 MB design point the two
+lowest-binding constraints are **accounting and coverage, not speed**: the block sigop cap (K-2)
+admits about a third of the target, and InstantSend (F-18) covers a fraction of it. Relay (F-1)
+binds next, and acceptance (F-7) has roughly threefold headroom and binds last.
 
-The acceptance side is not the problem, and it is roughly 120× what a 2 MB block every
-two minutes can carry. The ceiling is architectural rather than hardware: `rtm-msghand`
-pins at 100.3% of a single core and 22 of the box's 24 threads cannot help.
+Neither of the first two is fixed by making anything faster, which is why §1A exists and why plan
+item 5.2 is a prerequisite rather than an optimisation.
 
-### 16.2 The sizing this puts on the block format
+### 16.2 What this puts on the block format
 
-At 5,000 tx/s a two-minute interval accumulates **600,000 transactions**. A 2 MB block
-removes 5,350 of them — 0.9% of arrivals. So a decoupled block must commit to 600,000
-identifiers, which at 32 bytes each is **19.2 MB of commitments per block**, propagating
-every two minutes. §1's block format has to carry that, and §15's build-whole-split-after
-variant has to move the bodies as well.
+The design point (D-4) is commitments filling a 2-8 MB block, so the format must carry up to a
+quarter of a million identifiers in one message. That exceeds
+`net.h:MAX_PROTOCOL_MESSAGE_LENGTH` (K-7), which is why the raise rides the same activation as
+the format (D-14) rather than waiting for the upper stage. The bodies behind those identifiers
+are F-30 × the count, which is modest bandwidth and never the constraint — worth stating plainly,
+because the intuition that a bigger block means a bandwidth problem is wrong here.
 
-### 16.3 The finding that changes a decision
+### 16.3 The relay cap re-index is a design requirement, not a tuning change
 
-Transaction relay is capped per peer at
+The per-peer cap is **indexed to block size** (K-5), which was correct while a block carried
+bodies: block bytes were then a good proxy for how much had to propagate, deliberately
+proportioned with margin. Decoupling severs the proxy. A commitment block's bytes are 32 × the
+transaction count, so the cap tracks the size of a block that no longer carries what must
+propagate, and coverage collapses at every block size — not only at the upper stage.
 
-```cpp
-INVENTORY_BROADCAST_MAX_PER_1MB_BLOCK * MaxBlockSize() / 1000000
-```
+Two things that look like escapes and are not:
 
-per trickle — **indexed to block size**. Measured: 74.7 tx/s per inbound peer at 2 MB,
-230.3 tx/s at 8 MB, with the announcement burst exactly 280 at 2 MB. Over a block
-interval that delivers ~9,000 transactions per peer against the ~5,350 a full block
-holds: deliberately proportioned, with margin.
+- **More peers do not help.** Announcements are ordered by a single global comparison evaluated
+  identically on every link, so each peer receives its own prefix of the same sequence and the
+  subsets are nested rather than complementary (F-6). A node missing a transaction cannot route
+  around it, because every peer it could ask is missing the same one. The fix is necessarily the
+  rate constant or the ordering; it can never be topology.
+- **Fee ordering does not rescue it, though it rescues compact blocks today.** Relay announces in
+  fee order and a miner selects in fee order, so the slice a peer has been told about *is* the
+  slice the block takes — which is why a peer holding a small fraction of the mempool can still
+  reconstruct one. A commitment block has no top slice to align with: it commits to everything
+  that arrived up to its budget, so every node needs every body and convergence has to be full.
 
-**Decoupling invalidates the proportion.** The formula treats block size as a proxy for
-how many transactions need to propagate, and that is only true while blocks carry
-bodies. A decoupled block committing to 600,000 transactions is 19.2 MB, so relay scales
-to roughly 700 tx/s — while those 600,000 bodies still have to reach every peer at
-5,000 tx/s. The block shrinks twelvefold and the propagation requirement does not shrink
-at all.
+### 16.4 Acceptance is not the constraint, and the sigop counter is
 
-This matters because the whole design rests on peers already holding the bodies a block
-commits to. Reconstruction from identifiers is only possible against a shared pending
-set, and the relay cap is what determines whether that set converges. Under decoupling
-the constant must be re-indexed to something that still tracks transaction volume —
-committed transaction count — rather than to the size of a block that no longer carries
-them. That is a required change, not an optimisation.
+Acceptance sustains several times the design point (F-7), so the instinct to start with a faster
+validation path is misdirected — §17 has the measured arms. What does bind is accounting: the
+counter charges the outputs a transaction creates rather than the scripts it spends, so a
+transaction can cost seconds and be charged two sigops (F-13). That is the hazard §1A's budget
+exists to bound, and it is invisible to every counter the node has today.
 
-**More peers do not help.** `CompareDepthAndScore` is a single global ordering over the
-mempool, evaluated the same way on every peer link, so each link announces its own prefix
-of the same sequence. The subsets peers hold are nested, not complementary. Measured: the
-union across all peers contributed nothing over the best single peer. A node missing a
-transaction cannot route around it, because every peer it could ask is missing the same
-one. The fix is necessarily the rate constant or the ordering, and can never be topology.
+### 16.5 The attestation path cannot carry transaction volume
 
-**And it is not deferrable to the upper stage.** The cap is indexed to block *bytes*, and
-under decoupling block bytes are 32 × transaction count whatever the block size limit is.
-So a 2 MB decoupled block commits to ~62,500 transactions — a throughput of ~520 tx/s —
-while the relay cap stays at the 2 MB figure of ~75 tx/s. Coverage falls from about 170%
-today to about 14%. Keeping the block size at 2 MB is a sound staging choice for every
-other reason, but it does not let the relay constant stay as it is.
+Measured end to end on real quorums: the rate is an order of magnitude below the design point
+(F-18), cost is linear in quorum size rather than threshold, the path is round-trip-bound rather
+than compute-bound (F-21), the unit is wrong — sessions are inputs + 1 (F-19) — and past capacity
+work is **lost rather than delayed** (F-20). Every full node pays the verification, not only
+smartnodes (F-22).
 
-**Fee ordering does not rescue this, though it rescues compact blocks.** §13 of
-`perf-results.md` measures a peer holding 1.5% of the hub's mempool filling an entire
-block with nothing to fetch, because relay announces in fee order and the miner selects in
-fee order, so the slice a peer has been told about *is* the slice the block takes. That
-alignment is exactly what decoupling removes: a commitment block does not take the top
-slice by fee, it commits to everything that arrived up to the payload cap. There is no top
-slice for relay to align with, every node needs every transaction, and convergence has to
-be full. Relay rate must be greater than or equal to arrival rate, with no shortcut.
+The conclusion survives; the reasoning behind an earlier version of it does not, and §17 states
+what that leaves standing. The one change that alters the shape rather than a constant is
+batching, because the cost is per session.
 
-### 16.4 Two node defects found on the way
+### 16.6 Prerequisites that block testing rather than activation
 
-Neither is caused by decoupling; both get worse under it, because both scale with
-mempool size and decoupling exists to make the mempool large.
+Each is a constant or a mechanism that must change before anything can be tested, and each would
+have been an expensive discovery on testnet: the message-length raise (K-7), `maxmempool` (K-8),
+template production, and the block-file loop past `MAX_BLOCKFILE_SIZE` — which the separate body
+store avoids, and which is recorded so that no variant drifts back toward writing bodies into
+block files, where it detonates immediately. Mempool growth is also lumpy rather than smooth,
+since hash-table doubling means a node at 90% of the cap crosses it in one step. All four are
+scheduled in `build-plan.md`.
 
-- `CChainLocksHandler::Cleanup()` walks one entry per accepted transaction calling
-  `GetTransaction()` on each, holding `cs_main` **and** `mempool.cs`, every 30 seconds,
-  on every node rather than only smartnodes. Measured linear at ~0.5–0.6 µs per entry:
-  **1.9 seconds of total stall every 30 seconds at 3 million entries.**
-- The socket thread burns a full core spinning on a socket it has paused, so falling
-  behind costs an extra core precisely when there is least to spare.
+### 16.7 Two node defects found on the way
 
-### 16.5 The Smartnode attestation path, measured
-
-§3A reasoned about what a quorum attestation can carry. This is what producing one costs.
-Measured end to end on regtest with real Smartnodes forming a real quorum; full method in
-`perf-results.md` §15 and §16.
-
-**Correction to v6.** v6 costed this from the cryptography — 9.41 ms of threshold recovery
-per signing session — and concluded the path was far too slow. The conclusion holds. The
-reasoning does not: recovery is **3 to 5 per cent** of the measured cost.
-
-| quorum | locked | locks/s | per-node sessions/s | ms per session |
-|---|---|---|---|---|
-| 5 of 3 | 3,000 / 3,000 | 74.2 | 55.4 | 18.1 |
-| 9 of 6 | 2,924 / 3,000 | 41.2 | 23.0 | 43.5 |
-| 13 of 8 | 2,773 / 3,000 | 32.5 | 13.9 | 71.9 |
-
-Three properties, each of which any attestation-based design inherits:
-
-**Cost is linear in quorum size, not threshold.** The fit is ≈ 6.7 × quorum size − 15 ms
-across all three points. The live InstantSend quorum is **50** — `UpdateLLMQParams` resolves
-`LLMQ_50_60` to `llmq50_60` above 600 Smartnodes (`chainparams.cpp:1101`), not the size-3
-test quorum. That is an order of magnitude past anything measured here.
-
-**It is round-trip-bound, not compute-bound.** At 5 of 3 the signing thread spends 9.1 ms
-of CPU against 18.1 ms of wall clock — idle half the time, waiting on the
-announce/inventory/request/share exchange that `CSigSharesManager::SendMessages` ships at
-most once per 100 ms. Parallelising BLS verification addresses the half that is already
-fast.
-
-**Full coverage holds only to about 60 tx/s at the smallest quorum tested.** Paced offers
-at 5 of 3: 20, 40 and 60 tx/s all lock 100%, 80 tx/s locks 98.5%, 100 tx/s locks 87.8%. The
-achieved rate pins at ~76 locks/s and does not rise, so past the ceiling the excess is lost
-rather than delayed. That ceiling agrees with the burst measurement, and it is at a quorum a
-tenth the size of the live one.
-
-**Saturation loses work rather than queueing it.** Above capacity, sessions are purged 60
-seconds after their last new share (`quorums_signing_shares.cpp:1317-1357`), and nothing
-retries them: `pendingRetryTxs` is only ever populated with the *children of a transaction
-that just locked* (`quorums_instantsend.cpp:1239-1245`), so a transaction whose own session
-timed out is never re-queued. Measured: a run with 237 timed-out sessions and 85 unlocked
-transactions logged **zero** `retrying to lock` lines. The only way back is
-`BlockConnected`'s retroactive path (`quorums_instantsend.cpp:1176`), which re-signs once
-the transaction is mined — by which point the lock is worthless. There is no error, no
-backpressure, and no degraded-but-working mode.
-
-**And the unit is wrong.** InstantSend signs each input separately and then the lock
-(`quorums_instantsend.cpp:548-561`, `:724`). Measured: 5,845 distinct signing sessions for
-2,915 locked one-input transactions — sessions = inputs + 1, confirmed. A two-input
-transaction costs three threshold signatures.
-
-#### What this settles about the buspool proposal — and see §17 for the v8 position
-
-A design in which Smartnodes pre-attest transactions so they can take a shorter validation
-path is optimising the wrong side of the wrong bottleneck. §16.1 shows validation is not a
-constraint — acceptance runs at ~4,400 tx/s sustained. The attestation path runs at a small fraction
-of that and gets slower as the quorum grows. It **adds** work to the slowest thread in the
-system in order to **remove** work from a path that has an order of magnitude of headroom
-at the 2 MB design point. And it leaves relay untouched: bodies still have to reach every
-node whether or not a quorum signed them first.
-
-#### What this settles about InstantSend as it exists today
-
-This is a finding about the current chain, not about decoupling.
-
-If threshold signing caps where these numbers say it does, **InstantSend as built cannot
-cover transactions at any throughput near the design point.** Either most transactions go
-unlocked — which changes what `IsTxSafeForMining`'s wait check is actually doing, since it
-falls through to the ten-minute age rule — or InstantSend has to sign batches rather than
-transactions.
-
-Batching is the only fix here that scales, and for a sharper reason than "fewer
-signatures". Cost is **per session**, and per-session cost grows with quorum size. One
-threshold signature over a Merkle root of N transaction hashes divides the whole cost by N
-— the round trips as well as the cryptography. Every other available fix moves a constant:
-one session per transaction instead of inputs + 1 is a free 2× to 3×, and worth doing, but
-it does not change the shape.
-
-That is also the salvageable form of the buspool instinct. "Smartnodes attest before
-mining" is the right shape; the purpose is finality and double-spend protection rather than
-a validation shortcut, and the unit has to be a batch.
-
-### 16.6 Prerequisites in existing code, found by measurement
-
-None of these is a design question. Each is a constant or a mechanism that must change
-before anything can be tested, and each would have been an expensive discovery on testnet.
-
-| | current | why it blocks |
-|---|---|---|
-| `MAX_PROTOCOL_MESSAGE_LENGTH` | 3 MB | a 10 MB commitment block cannot cross the wire at all |
-| `maxmempool` default | 300 MB | ~876 MB needed per two-minute interval at 5,000 tx/s; 41 seconds of headroom at the default |
-| `getblocktemplate` | full `ConnectBlock` per call | seconds of `cs_main` per poll at 600,000 commitments, in direct competition with acceptance |
-| `MAX_BLOCKFILE_SIZE` | 128 MiB | `FindBlockPos` loops forever on a block larger than one block file — silent, unbounded allocation until the OOM killer intervenes (`perf-results.md` §12) |
-
-The block-file loop is avoided by the separate body store, since commitment blocks stay far
-under 128 MiB. It is recorded here so that no variant drifts back towards writing bodies
-into block files, where it detonates immediately and fatally.
-
-Mempool growth is also lumpy rather than smooth — hash-table doubling means a node at 90%
-of the cap crosses it in one step — so the default is a footgun at any throughput increase,
-decoupling or not.
-
-Template production is the one that becomes a design requirement rather than an
-optimisation: under decoupling, commitments must not be revalidated as bodies. Stratum V2's
-Template Distribution Protocol is the right direction — the node pushes a template with the
-coinbase and a Merkle path, with no polling and no JSON marshalling of 600,000 identifiers
-— subject to the `CCbTx` complication in §7.
-
-### 16.7 What the staging choice actually costs
-
-Holding the block size at 2 MB isolates the problems well. It does not sidestep the relay
-one.
-
-| | 2 MB decoupled | 8 MB decoupled (v8; the column was written for 10 MB) |
-|---|---|---|
-| throughput implied | ~520 tx/s | ~2,600 tx/s |
-| relay re-index (§16.3) | **required** | **required** |
-| InstantSend coverage (§16.5) | **blocker** | **blocker, needs batching** |
-| `maxmempool` | ~91 MB/interval, inside the default but tight | ~455 MB/interval, must raise |
-| `MAX_PROTOCOL_MESSAGE_LENGTH` | under 3 MB, fine | must raise |
-| template production | tolerable | must replace |
-| message handler (~4,400 tx/s sustained) | 10× headroom | 2× headroom |
-| body propagation | ~23 MB/block, ~195 KB/s, trivial | ~115 MB/block |
-
-So the 2 MB stage has **two** blockers, not one. v6 recorded InstantSend as marginal at
-this point against a modelled ~800 tx/s network-wide; the measured figure is an order of
-magnitude below that, at a quorum a tenth the live size. The rest of the 10 MB list is then
-a known set of prerequisites rather than a set of discoveries.
-
----
+Neither is caused by decoupling and both are now proposed upstream: the ChainLocks cleanup walk —
+which measurement later showed is **not** what caps throughput (R-25) — and the socket-handler
+busy loop, whose throughput claim was overstated and has since been corrected (R-27). They are
+recorded because both scale with mempool size, and decoupling exists to make the mempool large.
 
 ## 17. The dual validation path (v8)
 
