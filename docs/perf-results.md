@@ -2795,3 +2795,34 @@ and bodies late. Neither option is "unchanged"; this test makes the difference v
 One harness note reused from the accept-path work: the test seeks a height whose *next* block is
 outside the DKG mining window, because a hand-built block inside it is rejected `bad-qc-missing`
 whatever else is true of it (F-63).
+
+**0.2 — the known-but-absent block, and a trap demonstrated rather than argued.**
+
+Pruning is the only way to reach decoupling's target state on an unmodified node: the index entry
+survives with `nTx > 0` while `BLOCK_HAVE_DATA` is cleared. Characterised at height 1300 of a
+pruned chain (`pruneheight` 1489):
+
+| | behaviour |
+|---|---|
+| the index entry | survives, still reports `nTx = 2` |
+| `getblockheader` | **answers**, from the index |
+| `getblock` | refuses: `Block not available (pruned data)` |
+| the same block **offered back unrequested** | **silently discarded** — still unavailable afterwards |
+
+That last row is F-36 shown rather than reasoned. `AcceptBlock` reads `nTx != 0` as "a
+previously-processed block that was pruned" and returns early for anything unrequested. Under
+decoupling the identical test means "I hold the commitments", so **a body arriving unrequested — or
+by compact-block relay, the mainline path — is thrown away by a node that needs it.**
+
+**And getting there exposed a genuinely dangerous harness trap: `pruneblockchain` reports success
+while pruning nothing.** It returned the target height and `getblockchaininfo` reported
+`pruned = true`, with `pruneheight = 0` — nothing removed at all. Pruning deletes whole 128 MiB
+block *files*, and a file goes only when every block in it is below the target. On a small regtest
+chain everything lives in `blk00000.dat`, so no prune is ever possible. Worse, even after a second
+and third file appeared, `blk00000.dat` still held blocks above any legal target, because
+`MIN_BLOCKS_TO_KEEP` forbids a target within 288 of the tip. It took **height 1798 and three files**
+before a prune removed anything.
+
+So a pruning test that mines a few hundred blocks, calls `pruneblockchain`, and proceeds is
+characterising an **unpruned** chain while every RPC says it succeeded. The test now drives to the
+condition in a loop and asserts on `pruneheight` rather than on the call's return value.
