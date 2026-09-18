@@ -630,6 +630,11 @@ void SetupServerArgs() {
     gArgs.AddArg("-dnsseed",
                  "Query for peer addresses via DNS lookup, if low on addresses (default: 1 unless -connect used)",
                  ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    gArgs.AddArg("-commitmentblocks",
+                 "Advertise NODE_COMMITMENTS, so peers may send blocks as a coinbase plus "
+                 "transaction identifiers rather than full bodies (default: 0). Experimental; "
+                 "the format is not activated.",
+                 ArgsManager::ALLOW_ANY, OptionsCategory::DEBUG_TEST);
     gArgs.AddArg("-enablebip61", strprintf("Send reject messages per BIP61 (default: %u)", DEFAULT_ENABLE_BIP61),
                  ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     gArgs.AddArg("-externalip=<ip>", "Specify your own public address", ArgsManager::ALLOW_ANY,
@@ -1798,6 +1803,14 @@ bool AppInitParameterInteraction() {
 
     if (gArgs.GetBoolArg("-peerbloomfilters", DEFAULT_PEERBLOOMFILTERS))
         nLocalServices = ServiceFlags(nLocalServices | NODE_BLOOM);
+
+    if (gArgs.GetBoolArg("-commitmentblocks", false)) {
+        // Opt-in while the format is unactivated: advertising by default would
+        // invite peers to ask for a serialization the rest of the node cannot yet
+        // serve. The bit only says "offer me this form" -- see NODE_COMMITMENTS.
+        nLocalServices = ServiceFlags(nLocalServices | NODE_COMMITMENTS);
+        LogPrintf("Advertising NODE_COMMITMENTS: peers may offer blocks in commitment form\n");
+    }
 
     nMaxTipAge = gArgs.GetArg("-maxtipage", DEFAULT_MAX_TIP_AGE);
 

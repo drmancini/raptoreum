@@ -4,6 +4,7 @@
 
 #include <consensus/merkle.h>
 #include <primitives/block.h>
+#include <protocol.h>
 #include <streams.h>
 #include <tinyformat.h>
 #include <test/test_raptoreum.h>
@@ -207,6 +208,39 @@ BOOST_AUTO_TEST_CASE(an_empty_block_has_no_commitments) {
     BOOST_CHECK_EQUAL(c.CommittedCount(), 0U);
     CBlock rebuilt;
     BOOST_CHECK(!MaterialiseBlock(c, {}, rebuilt));
+}
+
+// The selector is a service bit, not a header bit: whether a block can be carried as
+// commitments is a property of the connection, not of the block. These pin the
+// negotiation and, more importantly, the limit of what the bit is allowed to mean.
+BOOST_AUTO_TEST_CASE(the_service_bit_chooses_the_serialization) {
+    BOOST_CHECK(!CanReceiveCommitments(NODE_NETWORK));
+    BOOST_CHECK(CanReceiveCommitments(ServiceFlags(NODE_NETWORK | NODE_COMMITMENTS)));
+
+    BOOST_CHECK_EQUAL(BlockSerFlagsFor(NODE_NETWORK), SER_NETWORK);
+    BOOST_CHECK_EQUAL(BlockSerFlagsFor(ServiceFlags(NODE_NETWORK | NODE_COMMITMENTS)),
+                      SER_NETWORK | SER_COMMITMENTS);
+
+    // In the experimental range, so it cannot collide with an upstream assignment
+    // while the format is unactivated.
+    BOOST_CHECK(NODE_COMMITMENTS >= (1u << 24));
+    // And it must not overlap anything already in use.
+    const uint64_t inUse = NODE_NETWORK | NODE_GETUTXO | NODE_BLOOM | NODE_XTHIN | NODE_NETWORK_LIMITED;
+    BOOST_CHECK_EQUAL(NODE_COMMITMENTS & inUse, 0U);
+}
+
+// A service bit is an unauthenticated advertisement. A peer may claim the bit and
+// answer a body request with the wrong transaction, and the bit must buy it nothing:
+// verification is against the identifiers, never against the claim.
+BOOST_AUTO_TEST_CASE(advertising_the_bit_earns_no_trust) {
+    const CBlock block = MakeBlock(4);
+    const CCommitmentBlock c = CommitmentsFromBlock(block);
+    std::vector <CTransactionRef> lies(block.vtx.begin() + 1, block.vtx.end());
+    lies[1] = MakeTx(31337);
+
+    BOOST_CHECK(CanReceiveCommitments(ServiceFlags(NODE_NETWORK | NODE_COMMITMENTS)));
+    CBlock rebuilt;
+    BOOST_CHECK(!MaterialiseBlock(c, lies, rebuilt));   // the claim changes nothing
 }
 
 BOOST_AUTO_TEST_SUITE_END()
