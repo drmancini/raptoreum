@@ -178,3 +178,6 @@ scripts/CERTIFICATE_INFO.md
 **/certificate_info.md
 **/cert_*.md
 
+
+# Swarm smartnode manifest: holds BLS secrets (regtest, but still secrets).
+test/perf/swarm/smartnodes.json
