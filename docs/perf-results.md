@@ -2501,3 +2501,36 @@ it the other; neither is "unchanged", and F-35 named only the first.
 **What stands from 0.1c.** The bit costs no relaxed assertions. Chain selection, restart and the
 pruned-node case all hold. The bit and the fetch layer are one deliverable — reinforced, since the
 fetch as built does not deliver. What does not stand: that the rung can be avoided.
+
+### 2026-09-18 — 0.4 opening: quorum formation is not unattempted, it is already green
+
+The plan's 0.4 row says ProTx registration, DKG and quorum formation were "never attempted". That
+is true of the **WAN swarm** and false of the tree. The functional suite already exercises all of
+it, and on this branch, with a binary rebuilt to match, **all nine pass**:
+
+| test | duration |
+|---|---|
+| `feature_dip3_deterministicmns` | 110 s |
+| `feature_llmq_chainlocks` | 74 s |
+| `feature_llmq_connections` | 65 s |
+| `feature_llmq_data_recovery` | 281 s |
+| `feature_llmq_dkgerrors` | 103 s |
+| `feature_llmq_is_cl_conflicts` | 43 s |
+| `feature_llmq_is_retroactive` | 159 s |
+| `feature_llmq_simplepose` | 153 s |
+| `feature_new_quorum_type_activation` | 11 s |
+
+Quorums form through all six DKG phases and sign: 5 members, 5 contributions, 5 commitments, zero
+complaints, zero justifications, a new quorum every DKG interval. So **the DKG mechanism works in
+this tree** and 0.4 does not need to establish that.
+
+What this does to 0.4's scope: the swarm is no longer the route to "does it work", it is the route
+to **what it costs** — DKG timing across real WAN latency instead of loopback, islock and ChainLock
+rates under the corpus load, quorum formation while the relay path is saturated, and the
+ChainLock-across-a-body-gap scenario that has no local home. That is a narrower and better-defined
+job than the row describes.
+
+Two notes for whoever runs these next. They need **Python 3.11** — `test_framework/mininode.py`
+imports `asyncore`, removed in 3.12, and mario's default is 3.13; `~/.pyenv/versions/3.11.9/bin/python3`
+works. And rebuild before running: switching branches leaves a binary from the *other* branch in
+`src/`, and the first attempt here was about to test probe code against rig-branch source.
