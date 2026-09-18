@@ -200,6 +200,20 @@ extern bool g_parallel_script_checks;
 extern std::set<uint256> g_perf_withhold_hashes;
 extern std::set<int> g_perf_withhold_heights;
 
+/** Do we hold the transaction bodies for this block?
+ *
+ *  The acceptance layer the decoupling design needs (see docs, §2) splits one
+ *  fact -- "we have this block" -- into two: commitments held, and bodies held.
+ *  This is that second fact, and under the probe it is driven by the withhold
+ *  flags rather than by a status bit, so the state machine can be exercised
+ *  without committing to a storage format.
+ *
+ *  Every path that may materialise a block consults this before reading, which
+ *  is the rule that closes the whole remote-crash class: today a missing body
+ *  reaches an assert in the block-serving path, an AbortNode in ConnectTip, and
+ *  a "corrupted block database" at startup. */
+bool HaveBodies(const CBlockIndex *pindex);
+
 /** Test-only: run AcceptToMemoryPool's script checks on the script-check thread
  *  pool rather than inline on the calling thread (-perfparallelatmp). See the
  *  definition in validation.cpp. */

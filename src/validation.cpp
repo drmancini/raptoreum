@@ -116,6 +116,17 @@ bool g_parallel_script_checks{false};
 std::set<uint256> g_perf_withhold_hashes;
 std::set<int> g_perf_withhold_heights;
 
+bool HaveBodies(const CBlockIndex *pindex) {
+    if (pindex == nullptr) {
+        return false;
+    }
+    if (g_perf_withhold_hashes.empty() && g_perf_withhold_heights.empty()) {
+        return true;
+    }
+    return !g_perf_withhold_hashes.count(pindex->GetBlockHash()) &&
+           !g_perf_withhold_heights.count(pindex->nHeight);
+}
+
 /** The script-check thread pool. Declared here rather than beside
  *  StartScriptCheckWorkerThreads so AcceptToMemoryPool can reach it under
  *  -perfparallelatmp below. */
@@ -3074,6 +3085,21 @@ bool CChainState::ConnectTip(CValidationState &state, const CChainParams &chainp
     int64_t nTime1 = GetTimeMicros();
     std::shared_ptr<const CBlock> pthisBlock;
     if (!pblock) {
+        // Bodies missing is not a failure of this block and must never be
+        // treated as one. Returning false with `state` left VALID lands in
+        // ActivateBestChainStep's non-consensus branch, which makes the mempool
+        // consistent and leaves the node on the tip it can validate -- it does
+        // not call InvalidChainFound, and it does not abort. That branch already
+        // existed for disk and database errors, so "not yet" needed no new
+        // state here: marking the block invalid would permanently reject a
+        // chain other nodes accept, and aborting would turn a liveness problem
+        // into an outage.
+        if (!HaveBodies(pindexNew)) {
+            LogPrintf("ConnectTip: bodies not held for %s (height %d); holding it incomplete\n",
+                      pindexNew->GetBlockHash().ToString(), pindexNew->nHeight);
+            state.SetBodiesMissing();
+            return false;
+        }
         std::shared_ptr <CBlock> pblockNew = std::make_shared<CBlock>();
         if (!ReadBlockFromDisk(*pblockNew, pindexNew, chainparams.GetConsensus()))
             return AbortNode(state, "Failed to read block");
@@ -4917,6 +4943,23 @@ bool CVerifyDB::VerifyDB(const CChainParams &chainparams, CCoinsView *coinsview,
         if (fPruneMode && !(pindex->nStatus & BLOCK_HAVE_DATA)) {
             // If pruning, only go back as far as we have data.
             LogPrintf("VerifyDB(): block verification stopping at height %d (pruning, no data)\n", pindex->nHeight);
+            break;
+        }
+        if (!HaveBodies(pindex)) {
+            // Same shape as the pruning case immediately above, and that
+            // precedent is the point: "the data is legitimately absent, so stop
+            // here" is a state this function already knows how to be in. Without
+            // this, a body we never held is indistinguishable from a corrupt
+            // block file -- the node reports "Corrupted block database detected.
+            // Please restart with -reindex" and refuses to start, which is
+            // catastrophic advice for a node that never had the body and cannot
+            // reindex its way to one.
+            //
+            // Stop rather than skip: at check level 3 this walk applies undo
+            // data to a rolling coins view, so a gap in the middle would leave
+            // that view wrong in a way no error would report.
+            LogPrintf("VerifyDB(): block verification stopping at height %d (bodies not held)\n",
+                      pindex->nHeight);
             break;
         }
         CBlock block;
