@@ -391,6 +391,16 @@ A node must never mark a body-incomplete block invalid. Doing so would permanent
 reject a chain other nodes accept. Holding it incomplete and retrying costs only
 liveness. So the timeout governs retry cadence, never validity, and stays local policy.
 
+**This rule is already implemented, for pruning.** `FindMostWorkChain` treats absent data as a
+third outcome beside valid and invalid: it drops the chain from the candidate set without setting
+any failure bit, and re-inserts it into `m_blocks_unlinked` so that, in its own words, "if the
+block arrives in the future we can try adding to setBlockIndexCandidates again." The 0.1 probe
+held a commitment-only block, restarted on the validated tip and converged once the body arrived
+with **no change to chain selection at all** (F-25f). What the layer still owes is not this rule
+but the plumbing beneath it: a body store, a fetch scheduler, and a status bit that separates
+holding the commitments from holding the bodies, which the probe did without and which is why its
+withheld block was re-requested twice and then dropped (F-25i).
+
 ---
 
 ## 3. The tip regime
@@ -2308,6 +2318,16 @@ nothing per transaction: verifying one lock costs at least 1.15 ms of BLS agains
 of ECDSA saved on a two-input transaction — **10× worse** — so break-even is 10 to 20
 transactions per signature. **Batching is the gate for every row of that table**, which makes it
 the same work as §13.B's InstantSend batching. Build it once.
+
+**A cost the third row had not been charged, from the 0.1 probe.** Connecting a block on the
+strength of an attestation instead of its bodies means the tip can sit **above** a block whose
+bodies the node never held — and reorging across it needs them back. `DisconnectBlock` has to
+remove the outputs those transactions created, and undo data records the coins they *spent*, not
+the ones they made. So consensus trust does not merely shift a trust boundary: it obliges a node
+to either keep bodies it was told it could skip, or carry an extended undo record that names every
+output created. Neither is priced anywhere in this document. The bodies-required path is free of
+this entirely — connecting needs the bodies, so the gap is always above the tip and the case
+cannot arise (F-29).
 
 **And the decision that bounds the third row:** *what may an attested transaction change?* If
 contract-layer state only, a lying quorum corrupts contract state and cannot steal RTM. If

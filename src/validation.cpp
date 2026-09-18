@@ -151,6 +151,7 @@ bool fTimestampIndex = false;
 bool fSpentIndex = false;
 bool fFutureIndex = false;
 bool fHavePruned = false;
+bool fHaveCommitmentOnly = false;
 bool fPruneMode = false;
 bool fRequireStandard = true;
 bool fCheckBlockIndex = false;
@@ -3791,13 +3792,23 @@ CBlockIndex *BlockManager::AddToBlockIndex(const CBlockHeader &block, enum Block
 
 /** Mark a block as having its data received and checked (up to BLOCK_VALID_TRANSACTIONS). */
 void CChainState::ReceivedBlockTransactions(const CBlock &block, CValidationState &state, CBlockIndex *pindexNew,
-                                            const FlatFilePos &pos) {
+                                            const FlatFilePos *pos) {
+    // Commitment-level: how many transactions this block commits to, and -- via
+    // the walk below -- how many the chain up to it commits to. Both are counts,
+    // not possessions, so they are known from the commitment list alone.
     pindexNew->nTx = block.vtx.size();
     pindexNew->nChainTx = 0;
-    pindexNew->nFile = pos.nFile;
-    pindexNew->nDataPos = pos.nPos;
     pindexNew->nUndoPos = 0;
-    pindexNew->nStatus |= BLOCK_HAVE_DATA;
+    // Body-level: where the bodies are, and the claim that we hold them.
+    if (pos != nullptr) {
+        pindexNew->nFile = pos->nFile;
+        pindexNew->nDataPos = pos->nPos;
+        pindexNew->nStatus |= BLOCK_HAVE_DATA;
+    } else {
+        fHaveCommitmentOnly = true;
+    }
+    // Tied to nTx, not to the bodies: CheckBlockIndex asserts this equivalence
+    // as pruning-independent.
     pindexNew->RaiseValidity(BLOCK_VALID_TRANSACTIONS);
     setDirtyBlockIndex.insert(pindexNew);
 
@@ -4423,13 +4434,24 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock> &pblock, CVali
 
     // Write block to history file
     if (fNewBlock) *fNewBlock = true;
+    if (!HaveBodies(pindex)) {
+        // PERF: accept the block's commitments without its bodies, which is the
+        // state a decoupled node is in between receiving a commitment block and
+        // fetching its bodies. Withholding at READ time cannot produce it: the
+        // block has to arrive this way.
+        LogPrintf("AcceptBlock: accepting %s (height %d) commitments only; bodies not held\n",
+                  pindex->GetBlockHash().ToString(), pindex->nHeight);
+        ReceivedBlockTransactions(block, state, pindex, nullptr);
+        CheckBlockIndex(chainparams.GetConsensus());
+        return true;
+    }
     try {
         FlatFilePos blockPos = SaveBlockToDisk(block, pindex->nHeight, chainparams, dbp);
         if (blockPos.IsNull()) {
             state.Error(strprintf("%s: Failed to find position to write new block to disk", __func__));
             return false;
         }
-        ReceivedBlockTransactions(block, state, pindex, blockPos);
+        ReceivedBlockTransactions(block, state, pindex, &blockPos);
     } catch (const std::runtime_error &e) {
         return AbortNode(state, std::string("System error: ") + e.what());
     }
@@ -4745,6 +4767,13 @@ bool BlockManager::LoadBlockIndex(
     {
         if (ShutdownRequested()) return false;
         CBlockIndex *pindex = item.second;
+        // Re-derive rather than persist a flag: an index entry that commits to
+        // transactions while holding no data IS the commitment-only state, and
+        // the invariant relaxation has to be in place before the first
+        // CheckBlockIndex of the run, which happens during startup.
+        if (pindex->nTx > 0 && !(pindex->nStatus & BLOCK_HAVE_DATA) && !fHavePruned) {
+            fHaveCommitmentOnly = true;
+        }
         pindex->nChainWork = (pindex->pprev ? pindex->pprev->nChainWork : 0) + GetBlockProof(*pindex);
         pindex->nTimeMax = (pindex->pprev ? std::max(pindex->pprev->nTimeMax, pindex->nTime) : pindex->nTime);
         // We can link the chain of blocks for which we've received transactions at some point.
@@ -5218,7 +5247,7 @@ bool CChainState::AddGenesisBlock(const CChainParams &chainparams, const CBlock 
     if (blockPos.IsNull())
         return error("%s: writing genesis block to disk failed (%s)", __func__, FormatStateMessage(state));
     CBlockIndex *pindex = m_blockman.AddToBlockIndex(block);
-    ReceivedBlockTransactions(block, state, pindex, blockPos);
+    ReceivedBlockTransactions(block, state, pindex, &blockPos);
     return true;
 }
 
@@ -5455,7 +5484,10 @@ void CChainState::CheckBlockIndex(const Consensus::Params &consensusParams) {
                    0);  // nSequenceId can't be set positive for blocks that aren't linked (negative is used for preciousblock)
         // VALID_TRANSACTIONS is equivalent to nTx > 0 for all nodes (whether or not pruning has occurred).
         // HAVE_DATA is only equivalent to nTx > 0 (or VALID_TRANSACTIONS) if no pruning has occurred.
-        if (!fHavePruned) {
+        // Holding a block's commitments without its bodies breaks the equivalence
+        // in exactly the way pruning does, and in the same direction: nTx can be
+        // positive with no BLOCK_HAVE_DATA. So it earns the same relaxation.
+        if (!fHavePruned && !fHaveCommitmentOnly) {
             // If we've never pruned, then HAVE_DATA should be equivalent to nTx > 0
             assert(!(pindex->nStatus & BLOCK_HAVE_DATA) == (pindex->nTx == 0));
             assert(pindexFirstMissing == pindexFirstNeverProcessed);
@@ -5531,7 +5563,10 @@ void CChainState::CheckBlockIndex(const Consensus::Params &consensusParams) {
         if (pindex->pprev && (pindex->nStatus & BLOCK_HAVE_DATA) && pindexFirstNeverProcessed == nullptr &&
             pindexFirstMissing != nullptr) {
             // We HAVE_DATA for this block, have received data for all parents at some point, but we're currently missing data for some parent.
-            assert(fHavePruned); // We must have pruned.
+            // Pruning is one way to get here and decoupling is the other: a body
+            // gap below a block we hold is exactly what a commitment-only
+            // ancestor looks like.
+            assert(fHavePruned || fHaveCommitmentOnly);
             // This block may have entered m_blocks_unlinked if:
             //  - it has a descendant that at some point had more work than the
             //    tip, and
