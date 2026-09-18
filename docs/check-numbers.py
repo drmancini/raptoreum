@@ -28,7 +28,6 @@ HERE = Path(__file__).resolve().parent
 # definition; README is navigation.
 LIVING = [
     "transaction-decoupling.md",
-    "architecture-plain-language.md",
     "build-plan.md",
     "upstream-ledger.md",
     "platform/architecture-decisions.md",

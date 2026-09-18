@@ -1,10 +1,18 @@
-<!-- lifecycle: living — but see the warning below
-     owns:      the design explained without code, for reading and for handing to someone else
-     not mine:  everything else; this restates the design by construction
-     warning:   this file paraphrases numbers, which is the one thing the citation rule forbids.
-                It is kept because its audience cannot follow ID citations, and it is therefore
-                the most rot-prone document here. Treat a divergence from findings.md as this
-                file being wrong, never the other way round. -->
+<!-- archived: 2026-09-18
+     why:      it restates every number in prose by construction, so it cannot obey the
+               citation rule the rest of the folder now runs on — and it had already drifted,
+               carrying "12.6 GB per year" (400 B) beside "six terabytes" (373 B) in adjacent
+               paragraphs. A living prose copy of a living technical document is two clocks.
+     replaced: transaction-decoupling.md (the design) and findings.md (every value, with its
+               regime). If a plain-language version is needed for an audience, generate a fresh
+               one from those rather than maintaining a parallel copy.
+     keep:     it is the clearest statement of the design's shape that exists, and §§1-2 in
+               particular — the idea in one page, and the principles — are worth reading before
+               the technical document. Read it as a 2026-09-17 snapshot, not as current. -->
+
+> **ARCHIVED 2026-09-18, and it is a snapshot.** Its numbers predate `findings.md`; where it
+> disagrees with the design or with findings, it is wrong. Kept because §§1-2 are the best short
+> explanation of what decoupling is.
 
 # Transaction Decoupling on Raptoreum
 
