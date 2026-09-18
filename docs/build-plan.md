@@ -54,6 +54,16 @@ Nothing in phase 1 starts before 0.1 returns a verdict.
 | 1.3 | **Acceptance layer.** Having the identifiers and having the bodies become two facts: a new status bit (a persisted block-index format change), a new validity rung, and ~30 sites above `ConnectBlock` — chain selection, candidate maintenance, `CheckBlockIndex`'s invariants, `NewPoWValidBlock`, pruning, `VerifyDB`, crash replay, `-reindex`, and the `InvalidateBlock` / `MarkConflictingBlock` / `EnforceBestChainLock` interactions. Plus a durable retry queue with per-block exponential backoff that never keys off accumulated work. | **3-6 mo** | **unknown** |
 | 1.4 | **Fork envelope.** 8 MB cap and the message-length raise ride this activation; 2 MB by policy. | in 4.6 | straightforward |
 
+**What cold connect costs, and why the cache is load-bearing** (measured 0.3). A full commitment
+block of *ordinary* two-in/two-out payments, when the bodies were never seen at acceptance:
+~16-20 s single-thread at 2 MB and ~65-78 s at 8 MB; ~7 s and ~28 s on a 4-thread box; ~4-5 s and
+~17-20 s on the stated 8-core Smartnode. **Warm — validated at acceptance — the same block is
+~0.8 s.** A 20-25× swing, which makes three things follow: 2.3's relay cap re-index is what keeps
+the cache hitting, not just what makes reconstruction possible; `-maxsigcachesize` in 4.5 is
+consensus-adjacent sizing rather than tuning, since 524,288 entries is only 2.1 blocks at 8 MB;
+and the cold column is a third independent argument for mining 2 MB by policy, beside relay and
+storage.
+
 **Why 1.2 is not optional.** `MaxBlockSigOps() = MaxBlockSize()/50` is 40,000 at 2 MB, and
 `GetLegacySigOpCount` counts sigops per output, so a two-output payment is 2. A 2 MB commitment
 block naming 62,500 payments carries 125,000 sigops and is **invalid** — the cap admits about
