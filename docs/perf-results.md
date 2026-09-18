@@ -1975,3 +1975,81 @@ the split before they say anything new.
 **Trap for whoever runs this next:** `-checkblocks=0` means *all* blocks, not none. Use
 `-checkblocks=1`, or the startup verification hits the withheld body and the run measures the
 scaffolding.
+
+### 2026-09-18 — recovered from `throughput-bottleneck.md` before archiving it
+
+Back-entry, not a new measurement. `throughput-bottleneck.md` was retired because its headline
+conclusion — "the v1 target of 1,500 tx/s is reachable on the current single-threaded design,
+with headroom" — was overturned by the twelve-node WAN swarm (F1: relay delivers ~930 tx/s), and
+a live document leading with a dead conclusion is the worst thing in a folder. But five of its
+measurements exist nowhere else, and one of them is load-bearing for a deferral in the build
+plan. They are recorded here so the archive copy is history rather than the only source.
+
+All five: perf rig, Ryzen 9 3900X 12c/24t, 62 GB, regtest, `checkmempool=0`, `maxmempool=8000`,
+3M pre-signed payments, 2026-09-16. Regime `loopback` throughout — one host, peers on loopback.
+
+**1. Eight-node full mesh, distributed origination.** The load-bearing one. Each node fed its
+own lineage shard, 12-14 connections each, cap 50,000:
+
+| network-wide | per node | convergence | `msghand` per node |
+|---:|---:|---:|---:|
+| **1,500** | 187 tx/s | **100%** | **47.4-48.9%** |
+| 3,000 | 375 tx/s | **100%** | 75.4-81.2% |
+| 4,500 | 562 tx/s | 92% | 95.7-97.7% |
+| 6,000 | 750 tx/s | 69% | 96.8-98.1% |
+
+Every node ended holding every transaction (179,528 on all eight) at the v1 rate, with the
+critical thread under half a core. Full convergence holds to **~3,000 tx/s network-wide**. Peak
+host load was 9.4-11.5 on a 24-thread box, so the limit is the per-node `msghand` thread and not
+the test host.
+
+**Why it matters now:** this is the only evidence that the ~930 tx/s measured on the WAN swarm
+(F1) is a property of that topology and hardware rather than of the code — eight nodes on
+loopback converge fully at twice that rate. The build plan defers the relay structural work on
+exactly that reasoning, so deleting this measurement would leave the deferral unsupported.
+
+**2. `dbcache` and `maxsigcachesize` do not move the acceptance ceiling.** Swept at saturation:
+
+| case | sustained ingestion | `msghand` |
+|---|---:|---:|
+| defaults | **4,565 tx/s** | 89.4% |
+| `-dbcache=4000` (13×) | 4,538 | 89.1% |
+| `-maxsigcachesize=512` (16×) | 4,361 | 89.6% |
+| both | 4,473 | 89.8% |
+
+Within ±2.3%, baseline highest. The node log confirmed the setting applied, so this is not a
+silently-ignored flag. The ceiling is real compute: the corpus is 3M *unique* transactions, so
+every signature is verified exactly once and a bigger cache has nothing to re-hit.
+
+**3. The socket busy-loop fix is not a throughput fix.** Counterfactual binary with both halves
+of #480 reverted:
+
+| | `rtm-net` | `msghand` | ingested | relayed |
+|---|---:|---:|---:|---:|
+| with #480 | **12.2%** | 91.5% | 636,480 | 186,768 |
+| without | **83.6%** | 90.6% | 608,720 | 194,805 |
+
+A whole core burned spinning, throughput unchanged within noise — the buggy build relayed
+marginally more. The spin is on `rtm-net` while the bottleneck is `msghand`, and this host has
+spare cores. This is the measurement that made #480's body an overclaim (R-series, corrected on
+the PR 2026-09-18); it would matter on a core-constrained smartnode, where the spinning thread
+contends with `msghand`.
+
+**4. Why per-peer delivery is `accepted / N`, not a shared budget divided N ways.** The message
+handler takes one message per peer per pass ("Just take one message", `ProcessMessages`), and the
+requesting peer issues **single-entry getdata messages** — measured 40,555 one-entry getdatas
+against 1 batched. So 1,405 / 1,205 / 698 tx/s at 1/4/8 peers is `accepted/N`, and above the cap
+the limiter is the handler loop rather than relay capacity. Supports F6.
+
+**5. The stock cap is fully explained, to the byte.** `InvBroadcastMax()` = 140 × 2 = **280**
+entries per trickle on a Poisson timer averaging 5 s → 56 tx/s per inbound peer (C5, C6). Every
+inv payload on the link measured exactly **10,083 B = 3 + 280 × 36**. The 47-65 spread across
+runs is Poisson trickle-count noise, ~±18% at one sigma over 150 s, not a second mechanism. This
+is one of the three values in F4 and the only one with a mechanism attached.
+
+**And the four errors of that document's first pass**, which README's second standing warning
+points at and which are worth keeping as a checklist: relay capacity measured while ingestion was
+saturating the same thread; rates computed as `final_mempool / 120` when acceptance ran 135-175 s;
+no per-peer time series, so concurrent relay could not be separated from the post-offer drain; and
+an unbounded-backlog artefact from offering ~4× what could be relayed, which made a per-trickle
+`make_heap` over the whole backlog look like a peer-count effect.
