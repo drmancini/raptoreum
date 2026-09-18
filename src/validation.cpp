@@ -111,6 +111,11 @@ std::condition_variable g_best_block_cv;
 uint256 g_best_block;
 bool g_parallel_script_checks{false};
 
+/** Test-only body withholding; see validation.h. Written once during init and
+ *  only read afterwards, so it needs no lock of its own. */
+std::set<uint256> g_perf_withhold_hashes;
+std::set<int> g_perf_withhold_heights;
+
 /** The script-check thread pool. Declared here rather than beside
  *  StartScriptCheckWorkerThreads so AcceptToMemoryPool can reach it under
  *  -perfparallelatmp below. */
@@ -1082,6 +1087,20 @@ bool ReadBlockFromDisk(CBlock &block, const FlatFilePos &pos, const Consensus::P
 }
 
 bool ReadBlockFromDisk(CBlock &block, const CBlockIndex *pindex, const Consensus::Params &consensusParams) {
+    // Test-only: pretend this block's bodies are not held. Returning the same
+    // failure a genuine read error returns is the point -- it drives every
+    // caller down the path a body-incomplete block would, which is what the
+    // acceptance-layer probe measures. Nineteen call sites reach here,
+    // including ConnectTip, ProcessGetBlockData, GETBLOCKTXN, the compact-block
+    // announce, VerifyDB, RollbackBlock, ZMQ and the smartnode list diff.
+    if (!g_perf_withhold_hashes.empty() || !g_perf_withhold_heights.empty()) {
+        if (g_perf_withhold_hashes.count(pindex->GetBlockHash()) ||
+            g_perf_withhold_heights.count(pindex->nHeight)) {
+            return error("%s: PERF: body withheld for %s (height %d)", __func__,
+                         pindex->GetBlockHash().ToString(), pindex->nHeight);
+        }
+    }
+
     FlatFilePos blockPos;
     {
         LOCK(cs_main);

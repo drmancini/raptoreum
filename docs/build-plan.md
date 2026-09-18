@@ -38,9 +38,25 @@ interleaved. Estimates include tests and were revised upward twice under adversa
 
 Nothing in phase 1 starts before 0.1 returns a verdict.
 
+> **0.1's kill criterion, written down before it runs.** The acceptance layer is **not
+> tractable**, and §15 becomes the design, if making any probe scenario safe requires
+> **relaxing an invariant that today catches database corruption** — `CheckBlockIndex`'s
+> `HAVE_DATA ⇒ nTx > 0 ⇒ VALID_TRANSACTIONS ⇒ candidacy` chain, or `ConnectTip`'s guarantee
+> that a selected block is readable — rather than adding a state alongside it. Weakening one of
+> those trades a liveness problem for a silent-corruption problem, which is a worse design than
+> not decoupling.
+>
+> Two softer signals, neither a kill on its own: needing more than one status bit and one
+> validity rung in the block index is a **cost** signal, to be re-estimated rather than
+> abandoned; and failing to reach "converges once bodies arrive" within two weeks is evidence
+> about the layer rather than about the probe.
+>
+> **Pass** is all scenarios reaching: never asserts, never marks the block invalid, never wedges,
+> and always converges once the bodies arrive.
+
 | # | Component | Effort | Design |
 |---|---|---|---|
-| 0.1 | **Acceptance probe.** A debug-only flag that withholds bodies for a chosen block, plus a scenario suite: restart while incomplete, peer churn mid-fetch, a competing tip at equal work, a ChainLock arriving for an incomplete block, a reorg across one, `-reindex`. Runs on today's serialization, needs no fork. **Must carry a written kill criterion.** | 3-5 d | straightforward |
+| 0.1 | **Acceptance probe. Phase A DONE 2026-09-18** — the flag exists (`-perfwithholdbody` / `-perfwithholdheight`, failing `ReadBlockFromDisk`'s index overload, which 19 call sites reach) and the blast radius is measured: `VerifyDB` calls a missing body **database corruption** and refuses to start, P2P serving **aborts the process**, `ConnectTip` hits `AbortNode`, RPC degrades gracefully. No kill — each needs a predicate consulted, not an invariant relaxed. `DisconnectTip` is the one open path and the likeliest place for the criterion to fire. Phase B (the split plus the remaining scenarios) is the 3-5 d item. A debug-only flag that withholds bodies for a chosen block, plus a scenario suite: restart while incomplete, peer churn mid-fetch, a competing tip at equal work, a ChainLock arriving for an incomplete block, a reorg across one, `-reindex`. Runs on today's serialization, needs no fork. **Must carry a written kill criterion.** | 3-5 d | straightforward |
 | 0.2 | **Characterisation tests.** Pin what the node accepts and rejects across normal and multi-input payments, every asset op, futures, every special-tx type, InstantSend interactions, and every rejection path. Tier 1 — strictly before decoupling. Runs on the rig host; mario's Python 3.13 has no `asyncore`. | 2-3 w | straightforward |
 | 0.3 | **Two cheap measurements.** `spork show` and `getblock <tip> 2` on the mainnet node — sporks 2, 3 and 19 are compiled off and whether they are live decides four priced items below. And fix `bench_inputs.py` (size-scaled fee, non-overlapping UTXOs, ≤675-input ceiling) to calibrate 1.2's work unit. | 1-2 d | straightforward |
 | 0.4 | **Smartnode swarm bring-up.** ProTx registrations, collateral, DKG and quorum formation on the 12-node WAN swarm — never attempted. Needs a test-only patch: `-llmqtestparams` overrides only size and threshold, leaving `dkgBadVotesThreshold`, `signingActiveQuorumCount`, `recoveryMembers` and `keepOldConnections` at three-member values. Turns every existing figure from an upper bound into a measurement. | 2-3 w | fiddly, known |
