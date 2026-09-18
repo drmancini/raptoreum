@@ -2355,3 +2355,75 @@ bodies held. The pruning machinery is the right precedent and carries most of th
 untouched: the validity rung, the persisted bit, out-of-order arrival, the unrequested and
 compact-block arrival paths, `-reindex`, ChainLock enforcement, equal-work ties, and every
 retention interaction.
+
+### 2026-09-18 — 0.1c, the rung probe: there is no rung, there is a bit and a fetch
+
+The question 0.1 did not reach: a commitment-only block cannot honestly hold
+`BLOCK_VALID_TRANSACTIONS`, so what does it hold? Two encodings were on the table. Reading
+`chain.h` killed both and suggested a third.
+
+**Why a rung is the wrong shape.** Validity is an **ordinal in a 3-bit field**, and
+`BLOCK_VALID_TREE = 2` and `BLOCK_VALID_TRANSACTIONS = 3` are **adjacent**. A rung between them
+renumbers TRANSACTIONS, CHAIN and SCRIPTS — and `nStatus` is persisted (`chain.h` serializes it,
+gating `nDataPos` and `nUndoPos` on its bits), so that is a block-index format change requiring a
+migration of every entry on disk, to express something that is not ordinal in the first place. Of
+what `BLOCK_VALID_TRANSACTIONS` certifies — coinbase present and well formed, no duplicate
+identifiers, sigops, size, merkle root, transactions valid — a commitment block proves the
+structural half **by itself**, and leaves exactly two body properties, "transactions valid" and
+"sigops", which `ConnectBlock` re-checks anyway.
+
+**So: no rung. One bit, `BLOCK_HAVE_BODIES = 256`** — the free bit the design had already
+reserved — and the commitment block is **stored like any other block**, so `BLOCK_HAVE_DATA` stays
+honest and every invariant written over it keeps its exact meaning.
+
+**Result: zero assertions relaxed.** Both of 0.1's relaxations were reverted and are not needed.
+The diff against the pre-probe baseline contains no weakened assertion. What it contains:
+
+| change | kind |
+|---|---|
+| `pindexFirstMissingBodies`, a sibling of `pindexFirstMissing` | new tracker |
+| `HAVE_BODIES ⇒ HAVE_DATA` | **added** assertion |
+| on the active chain `⇒ HAVE_BODIES` | **added** assertion |
+| two guards gain `&& pindexFirstMissingBodies == nullptr` | narrowed |
+
+The two narrowed guards are the honest part of the ledger. Narrowing a guard does skip the
+assertion in new cases — but on a node with no withholding `pindexFirstMissingBodies` is null
+exactly when `pindexFirstMissing` is null, because bodies and data are recorded together. **The
+invariant keeps full force over every state an unmodified node can reach**, and only states
+decoupling creates fall to the new handling. That is the difference between relaxing an invariant
+and adding a state alongside it, and it is checkable rather than rhetorical.
+
+**Where the chain actually breaks, and it is not where 0.1 said.** The first run of the bit
+encoding aborted, at the *candidacy* end of the criterion's `HAVE_DATA ⇒ nTx > 0 ⇒
+VALID_TRANSACTIONS ⇒ candidacy` chain: a block that sorts above the tip, is valid, and has all
+parent data "must be in setBlockIndexCandidates" — and chain selection had just removed it for
+having no bodies. So **both encodings break the same chain at different links**: 0.1's at
+`HAVE_DATA ⇒ nTx`, 0.1c's at `VALID_TRANSACTIONS ⇒ candidacy`. The sibling tracker is what lets the
+rule be asked over both reasons a block can be unusable instead of only the pruning one.
+
+**The finding that decides the schedule: the bit alone wedges the node permanently.** With
+`BLOCK_HAVE_DATA` honest, every "do I need this block?" answers **yes, I have it** — and there are
+four such sites: `validation.cpp:AcceptBlock`'s `fAlreadyHave`, and three in `net_processing.cpp`.
+Measured: with the withholding *removed*, the node made **zero** requests for the missing bodies
+and sat at the fork forever. Compare 0.1's encoding, which could at least express "I don't have
+it" and did re-request. So:
+
+> **The bit and the fetch layer are one deliverable, not two.** Encoding (c) costs no index
+> relaxations but does not work at all until "do I have this block" means "and its bodies".
+
+Restoring convergence took a body-aware `fAlreadyHave`, the same at the three download sites, and
+one new function — `ReceivedBlockBodies`, which sets the bit and re-arms candidacy by draining
+`m_blocks_unlinked`, deliberately **without** re-stamping `nSequenceId`, since first-seen order has
+not changed (F-35). With that, the chain runs end to end:
+
+| scenario | result |
+|---|---|
+| block arrives as commitments | tip holds at the parent, branch above `valid-headers`, node alive under `-checkblockindex=1` |
+| restart while incomplete | comes up at the parent; **the bit survives the datadir** |
+| bodies arrive | `bodies arrived for …` → converges to the full chain, one active tip |
+
+**Still not run, and named so it is not lost:** out-of-order arrival (F-25j, the normal case for a
+many-peer fetch), competing tip at equal work, reorg onto a branch with a gap, ChainLock across a
+gap, `-reindex`, and the **migration** this bit implies — a pre-bit datadir loads with
+`HAVE_BODIES` clear on every entry, which the new "active chain ⇒ HAVE_BODIES" assertion would fire
+on immediately. A one-pass upgrade at first load is the obvious fix and is unwritten.
