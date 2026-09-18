@@ -1,3 +1,10 @@
+<!-- lifecycle: frozen draft — NOT what is posted
+     posted:    https://github.com/Raptor3um/raptoreum/pull/481 — the posted body is the commit
+                message, not this draft, and they have never matched
+     wrong:     this draft says the ceiling "drops as the asset count grows". R-26: the operative
+                count is pinned at ~2,500 by LoadAssets on restart. The line was never posted.
+     rule:      edit the PR, not this file (D-10). -->
+
 # validation: don't copy the asset cache for every tx
 
 ## What is wrong

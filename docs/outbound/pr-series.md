@@ -1,3 +1,10 @@
+<!-- lifecycle: frozen draft — partly superseded
+     posted:    https://github.com/Raptor3um/raptoreum/pull/471 … /479 — the posted bodies are the
+                commit messages, not these longer descriptions
+     wrong:     its "passes three of three on its own" note for feature_llmq_is_cl_conflicts is
+                inaccurate; see the open issue recorded in upstream-ledger.md
+     rule:      edit the PRs, not this file (D-10). -->
+
 # Functional test suite — nine pull requests
 
 Replaces the single PR #470. Each targets `develop` and builds on the one before it,

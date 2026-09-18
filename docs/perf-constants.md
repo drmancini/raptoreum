@@ -6,7 +6,7 @@
                 this file is stale.
      warning:   read on perf/throughput-rig, which is not shipped RTM. See upstream-ledger.md. -->
 
-# Throughput test — §0.1 constants, read from the tree
+# Constants — where each one lives in the source
 
 > **The rig tree is not shipped RTM.** Constants below are upstream values unless marked.
 > The perf working tree carries local modifications that change behaviour, and reading one
@@ -14,12 +14,12 @@
 >
 > | constant | upstream | rig tree | effect |
 > |---|---|---|---|
-> | `MAX_DIP0001_BLOCK_SIZE` | **2,000,000** | 8,000,000 **on mario's `perf/throughput-rig` only** (commit `e55f029d6`) | The measurement host's tree (`ft/09-run-by-default`) is **2 MB**, so every measurement in `perf-results.md` reflects the upstream cap of **280/trickle**. Confusing the two checkouts already produced one wrong conclusion. |
+> | `MAX_DIP0001_BLOCK_SIZE` | **2,000,000** | 8,000,000 on `perf/throughput-rig` (commit `e55f029d6`), which is **this branch** | Changes block capacity and the relay cap derived from it. **Measurements exist on both**: earlier runs were taken on a 2 MB checkout and later ones on this branch, so the cap they reflect is 280/trickle or 1,120/trickle depending on the run. Each log entry states its own conditions, and `findings.md`'s `rig-8mb` regime marks the ones taken here. An earlier version of this row claimed every measurement reflects 2 MB; that was false once the 8 MB runs existed. |
 >
 > Check `git diff upstream/develop -- src/consensus/consensus.h` before quoting any
 > consensus constant from this tree. Full divergence list: `upstream-ledger.md`.
 
-Read at `ft/09-run-by-default` (49 commits on `develop`). Every value below is quoted
+Read on `perf/throughput-rig`. Every value below is quoted
 from source, not assumed from Dash or Bitcoin. Values that differ from Bitcoin's are
 marked.
 
@@ -54,7 +54,7 @@ multiplies by four, with the comment "we have 4 times smaller block times", givi
 
 A full 2 MB block of ~370-byte transactions every 120 s is about 5,400 transactions,
 or **~45 tx/s**. The shipped inbound cap sits roughly a quarter above the chain's own
-steady-state rate. Stage B therefore confirms a number the source already gives; it
+steady-state rate. Measurement therefore confirms a number the source already gives; it
 does not discover one.
 
 ## Mempool and policy
@@ -88,7 +88,7 @@ tracking cost, not a limit being hit.
 | `DEFAULT_MAXRECEIVEBUFFER` | 5,000 kB | `net.h:107` |
 | `DEFAULT_MAXSENDBUFFER` | 1,000 kB | `net.h:108` |
 
-**Stage D has a blocker its patch list does not mention.** `MAX_PROTOCOL_MESSAGE_LENGTH`
+**A blocker the early patch lists missed** (now plan item 1.4 and 4.5). `MAX_PROTOCOL_MESSAGE_LENGTH`
 is 3 MB. Raising `MaxBlockSize()` to 100 MB without raising this produces a miner whose
 blocks cannot cross the wire at all. The send and receive buffer defaults are the next
 thing to check after it.
@@ -113,7 +113,7 @@ Source: `llmq/quorums_parameters.h:413` and `:433`. Registered on regtest at
 `chainparams.cpp:808-809`, where ChainLocks, InstantSend and Platform all use
 `LLMQ_5_60`.
 
-**The plan's §5 is half right.** `-llmqtestparams=<size>:<threshold>` exists
+**The `-llmqtestparams` override is half a solution** (plan item 0.4). `-llmqtestparams=<size>:<threshold>` exists
 (`chainparamsbase.cpp:33`, applied at `chainparams.cpp:956`), so a 50-member quorum
 needs no chainparams patch. But the override reaches **only size and threshold**.
 `dkgBadVotesThreshold`, `signingActiveQuorumCount`, `recoveryMembers` and
@@ -145,13 +145,13 @@ block and overwrites whatever the test chose.
 Source `spork.h:37-45`, defaults `spork.h:74-78`. Regtest spork address:
 `yaackz5YDLnFuuX6gGzEs9EMRQGfqmNYjc` (`chainparams.cpp`, regtest section).
 
-## What this already changes in the plan
+## What this changes in the plan
 
-1. **Stage B is a confirmation, not a sweep.** The relay ceiling is 56 tx/s per inbound
+1. **The relay ceiling is arithmetic, not an unknown.** The relay ceiling is 56 tx/s per inbound
    peer and is arithmetic, not an unknown.
 2. **No quorum chainparams patch is needed**, but the `-llmqtestparams` override is
    partial and the remaining parameters need one.
-3. **Stage D needs `MAX_PROTOCOL_MESSAGE_LENGTH` raised**, which its patch list omits.
+3. **the message-length raise is required** — plan item 1.4.
 4. **`-logtimemicros` already exists** (`init.cpp:827`), so instrumentation patch 6 is
    mostly unnecessary.
 5. **`mininode.py` already speaks the protocol**, so the generator is a token bucket over

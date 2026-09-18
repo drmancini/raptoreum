@@ -1,3 +1,11 @@
+<!-- lifecycle: frozen draft — NOT what is posted
+     posted:    https://github.com/Raptor3um/raptoreum/pull/480 — the posted body is the record
+     diverged:  2026-09-18. This draft still contains "any throughput ceiling measured on an
+                affected node is a measurement of this bug", which our own counterfactual
+                disproved (R-27) and which was corrected on the PR. The posted body is the
+                qualified form; this file is the superseded draft.
+     rule:      edit the PR, not this file; nothing on upstream without asking (D-10). -->
+
 # net: don't busy-loop on peers the receive path will not drain
 
 ## What is wrong
