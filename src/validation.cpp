@@ -4767,13 +4767,6 @@ bool BlockManager::LoadBlockIndex(
     {
         if (ShutdownRequested()) return false;
         CBlockIndex *pindex = item.second;
-        // Re-derive rather than persist a flag: an index entry that commits to
-        // transactions while holding no data IS the commitment-only state, and
-        // the invariant relaxation has to be in place before the first
-        // CheckBlockIndex of the run, which happens during startup.
-        if (pindex->nTx > 0 && !(pindex->nStatus & BLOCK_HAVE_DATA) && !fHavePruned) {
-            fHaveCommitmentOnly = true;
-        }
         pindex->nChainWork = (pindex->pprev ? pindex->pprev->nChainWork : 0) + GetBlockProof(*pindex);
         pindex->nTimeMax = (pindex->pprev ? std::max(pindex->pprev->nTimeMax, pindex->nTime) : pindex->nTime);
         // We can link the chain of blocks for which we've received transactions at some point.
@@ -4871,6 +4864,22 @@ EXCLUSIVE_LOCKS_REQUIRED(cs_main)
                 pblocktree->ReadFlag("prunedblockfiles", fHavePruned);
                 if (fHavePruned)
                 LogPrintf("LoadBlockIndexDB(): Block files have previously been pruned\n");
+
+                // PERF: re-derive the commitment-only flag rather than persisting it.
+                // It must be set before the run's first CheckBlockIndex and it can
+                // only be derived once fHavePruned is known, because the two states
+                // are indistinguishable per block -- both are "nTx > 0, no data" --
+                // which is precisely why the real design needs a per-block bit
+                // instead of a global flag.
+                if (!fHavePruned) {
+                    for (const auto &entry : chainman.m_blockman.m_block_index) {
+                        const CBlockIndex *pindex = entry.second;
+                        if (pindex->nTx > 0 && !(pindex->nStatus & BLOCK_HAVE_DATA)) {
+                            fHaveCommitmentOnly = true;
+                            break;
+                        }
+                    }
+                }
 
                 // Check whether we need to continue reindexing
                 bool fReindexing = false;

@@ -2066,6 +2066,13 @@ an unbounded-backlog artefact from offering ~4× what could be relayed, which ma
 
 ### 2026-09-18 — acceptance-layer probe, phase B: the third outcome, and what the harness cannot reach
 
+> **CORRECTED — see the 18 Sep correction entry at the end of this log.** This entry's "no kill"
+> was claimed for the read-time model, in which `BLOCK_HAVE_DATA` stays set on a block whose body
+> cannot be read. That *is* a relaxation of `ConnectTip`'s guarantee that a selected block is
+> readable — the criterion's second named invariant — not an addition beside it. The accept-time
+> model that replaced it keeps the guarantee by construction, and makes the three gates this entry
+> describes unreachable.
+
 Plan item 0.1 phase B. A `HaveBodies(pindex)` predicate plus the three paths that were fatal in
 phase A, and one finding that cost a rebuild to see.
 
@@ -2120,6 +2127,12 @@ it cannot fill. Two consequences for the harness:
 likely to fire the kill criterion and the reason the single-node scenarios are unreachable.
 
 ### 2026-09-18 — acceptance-layer probe, phase B complete: the state already exists, for pruning
+
+> **CORRECTED — see the 18 Sep correction entry at the end of this log.** Three claims here are
+> wider than the evidence: the withheld block was **fully body-validated** before being withheld,
+> so this is the storage split and not the acceptance split; four of the six named scenarios were
+> not run; and "no consensus check was relaxed" answers a question the kill criterion does not
+> ask. The measurements stand; the verdict is restated in the correction.
 
 Plan item 0.1, phase B. Read-time withholding could not reach the interesting states, so the
 withhold flag now acts at **acceptance**: the chosen block is accepted with its commitments and
@@ -2193,3 +2206,152 @@ bit. The absence of that bit is visible in the log: the withheld block was re-re
 then dropped, because with only `BLOCK_HAVE_DATA` the download logic cannot tell "need commitments"
 from "need bodies". That is the design's bit-256 decision confirmed from the other direction, and
 it is the next increment.
+
+### 2026-09-18 — correction: what 0.1 actually established, after adversarial review
+
+An independent review of the phase B diff, briefed to attack the five claims rather than confirm
+them, found that three of them were wider than the evidence. Every finding below was verified
+against source before being accepted. The measurements in the two entries above stand; the verdict
+does not, as written.
+
+**1. The probe tested the storage split, not the acceptance split.** `AcceptBlock` runs `CheckBlock`
+and `ContextualCheckBlock` on the full body at `validation.cpp:AcceptBlock`, and the withholding
+branch is at the withholding branch below it. So the block that was accepted "commitment-only" had already passed every
+body-level check and earned `BLOCK_VALID_TRANSACTIONS` **honestly, from a body it held at that
+moment**. The design says this is exactly what production cannot do (§2.1: "the level cannot
+honestly be granted at accept time, so the validity ladder gains a rung"). The probe demonstrated
+an index and disk state; it did not demonstrate accepting a block whose transactions were never
+seen.
+
+This matters because of what happens next. Under the design's real rung there are two encodings
+and the probe tested neither:
+
+| encoding | consequence |
+|---|---|
+| `nTx` set from the commitment list, validity at the **new** rung | `validation.cpp:CheckBlockIndex` — `assert((VALID_MASK >= VALID_TRANSACTIONS) == (nTx > 0)); // This is pruning-independent` — fires. That is the `nTx > 0 ⇒ VALID_TRANSACTIONS` link the kill criterion **names**, and it is a third relaxation on the named chain |
+| `nTx` left at 0 until bodies arrive | commitment-only becomes indistinguishable from header-only for chain selection; none of the probe's relaxations are needed; `nChainTx` does not count commitments, and the "count, not possession" property is never exercised |
+
+**2. The verdict, restated honestly.** Still not a kill — but "no consensus check was relaxed" and
+"the assertions are debug-gated" both answer questions the criterion does not ask. It asks whether
+a scenario requires *relaxing* an invariant that catches database corruption — naming
+`CheckBlockIndex`'s chain and `ConnectTip`'s guarantee — *rather than adding a state alongside it*.
+`CheckBlockIndex` is debug-gated (`chainparams.cpp` enables it by default only for regtest), but
+the criterion named it knowing that. The real distinction is the one the criterion draws:
+
+- A **global flag** that turns the `nTx`/`HAVE_DATA` equivalence off for every block for the life
+  of the datadir — what the probe did — **is a relaxation**. A lost status bit or an unwritten
+  block file now reads as commitment-only, which is the corruption class the invariant exists to
+  catch.
+- A **per-block bit**, making the assertion `!HAVE_DATA == (nTx == 0 || COMMITMENT_ONLY)`, is
+  **a state alongside** — which the criterion explicitly permits.
+
+So the honest verdict is: **one bit plus one rung is a cost signal, not a kill.** That is the
+criterion's own escape hatch, and it is the design's existing bit-256 plan. The probe's global flag
+was a shortcut, and should not be read as the shape of the fix.
+
+**3. Scenario accounting, which the completion entry did not give.** Six were named. What ran:
+
+| scenario | status |
+|---|---|
+| restart while incomplete | **run** — comes up on the validated tip |
+| reorg across an incomplete block | **not run.** F-29 retired a *different* case — an incomplete block *below* the tip. The named one is reachable: node on chain A, competing chain B contains a commitment-only block, B's bodies arrive, disconnect A and connect B |
+| peer churn mid-fetch | not run |
+| competing tip at equal work | not run — and see finding 6, which makes it a behavioural change rather than a neutral case |
+| ChainLock on an incomplete block | not run |
+| `-reindex` | not run |
+
+Also run, unnamed: arrival, a body gap under held blocks, two gaps in one chain, re-arm on arrival,
+and RPC behaviour. `build-plan.md`'s "four scenarios pass" is against a subset, and the criterion's
+pass condition is "all scenarios reaching …".
+
+**4. The read-time gates are artefacts of the read-time model.** Under accept-time withholding
+`BLOCK_HAVE_DATA` is never set, so `FindMostWorkChain` never selects the block, so `ConnectTip`'s
+`HaveBodies` check is unreachable, `SetBodiesMissing` is never called, and `ThreadImport`'s new
+branch is never taken. **Restart passed because chain selection declined the chain, not because of
+that plumbing** — the earlier entry credited the wrong mechanism. And in the read-time model those
+gates were live *precisely because* `HAVE_DATA` was set on unreadable blocks, which is the
+criterion's second named invariant being relaxed rather than extended. The accept-time model keeps
+that guarantee by construction, and the design must keep it the same way: **whatever bit means
+"bodies held" must be the bit `FindMostWorkChain` tests.**
+
+**5. "Chain selection needed no changes" is encoding-dependent.** It holds only because the probe
+made `BLOCK_HAVE_DATA` mean "bodies held". Under the design's separate bit, `FindMostWorkChain`
+must test the new bit — a change, however small. The pruning machinery is still the right
+precedent; it is not a free ride.
+
+**6. One behavioural change in the diff, and it is not from the relaxations.**
+`ReceivedBlockTransactions` assigns `nSequenceId` inside its descendant walk, and
+`CBlockIndexWorkComparator` breaks **equal-work ties by lower `nSequenceId`** (`validation.cpp:CBlockIndexWorkComparator::operator`,
+"earliest time received"). Calling it a second time when bodies arrive re-stamps the block and its
+whole descendant subtree, so a branch whose commitments arrived first but bodies second loses a tie
+it would have won on an unmodified node; `PreciousBlock`'s deliberately negative id is overwritten
+too. This is the "competing tip at equal work" scenario, named twice and never run.
+
+**7. `nTx != 0` is read as "we had this block and pruned it" at two sites the sweep missed.**
+`validation.cpp:AcceptBlock` drops an unrequested block, and `net_processing.cpp:FindNextBlocksToDownload` treats a compact
+block for such an entry as already-had, falling back to `getdata` only when it was already in
+flight. So a body arriving by compact-block relay — the mainline path — or unsolicited is
+discarded. The probe's re-arm went through the requested path only.
+
+**8. And the same property that makes candidacy work is what strands the fetch.**
+`net_processing.cpp:FindNextBlocksToDownload` advances `pindexLastCommonBlock` past any block with `HAVE_DATA` whose
+`HaveTxsDownloaded()` is true. Blocks above a commitment-only block satisfy both — *because*
+`nChainTx` counted the commitment-only block's commitments — so the download cursor jumps over the
+gap and never returns to it. That is the observed "re-requested twice, then dropped". The "count,
+not possession" property is therefore not the free win it was written up as: it makes candidacy
+work and it makes the fetch skip, and 1.3 owes a fix at line 804.
+
+**9. Two further states the probe never reached**, both predicted from source and neither
+constructible in a single-peer, in-order harness:
+
+- **Out-of-order body arrival.** `ReceivedBlockTransactions` inserts into `m_blocks_unlinked`
+  whenever the parent is not `HaveTxsDownloaded()`, regardless of whether bodies were held. A
+  commitment-only block whose parent's commitments have not arrived lands there with no
+  `HAVE_DATA`, and `validation.cpp:CheckBlockIndex` — `if (!(HAVE_DATA)) assert(!foundInUnlinked)` —
+  fires. `LoadBlockIndex` reproduces the same insert at startup. The design fetches from many peers
+  with several blocks in flight, so this is the *normal* case, not an edge one. Settling it needs a
+  two-peer harness where one peer stalls.
+- **ChainLock enforcement across a gap.** `EnforceBestChainLock` runs every scheduler tick and
+  `assert(false)`s if `MarkConflictingBlock` fails. With a commitment-only block on the chainlocked
+  chain the tip sits at the fork, and each tick re-inserts the block and its descendants as
+  candidates (they pass `IsValid(TRANSACTIONS) && HaveTxsDownloaded()`) for `FindMostWorkChain` to
+  evict again — a rebuild/evict loop for as long as the bodies are missing. Not a wedge; a cost
+  1.3's retry schedule has to absorb.
+
+**10. Two fixes applied on the strength of this review.** The load-time derivation was dead code:
+`fHavePruned` is read from the database *after* `LoadBlockIndex` returns, so inside that loop it is
+always false and a pruned node would have set the new flag on every pruned block. It now runs where
+both facts are known. And extending `IsBlockPruned()` was a mistake — `GetBlockChecked`'s own
+second branch already answers this state truthfully ("Block not found on disk", with a comment
+describing exactly it), so the extension replaced a true message with a false one and no caller
+decides anything on the result. Reverted; `getblock` on a withheld block now gives the honest
+message. 1.3 should add an `IsCommitmentOnly` predicate rather than overload this one, or a fetch
+scheduler that skips `IsBlockPruned` blocks will skip commitment-only ones.
+
+**11. F-29 is conditional, and one sentence of it was wrong.** "Bodies are required to disconnect"
+is confirmed: `CTxUndo` is `vector<Coin> vprevout` — spent prevouts only (`undo.h:CTxUndo`) — and
+`DisconnectBlock` needs the body to match `vtxundo.size()+1 == vtx.size()`, to run
+`UndoSpecialTxsInBlock`, to undo assets, and to spend the created outputs. But "cannot arise"
+depends on the design's own §6 promise that the retention window covers full reorg depth, so it
+should read **settled given §6**. Two consequences that were not priced: `MIN_BLOCKS_TO_KEEP = 288`
+(`validation.h:MIN_BLOCKS_TO_KEEP`) is below §6's 720-block floor, so `-prune` and decoupling conflict as written;
+and a reorg deeper than the window is the pruning failure mode today. The claim that a failed
+disconnect is graceful was **wrong at the caller**: `ActivateBestChainStep` answers a failed
+`DisconnectTip` with `AbortNode` ("we should abort rather than stay on a less work chain"), and
+`EnforceBestChainLock` answers a failed `MarkConflictingBlock` with `assert(false)`. The chainstate
+is untouched, because the read precedes the mutation; the process is not.
+
+**12. `-reindex` was named and not run, and from source it orphans the bodies above a gap.**
+`LoadExternalBlockFile` parks a block whose parent is unknown in a call-local
+`mapBlocksUnknownParent` and processes it only if the parent turns up in the same pass. After
+`-reindex` a commitment-only block has no file entry, so every body above it is never indexed and
+is re-downloaded and written a second time. `-reindex-chainstate` touches only connected blocks and
+is fine under bodies-required.
+
+**What 0.1 established, stated to the evidence.** Chain selection can hold a block it cannot
+complete, without condemning it, and pick it up when the rest arrives — demonstrated, through one
+arrival path, for a block that had been body-validated, under an encoding where `HAVE_DATA` means
+bodies held. The pruning machinery is the right precedent and carries most of that half. What is
+untouched: the validity rung, the persisted bit, out-of-order arrival, the unrequested and
+compact-block arrival paths, `-reindex`, ChainLock enforcement, equal-work ties, and every
+retention interaction.
