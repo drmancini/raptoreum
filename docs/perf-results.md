@@ -2534,3 +2534,58 @@ Two notes for whoever runs these next. They need **Python 3.11** — `test_frame
 imports `asyncore`, removed in 3.12, and mario's default is 3.13; `~/.pyenv/versions/3.11.9/bin/python3`
 works. And rebuild before running: switching branches leaves a binary from the *other* branch in
 `src/`, and the first attempt here was about to test probe code against rig-branch source.
+
+### 2026-09-18 — 0.4: quorums, ChainLocks and InstantSend live on the WAN swarm
+
+Plan item 0.4 delivered. Twelve hosts across the US, EU and Asia; ten live smartnodes; a quorum of
+eight. What now works, in order of what had to be true first:
+
+| | result |
+|---|---|
+| quorum formation | `llmq_test` **and** `llmq_test_v17` formed at quorum height 1230 — 8 members, **8/8 contributions**, zero complaints, **8/8 premature commitments**, commitment mined at stage 11 |
+| ChainLocks | first lock at height **1249**, a few blocks after the quorum became signing-eligible |
+| InstantSend | a transaction islocked **immediately** on submission |
+
+**The measurement 0.4 exists for: a DKG phase needs about 15 seconds over real WAN latency.** Three
+earlier attempts gave the contribute phase about *one* second and failed identically, with
+`badMembers 7, receivedContributions 1` every time. That is the finding, and it is invisible
+locally: on regtest the phase is derived purely from tip height, `SleepBeforePhase` returns
+immediately under `MineBlocksOnDemand`, and `VerifyAndComplain` marks every member whose
+contributions are still empty as bad **with no second chance**. Contributions do not broadcast
+either — `Init` builds `relayMembers` as a ring where member *i* pushes to *i+1* and *i+2*, and each
+hop costs INV → GETDATA → QCONTRIB plus a BLS verify, so the far side of an eight-member ring is
+four hops. Mining a 30-block window in under a minute cannot work. `dkg-pace.py` mines two blocks
+per phase and gates on what the phase is supposed to produce.
+
+**What this does to every earlier swarm figure.** All of them were explicitly upper bounds because
+nothing was paying for smartnode work. That caveat can now be retired measurement by measurement:
+the swarm carries DKG traffic, ChainLock signing and per-node islock verification for real.
+
+**Five traps, each of which cost real time and all of which are now in the tooling.**
+
+1. **Sporks 2/3/19 on with no InstantSend quorum empties every block.** `miner.cpp` gates on
+   `CChainLocksHandler::IsTxSafeForMining`, which skips every non-islocked transaction younger than
+   ten minutes. Enabling those sporks to get DKG running is what caused 119 consecutive
+   coinbase-only blocks — and then the empty blocks were chased as a separate mystery. Turn 17, 23
+   and 25 on; leave 2, 3 and 19 off until a quorum exists, then 19, then 2, then 3.
+2. **An all-smartnode mesh restarted together deadlocks permanently.** `net.cpp` refuses inbound
+   connections while `fSmartnodeMode && !smartnodeSync.IsSynced()`, and sync needs peers. Every
+   node refuses every other node, forever. Needs a **non-smartnode seed** plus **staggered starts**;
+   a plain `swarmctl stop && start` kills the whole mesh.
+3. **MNAUTH is one-way on links formed at restart.** It is sent once at VERACK and dropped on
+   receipt if the receiver is not yet blockchain-synced, with no retry — so a simultaneous restart
+   leaves links where only one side is verified, and DKG INVs only go to verified members.
+   Disconnecting 18 such links took verified peers per node from a handful to 9-13.
+4. **The funder cannot be a smartnode.** `You can not start a smartnode with wallet enabled` is a
+   hard refusal, so the wallet lives on a node *outside* the registered set. And anything registered
+   but not running as a smartnode still gets selected and contributes nothing — both the wallet node
+   and an inbound-unreachable host had to be deregistered by spending their collateral.
+5. **A config written to the wrong path reports success.** `smartnode-bringup` wrote
+   `$base/raptoreum.conf` where the node reads `$base/data/raptoreum.conf`; `grep` failed, `printf`
+   appended, `mv` succeeded, and the stage reported twelve nodes configured while changing nothing.
+
+Plus one tooling defect that masqueraded as a node fault: `swarmctl.sh`'s `cli()` passed `$*`
+unquoted to the remote shell, so every JSON argument arrived mangled and `createrawtransaction`
+failed with a parse error from the node. Fixed by quoting each argument; `sw` is now the single
+cwd-independent entry point, because a missing `conf/use.conf` silently empties the rpcpassword and
+every RPC then reports missing credentials as if the node were down.
