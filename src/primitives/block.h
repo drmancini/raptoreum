@@ -123,9 +123,15 @@ public:
  * held an identifier for the coinbase too, a separate rule would be needed to tie
  * the carried transaction to that identifier; this way there is nothing to tie.
  *
- * What this form CAN certify on its own is the commitment-checkable half of
+ * What this form COULD certify on its own is the commitment-checkable half of
  * BLOCK_VALID_TRANSACTIONS: proof of work, the merkle root, size, the coinbase in
  * every respect. What it cannot is anything about the transactions it only names.
+ *
+ * "Could", not "does". ComputeMerkleRoot() and HasDuplicateIdentifiers() below
+ * implement two of those rules and NOTHING IN PRODUCTION CALLS EITHER -- the
+ * enforcement point is the validity rung, which is item 1.3. Until then this type
+ * certifies nothing, and in particular no code compares the identifier list
+ * against the header's hashMerkleRoot, which is the only thing binding the two.
  */
 class CCommitmentBlock : public CBlockHeader {
 public:
@@ -138,6 +144,13 @@ public:
     )
     {
         READWRITEAS(CBlockHeader, obj);
+        if (!ser_action.ForRead() && obj.coinbase == nullptr) {
+            // SetNull() and the default constructor both leave coinbase null, and
+            // the shared_ptr serializer dereferences unconditionally. This is the
+            // design's wire type, so a programming error here would be a fault in
+            // a node rather than a rejected message -- refuse instead.
+            throw std::ios_base::failure("CCommitmentBlock: refusing to serialize a null commitment block");
+        }
         READWRITE(obj.coinbase);
         READWRITE(obj.vCommitments);
     }

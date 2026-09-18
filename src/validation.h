@@ -456,12 +456,17 @@ bool ReadBlockFromDisk(CBlock &block, const CBlockIndex *pindex, const Consensus
 /** Read a block's commitment form: header, coinbase in full, and one 32-byte
  *  identifier per remaining transaction.
  *
- *  Distinct from ReadBlockFromDisk by CONTRACT, not merely by return type. A node
- *  must be able to answer for its commitments while holding no bodies at all --
- *  that asymmetry is the state the whole design creates, so the two reads cannot
- *  be one function with a flag. Concretely, this one deliberately does not consult
- *  the body-withholding predicate ReadBlockFromDisk honours: withheld bodies fail
- *  the materialising read and must not fail this one.
+ *  Distinct from ReadBlockFromDisk by CONTRACT, not merely by return type: a node
+ *  that cannot produce a block's bodies must still be able to answer for its
+ *  commitments, so the two reads cannot be one function with a flag.
+ *
+ *  What is implemented here is the BOUNDARY, not yet that contract (R-30). This
+ *  reads the stored block whole and projects, and GetBlockPos() returns a null
+ *  position without BLOCK_HAVE_DATA, so for a genuinely body-less block it fails
+ *  exactly as the materialising read does. What it does do today is decline to
+ *  consult the body-withholding predicate ReadBlockFromDisk honours -- which is
+ *  what the unit test pins, and is a simulation of the asymmetry rather than the
+ *  asymmetry itself.
  *
  *  Today every block on disk is stored whole, so the implementation projects from
  *  the stored block. When the body store lands the projection is replaced; callers
