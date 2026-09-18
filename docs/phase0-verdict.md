@@ -129,17 +129,34 @@ price. The calendar does not honestly shrink until RTM answers the question belo
 
 ## What is still open
 
-**One decision, and it is not ours.** Un-batched InstantSend cannot reach the design point, and
-batching it is not an engineering task: a threshold signature needs every member signing the *same*
-message, while peers hold divergent mempools — so batch composition must be agreed across those
-mempools *before* signing, which means a proposer-per-slot protocol and imports the
-manufactured-split problem into InstantSend. **Dash never built this.** It is currently scheduled
-*after* activation while being described as a prerequisite of the design point.
+**One decision, and it is not ours.** Un-batched InstantSend, **as implemented**, cannot reach the
+design point: at 300 tx/s the single thread that signs, recovers and verifies is saturated.
 
-Three options, and RTM owns the choice:
+**But the ceiling is probably not cryptographic, and that reopens the options.** Recovery measures
+**3 ms median** (F-70) and a BLS sign is about 1 ms, so the per-session crypto is ~4 ms against an
+observed ~34 ms — roughly **88% of the thread is doing something other than cryptography**. The
+suspects are all implementation: 22 `LOCK(cs)` sites on one mutex with the network threads
+contending for it, a single work thread while the machine idles, and an unbounded `pendingSigns`
+that queues backlog rather than shedding it. **What that cause actually is has not been
+established** (F-71) — only that it is not the crypto.
+
+If it is contention and loop structure, the gap between 29 sessions/s and the ~250/s the crypto
+alone would allow is **engineering**, and stage 1 may be reachable without a new protocol at all.
+
+The batching route remains genuinely hard, which is why it should not be chosen by default: a
+threshold signature needs every member signing the *same* message, while peers hold divergent
+mempools — so batch composition must be agreed across those mempools *before* signing, which means
+a proposer-per-slot protocol and imports the manufactured-split problem into InstantSend. **Dash
+never built this.**
+
+Four options, and RTM owns the choice:
+
+0. **Fix the signing pipeline first** — time the four steps of `WorkThreadMain`, then parallelise or
+   de-contend. Half a day to measure, and it may remove the need for the three below. **Do this
+   before deciding anything else.**
 
 1. **5.2 rides the fork** — months onto the critical path, for a protocol with no reference
-   implementation.
+   implementation. Only worth considering if option 0 fails.
 2. **5.2 trails the fork** — the design point ships with InstantSend at single-digit coverage and
    ten-minute delays on everything else.
 3. **InstantSend stays off at activation** — which deletes 5.2, the mempool sizing, the per-node

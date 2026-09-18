@@ -2826,3 +2826,47 @@ before a prune removed anything.
 So a pruning test that mines a few hundred blocks, calls `pruneblockchain`, and proceeds is
 characterising an **unpruned** chain while every RPC says it succeeded. The test now drives to the
 condition in a loop and asserts on `pruneheight` rather than on the call's return value.
+
+### 2026-09-18 — correction: the InstantSend ceiling is not cryptographic
+
+I attributed the ~34 ms per signing session to BLS threshold recovery. That was an inference from
+"recovery is the only expensive-looking call in the loop", and it is **wrong**.
+
+`CSigSharesManager::TryRecoverSig` already times itself — there is a `cxxtimer::Timer` in it and it
+logs `recovered signature ... time=` — so the measurement existed in the swarm's own logs the whole
+time. Extracted from the InstantSend run, 350 recovery events on `use`:
+
+| | ms |
+|---|---|
+| min | 2 |
+| **median** | **3** |
+| p90 | 3 |
+| max | 19 |
+| mean | 2.7 |
+
+**Recovery is cheap.** Per session the crypto is roughly one BLS sign (~1 ms) plus, for sessions that
+complete, ~3 ms of recovery — call it 4 ms. The observed rate is ~29 shares/s against ~260/s
+requested, which implies **~34 ms per session**. So **about 88% of the saturated thread is not doing
+cryptography at all.**
+
+**What that changes.** The ceiling looks like an *implementation* limit, not a protocol one:
+
+- `CSigSharesManager` has **22 `LOCK(cs)` sites in one file**, and `SignPendingSigShares` calls
+  `ProcessSigShare` — which takes that lock — once per queued item, while the network threads are
+  contending for the same mutex at the inbound announcement rate.
+- The work is serialised on a **single** thread (`workThread = std::thread(...)`, created once) while
+  the machine idles at 209-245% of one core.
+- `pendingSigns` is **unbounded** (`emplace_back`, no cap, drained by `std::move`), so demand above
+  capacity queues rather than drops: ~230 sessions/s of backlog growth, which is where the memory
+  goes.
+
+If ~30 ms per session is contention and loop overhead rather than crypto, then the gap between 29/s
+and the ~250/s the crypto alone would allow is **engineering, not protocol** — and stage 1's 520 tx/s
+may be reachable without 5.2 at all. That is a materially different message for RTM than "you need a
+batching protocol nobody has built".
+
+**What would settle it**, and it is half a day: time the four steps of
+`CSigSharesManager::WorkThreadMain` — `ProcessPendingRecoveredSigs`, `ProcessPendingSigShares`,
+`SignPendingSigShares`, `SendMessages` — and report where the 34 ms goes. Recovery is already
+timed; the other three are not. Until that runs, "the ceiling is not cryptographic" is supported by
+arithmetic and the recovery measurement, and the specific cause is **not** established.
