@@ -13,8 +13,14 @@ aliases() { rows | awk '{print $1}'; }
 cli() {  # cli <alias> <rpc args...>
   local a=$1; shift
   local t b; t=$(ssh_of "$a"); b=$(base_of "$a")
+  # Quote every argument for the REMOTE shell. Passing $* unquoted works for
+  # simple RPCs and silently mangles any argument containing JSON, spaces or
+  # quotes -- createrawtransaction arrives as garbage and the error reads like
+  # a node problem rather than a quoting one.
+  local q="" x
+  for x in "$@"; do q="$q $(printf '%q' "$x")"; done
   timeout 60 ssh -o BatchMode=yes -o ConnectTimeout=10 "$t" \
-    "$b/bin/raptoreum-cli -regtest -datadir=$b/data -rpcport=19898 -rpcuser=swarm -rpcpassword=$PW $*" 2>&1
+    "$b/bin/raptoreum-cli -regtest -datadir=$b/data -rpcport=19898 -rpcuser=swarm -rpcpassword=$PW$q" 2>&1
 }
 
 each() {  # each <function> -- run across all nodes in parallel
