@@ -145,20 +145,34 @@ the state root optional.
 body figure behind every storage and bandwidth number here could be off by up to 27× once the
 contract layer's new transaction type is specified.
 
+> **SCOPE, standing (owner, 2026-09-18).** Mainnet's current spork configuration is
+> **deliberate and temporary**: InstantSend is switched off on purpose and **will be switched
+> on**, and the quorum layer is broken and **will be fixed before decoupling**. Neither is this
+> project's scope. **Design for sporks 2, 3 and 19 all on, mempool signing enabled, and healthy
+> quorums** — the measurement below records what is *currently observable*, not what to design
+> against, and nothing in this plan may be descoped on the strength of it.
+
 **Answered by 0.3 on 2026-09-18** (mainnet spork state read from a production node; see
 `perf-results.md`). Sporks **2 and 19 are ON, 3 is OFF**, and InstantSend mempool signing is off
-because spork 2 carries a timestamp rather than `0`. So three items that were priced as real are
-**inert as mainnet is configured**: the ChainLock safety walk is skipped, so convergence is not
-mandatory for ChainLock signers; there is no ten-minute mining gate, so the 459 MB `maxmempool`
-figure loses its driver and burst volume is the only one; and no islocks are produced except
-retroactively, so per-node islock verification is **latent** — it arrives the moment spork 2's
-value is set to `0`, and that is also why it cannot be switched on at the design point without
-5.2.
+because spork 2 carries a timestamp rather than `0`. Three costs are therefore **not measurable on
+mainnet today** — the ChainLock safety walk is skipped, there is no ten-minute mining gate, and
+no islocks are produced outside the retroactive path — but per the scope note above, **all three
+are real for the design** and stay fully priced:
 
-**And 0.3 found something outside its brief: ChainLocks have not formed in ~14 months.** Best
-chainlock height 1,122,354 against a tip of 1,432,200 — 309,846 blocks, with the tip reading
-`chainlock: false` — while spork 19 has been on since May 2024. One node's view, corroborated by
-the tip but not yet by a second host. Three candidate causes are recorded in `perf-results.md`,
-with `SPORK_25_QUORUM_POSE` being off as the cheapest explanation. **This reorders nothing in the
-plan yet, but it raises the prior that the LLMQ layer needs work before decoupling adds load to
-it, and 3.1's justification should be re-read once the stall is diagnosed.**
+| cost | why it binds under the designed configuration |
+|---|---|
+| **every ChainLock-signing smartnode must converge** | with spork 3 on, `TrySignChainTip` refuses to sign a tip holding any transaction that is not islocked and is younger than 600 s, and `txAge` is 0 when the txid is absent entirely. Mainnet rotates a 200/400-member quorum, so in practice that is every smartnode. |
+| **`maxmempool` sized with the mining gate** | ≥459 MB at 520 tx/s once `IsTxSafeForMining` holds unlocked transactions for ten minutes, against a 300 MB default |
+| **per-node islock BLS verification** | `ProcessPendingInstantSendLocks` gates on `IsInstantSendEnabled` only, with no smartnode check — ≥1.15 ms per message, 0.6 of a core at 520 tx/s and 2.4 cores at 2,083, on the single `rtm-isman` thread |
+
+**So 5.2 (batched attestation) is a prerequisite of the design point, not a phase-5 option.**
+Mempool signing at 520 tx/s needs roughly 27× the measured signing capacity, so the batching that
+5.2 builds is what makes InstantSend survivable at any point on the 2-8 MB range. It stays
+numbered in phase 5 because that is where its design work sits, but it is required, not
+conditional.
+
+0.3 also observed that ChainLocks have not formed in ~14 months (best chainlock 1,122,354 against
+a tip of 1,432,200). **That is the known broken quorum layer, it is out of scope here, and RTM
+will fix it before decoupling.** It is recorded only because it is why the quorum-dependent
+figures above cannot be measured on mainnet today — which is what 0.4's swarm bring-up exists to
+work around.

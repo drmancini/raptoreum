@@ -1836,3 +1836,17 @@ making a condition schedulable in a mechanism that is currently not running at a
 its urgency and raises the prior that the LLMQ layer needs work before decoupling adds load to
 it. The DIP8 signing-attempts process (plan item 3.1) keeps its place, but its justification
 should be re-read once the stall is diagnosed: it may be the fix, or it may be unrelated.
+
+> **SCOPE CORRECTION (owner, 2026-09-18), applying to the entry above.** The spork readings stand
+> as measured. The *conclusions* drawn from them do not: mainnet's configuration is **deliberate
+> and temporary**. InstantSend is switched off on purpose and **will be switched on**; the quorum
+> layer is broken and **will be fixed before decoupling**. Neither is this project's scope, and
+> nothing may be descoped because it is currently unobservable.
+>
+> So read the entry as "why these costs cannot be measured on mainnet today", not as "these costs
+> are not real". Under the designed configuration — sporks 2, 3 and 19 on, mempool signing
+> enabled, healthy quorums — the safety walk runs (so every ChainLock-signing smartnode must
+> converge), the ten-minute mining gate applies (so `maxmempool` is gate-sized), and every full
+> node verifies every islock. The ChainLock stall is recorded here for one reason only: it is why
+> 0.4's swarm bring-up, rather than mainnet observation, is the route to quorum measurements.
+> **Do not open a diagnosis of it.**
