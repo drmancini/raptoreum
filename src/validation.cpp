@@ -2282,6 +2282,27 @@ bool CChainState::ConnectBlock(const CBlock &block, CValidationState &state, CBl
         nLockTimeFlags |= LOCKTIME_VERIFY_SEQUENCE;
     }
 
+    // 1.3.2 (F-44, Mike, 2026-09-19): the connect-time home for the two
+    // commitment-checkable rules that otherwise have none once the rung
+    // grants BLOCK_VALID_TRANSACTIONS without re-invoking ContextualCheckBlock
+    // (D-16) -- absolute nLockTime finality (bad-txns-nonfinal) and
+    // transaction type/version (bad-txns-type/bad-txns-cb-type/bad-txns-oversize,
+    // via ContextualCheckTransaction). Mirrors ContextualCheckBlock's own
+    // nLockTimeCutoff derivation exactly -- a DIFFERENT flag/cutoff pair from
+    // nLockTimeFlags/LOCKTIME_VERIFY_SEQUENCE just above, which governs BIP68
+    // relative locktimes and already has its own connect-time enforcement
+    // (the SequenceLocks call in the loop below). Gated by
+    // g_commitmentBudgetActive, matching D-14's "one fork" activation for
+    // every other 1.x rule -- test-only until 4.6 has a real bit, so this is
+    // provably inert on any real chain today.
+    int nLockTimeFlagsAbsolute = 0;
+    if (chainparams.GetConsensus().BIPCSVEnabled) {
+        nLockTimeFlagsAbsolute |= LOCKTIME_MEDIAN_TIME_PAST;
+    }
+    int64_t nLockTimeCutoffAbsolute = (nLockTimeFlagsAbsolute & LOCKTIME_MEDIAN_TIME_PAST) && pindex->pprev != nullptr
+                                      ? pindex->pprev->GetMedianTimePast()
+                                      : block.GetBlockTime();
+
     // Get the script flags for this block
     unsigned int flags = GetBlockScriptFlags(pindex, chainparams.GetConsensus());
 
@@ -2445,6 +2466,22 @@ bool CChainState::ConnectBlock(const CBlock &block, CValidationState &state, CBl
         if (nSigOps > MaxBlockSigOps(fDIP0001Active_context, g_commitmentBudgetActive))
             return state.DoS(100, error("ConnectBlock(): too many sigops"),
                              REJECT_INVALID, "bad-blk-sigops");
+
+        // 1.3.2 (F-44): the connect-time home for absolute nLockTime
+        // finality and type/version, on every transaction including the
+        // coinbase -- exactly ContextualCheckBlock's own per-tx loop,
+        // relocated here since D-16 grants BLOCK_VALID_TRANSACTIONS without
+        // re-invoking ContextualCheckBlock. See the nLockTimeCutoffAbsolute
+        // comment above for why this is a separate flag/cutoff pair from the
+        // BIP68 one already enforced below via SequenceLocks.
+        if (g_commitmentBudgetActive) {
+            if (!IsFinalTx(tx, pindex->nHeight, nLockTimeCutoffAbsolute))
+                return state.DoS(10, error("ConnectBlock(): non-final transaction"),
+                                 REJECT_INVALID, "bad-txns-nonfinal");
+            if (!ContextualCheckTransaction(tx, state, chainparams.GetConsensus(), pindex->pprev))
+                return error("%s: ContextualCheckTransaction: %s, %s", __func__, tx.GetHash().ToString(),
+                             FormatStateMessage(state));
+        }
 
         txdata.emplace_back(tx);
         if (!tx.IsCoinBase()) {
@@ -4655,6 +4692,38 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock> &pblock, CVali
         // low-work blocks on a fake chain that we would never
         // request; don't process these.
         if (pindex->nChainWork < nMinimumChainWork) return true;
+    }
+
+    // 1.3.2 (F-83, Mike, 2026-09-19): validate the commitment-level facts --
+    // the merkle root over Identifiers(), identifier uniqueness, the coinbase
+    // and its founder payment, coinbase finality, DIP3 type -- BEFORE any
+    // per-transaction work runs, and critically before nTx/nChainTx/HAVE_DATA
+    // are ever recorded below (F-83's ordering trap: a bad list must be
+    // re-requested, not treated as a poisoned header). Gated by
+    // g_commitmentBudgetActive, matching D-14's "one fork" activation for
+    // every other 1.x rule -- test-only until 4.6 has a real bit.
+    //
+    // Nothing yet delivers a genuine standalone CCommitmentBlock over the
+    // wire (that split is phase 2's fetch protocol, F-83's own scoping); this
+    // derives one from the full block via CommitmentsFromBlock() so the
+    // ACCEPTANCE LOGIC is exercised exactly as it will run once a real
+    // commitment-only arrival exists -- only the "how do we get a
+    // CCommitmentBlock" step changes later, not this call or its ordering.
+    // CheckCommitmentBlock's rules are a strict subset of CheckBlock's own
+    // commitment-checkable rows, so a block that would pass CheckBlock passes
+    // this too; the value today is catching a bad commitment-level property
+    // at the cheapest possible check, before any per-transaction work, with
+    // the corruption semantics H-1 already fixed.
+    if (g_commitmentBudgetActive) {
+        CCommitmentBlock commitmentView = CommitmentsFromBlock(block);
+        if (!CheckCommitmentBlock(commitmentView, state, chainparams.GetConsensus(), pindex->nHeight) ||
+            !ContextualCheckCommitmentBlock(commitmentView, state, chainparams.GetConsensus(), pindex->pprev)) {
+            if (state.IsInvalid() && !state.CorruptionPossible()) {
+                pindex->nStatus |= BLOCK_FAILED_VALID;
+                setDirtyBlockIndex.insert(pindex);
+            }
+            return error("%s: %s", __func__, FormatStateMessage(state));
+        }
     }
 
     if (!CheckBlock(block, state, chainparams.GetConsensus(), pindex->nHeight) ||
