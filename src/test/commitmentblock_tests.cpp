@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <consensus/merkle.h>
+#include <consensus/validation.h>
 #include <primitives/block.h>
 #include <protocol.h>
 #include <chainparams.h>
@@ -406,6 +407,145 @@ BOOST_AUTO_TEST_CASE(a_commitment_read_refuses_bytes_that_are_not_the_indexed_bl
     tip->nDataPos = savedPos;
     // and the restore must leave the read working, or the check above proved nothing
     BOOST_CHECK(ReadCommitmentBlockFromDisk(c, tip, params));
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+// 1.3.2 (F-83, Mike, 2026-09-19): CheckCommitmentBlock/ContextualCheckCommitmentBlock,
+// the validation entry point that was entirely missing -- ComputeMerkleRoot()
+// and HasDuplicateIdentifiers() had zero production callers until this. Real,
+// validly-mined blocks from TestChain100Setup are used throughout rather than
+// hand-built ones, so every test starts from a genuinely DIP3-correct
+// coinbase (nType, nVersion) and a real founder-payment-exempt height
+// (regtest's founder payment only starts at 500) -- getting those details
+// right by hand, for every test, would risk the tests passing for the wrong
+// reason.
+BOOST_FIXTURE_TEST_SUITE(checkcommitmentblock_tests, TestChain100Setup)
+
+static CCommitmentBlock RealCommitmentBlock(int *outHeight) {
+    const CBlockIndex *pindex = ::ChainActive().Tip();
+    CBlock whole;
+    BOOST_REQUIRE(ReadBlockFromDisk(whole, pindex, Params().GetConsensus()));
+    *outHeight = pindex->nHeight;
+    return CommitmentsFromBlock(whole);
+}
+
+BOOST_AUTO_TEST_CASE(checkcommitmentblock_accepts_a_genuine_block) {
+    int height;
+    CCommitmentBlock c = RealCommitmentBlock(&height);
+
+    CValidationState state;
+    BOOST_CHECK(CheckCommitmentBlock(c, state, Params().GetConsensus(), height,
+                                     /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "");
+
+    const CBlockIndex *pindexPrev = ::ChainActive().Tip()->pprev;
+    CValidationState state2;
+    BOOST_CHECK(ContextualCheckCommitmentBlock(c, state2, Params().GetConsensus(), pindexPrev));
+    BOOST_CHECK_EQUAL(state2.GetRejectReason(), "");
+}
+
+BOOST_AUTO_TEST_CASE(checkcommitmentblock_rejects_a_null_block) {
+    CCommitmentBlock c;   // default-constructed: SetNull(), coinbase == nullptr
+    BOOST_REQUIRE(c.IsNull());
+
+    // fCheckPOW=false: a null header's zero-valued fields fail the PoW check
+    // first, which would test CheckBlockHeader's own reject reason ("high-hash")
+    // rather than the bad-cb-missing rule this test targets.
+    CValidationState state;
+    BOOST_CHECK(!CheckCommitmentBlock(c, state, Params().GetConsensus(), 1,
+                                      /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-cb-missing");
+}
+
+// A malicious peer controls the wire form of this field -- the C++ type
+// alone does not guarantee it. Checked before the merkle root, so an
+// otherwise-consistent (root still matches the OLD coinbase) block is
+// rejected here, not waved through to a root-mismatch instead.
+BOOST_AUTO_TEST_CASE(checkcommitmentblock_rejects_a_non_coinbase_in_the_coinbase_field) {
+    int height;
+    CCommitmentBlock c = RealCommitmentBlock(&height);
+
+    CMutableTransaction notCoinbase;
+    notCoinbase.vin.resize(1);
+    notCoinbase.vin[0].prevout = COutPoint(uint256S("1"), 0);   // non-null: not a coinbase
+    notCoinbase.vout.resize(1);
+    notCoinbase.vout[0].nValue = 1000;
+    notCoinbase.vout[0].scriptPubKey = CScript() << OP_TRUE;
+    c.coinbase = MakeTransactionRef(notCoinbase);
+    BOOST_REQUIRE(!c.coinbase->IsCoinBase());
+
+    CValidationState state;
+    BOOST_CHECK(!CheckCommitmentBlock(c, state, Params().GetConsensus(), height));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-cb-missing");
+}
+
+BOOST_AUTO_TEST_CASE(checkcommitmentblock_rejects_a_wrong_merkle_root) {
+    int height;
+    CCommitmentBlock c = RealCommitmentBlock(&height);
+    c.hashMerkleRoot = uint256S("dead");
+
+    // fCheckPOW=false: hashMerkleRoot is part of what the header hash covers,
+    // so mutating it invalidates the block's real PoW too -- fCheckPOW=true
+    // would fail on "high-hash" before ever reaching the check under test.
+    CValidationState state;
+    BOOST_CHECK(!CheckCommitmentBlock(c, state, Params().GetConsensus(), height,
+                                      /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-txnmrklroot");
+}
+
+// F-43b: [coinbase, id, id, ...] puts a duplicate at merkle positions 1,2 --
+// ComputeMerkleRoot's malleation check compares (0,1),(2,3),... (EVEN
+// positions only), so this duplicate is never compared and malleation
+// passes. The root is recomputed over the mutated list so the ONLY failure
+// exercised is the new HasDuplicateIdentifiers rule, not a root mismatch.
+BOOST_AUTO_TEST_CASE(checkcommitmentblock_rejects_duplicate_ids_the_merkle_check_misses) {
+    int height;
+    CCommitmentBlock c = RealCommitmentBlock(&height);
+    BOOST_REQUIRE_GE(c.vCommitments.size(), 1U);
+    c.vCommitments.insert(c.vCommitments.begin(), c.vCommitments[0]);
+
+    bool mutated = false;
+    c.hashMerkleRoot = c.ComputeMerkleRoot(&mutated);
+    BOOST_REQUIRE(!mutated);   // confirms the scenario: malleation does NOT see this duplicate
+    BOOST_REQUIRE(c.HasDuplicateIdentifiers());
+
+    // fCheckPOW=false: the recomputed root changes the header hash, same
+    // reason as checkcommitmentblock_rejects_a_wrong_merkle_root above.
+    CValidationState state;
+    BOOST_CHECK(!CheckCommitmentBlock(c, state, Params().GetConsensus(), height,
+                                      /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-cmt-duplicate-ids");
+}
+
+BOOST_AUTO_TEST_CASE(contextualcheckcommitmentblock_rejects_a_non_cbtx_coinbase) {
+    int height;
+    CCommitmentBlock c = RealCommitmentBlock(&height);
+
+    CMutableTransaction mutCoinbase(*c.coinbase);
+    mutCoinbase.nType = TRANSACTION_NORMAL;   // was TRANSACTION_COINBASE
+    c.coinbase = MakeTransactionRef(mutCoinbase);
+    BOOST_REQUIRE(c.coinbase->IsCoinBase());   // still a coinbase by null-prevout; just the wrong DIP3 type
+
+    const CBlockIndex *pindexPrev = ::ChainActive().Tip()->pprev;
+    CValidationState state;
+    BOOST_CHECK(!ContextualCheckCommitmentBlock(c, state, Params().GetConsensus(), pindexPrev));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-cb-type");
+}
+
+BOOST_AUTO_TEST_CASE(contextualcheckcommitmentblock_rejects_a_nonfinal_coinbase) {
+    int height;
+    CCommitmentBlock c = RealCommitmentBlock(&height);
+
+    CMutableTransaction mutCoinbase(*c.coinbase);
+    mutCoinbase.nLockTime = 999999;      // height-based, far beyond any test chain height
+    mutCoinbase.vin[0].nSequence = 1;    // not SEQUENCE_FINAL -- required for nLockTime to bind
+    c.coinbase = MakeTransactionRef(mutCoinbase);
+
+    const CBlockIndex *pindexPrev = ::ChainActive().Tip()->pprev;
+    CValidationState state;
+    BOOST_CHECK(!ContextualCheckCommitmentBlock(c, state, Params().GetConsensus(), pindexPrev));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-txns-nonfinal");
 }
 
 BOOST_AUTO_TEST_SUITE_END()
