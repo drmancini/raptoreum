@@ -143,11 +143,15 @@ private:
     uint64_t nBlockSize;
     uint64_t nBlockTx;
     unsigned int nBlockSigOps;
-    // 1.2 (Mike): aggregate input count under the commitment budget. Unlike
-    // nBlockSigOps this has no ancestor-package machinery behind it yet --
-    // it's a miner-side heuristic to avoid building a block CheckBlock's
-    // FULL, accurate aggregate check (GetBlockInputCount) would then reject,
-    // not the enforcement boundary itself.
+    // 1.2 (Mike): aggregate input count under the commitment budget, exact --
+    // accumulated once per real transaction in AddToBlock, matching
+    // GetBlockInputCount's own unit. TestPackage's own-count-only pre-check
+    // is cheap but can under-count a package's unconfirmed ancestors;
+    // addPackageTxs() re-checks the exact ancestor-set aggregate against this
+    // before committing to a package (F1, Fable review, 2026-09-19) -- an
+    // under-count reaching CreateNewBlock's TestBlockValidity call would
+    // otherwise throw and repeat on every getblocktemplate/generateBlocks
+    // retry, a deterministic stall rather than one wasted block.
     unsigned int nBlockInputs;
     CAmount nFees;
     CAmount nSpecialTxFees;

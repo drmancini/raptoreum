@@ -4050,7 +4050,7 @@ bool CheckBlock(const CBlock &block, CValidationState &state, const Consensus::P
     // not bytes, not sigops -- is what F-93/F-94/F-97 found actually drives
     // per-transaction validation cost. No view needed: input count is exact
     // at this view-less stage, unlike the sigop budget's spend-side term.
-    if (g_commitmentBudgetActive && GetBlockInputCount(block) > MaxBlockInputs(true))
+    if (g_commitmentBudgetActive && GetBlockInputCount(block) > MaxBlockInputs(g_commitmentBudgetActive))
         return state.DoS(100, false, REJECT_INVALID, "bad-blk-inputs", false, "out-of-bounds input count");
 
     if (fCheckPOW && fCheckMerkleRoot)
@@ -4183,7 +4183,7 @@ static bool ContextualCheckBlock(const CBlock &block, CValidationState &state, c
         return state.DoS(100, false, REJECT_INVALID, "bad-blk-sigops", false, "out-of-bounds SigOpCount");
 
     // Aggregate input-count limit. See the identical comment in CheckBlock.
-    if (g_commitmentBudgetActive && GetBlockInputCount(block) > MaxBlockInputs(true))
+    if (g_commitmentBudgetActive && GetBlockInputCount(block) > MaxBlockInputs(g_commitmentBudgetActive))
         return state.DoS(100, false, REJECT_INVALID, "bad-blk-inputs", false, "out-of-bounds input count");
 
     // Enforce rule that the coinbase starts with serialized block height
