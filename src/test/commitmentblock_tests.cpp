@@ -239,6 +239,28 @@ BOOST_AUTO_TEST_CASE(the_service_bit_chooses_the_serialization) {
     BOOST_CHECK_EQUAL(NODE_COMMITMENTS & inUse, 0U);
 }
 
+// F-85: sending the commitment-form getdata inv type to a peer who merely claims
+// NODE_COMMITMENTS wedges them if the claim is a stray bit-24 collision rather than
+// real support (ProcessGetData never erases an unknown front item). The handshake
+// exists to require an explicit reply before that ever happens; this pins when we
+// offer it in the first place -- to a peer who has claimed the bit, and only when
+// we ourselves actually support it.
+BOOST_AUTO_TEST_CASE(sendcommitments_is_offered_only_when_both_sides_claim_the_bit) {
+    BOOST_CHECK(ShouldNegotiateCommitments(ServiceFlags(NODE_NETWORK | NODE_COMMITMENTS),
+                                            ServiceFlags(NODE_NETWORK | NODE_COMMITMENTS)));
+
+    // We don't support it ourselves -- nothing to negotiate.
+    BOOST_CHECK(!ShouldNegotiateCommitments(NODE_NETWORK,
+                                             ServiceFlags(NODE_NETWORK | NODE_COMMITMENTS)));
+
+    // Peer hasn't claimed it -- no point offering.
+    BOOST_CHECK(!ShouldNegotiateCommitments(ServiceFlags(NODE_NETWORK | NODE_COMMITMENTS),
+                                             NODE_NETWORK));
+
+    // Neither side claims it.
+    BOOST_CHECK(!ShouldNegotiateCommitments(NODE_NETWORK, NODE_NETWORK));
+}
+
 // The flag is declared and negotiated, and NOTHING READS IT: no Serialize in the
 // tree tests SER_COMMITMENTS (the GetType() consumers all test SER_GETHASH or
 // SER_DISK). So today it selects nothing, and this pins that rather than letting
