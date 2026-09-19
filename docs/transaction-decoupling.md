@@ -384,11 +384,21 @@ through `MaxBlockSigOps`'s new second parameter into ATMP, `ConnectBlock`, both 
 checks, and `BlockAssembler::TestPackage` — closing item 4, since the miner reads its sigop
 accounting straight from the mempool entry ATMP populates, so one call site fixed both. A boost
 integration test proves the wiring reaches a real mempool entry end to end. The body-byte cap
-(the table's second row) is not yet built — still open, along with F-91's cost-model check.
+(the table's second row) is not yet built — still open.
 
-Open, not gaps in the reasoning: whether the ~130 µs/sigop, +40% cost constant holds at a packed
-worst-case shape rather than the two points it was measured at (F-91) — worth a targeted
-`bench_inputs.py` run before the budget's actual numeric value is chosen.
+**F-91 resolved, redirected (R-34, 2026-09-19).** A live packed-shape benchmark (isolated node,
+mario) found the hypothesised mechanism -- sighash recomputed per key, scaling with preimage size
+-- is not what dominates: forcing 15 CheckSig attempts vs 1 changes cost under 3%, and a
+transaction with **zero sigops at all** costs the same again. What actually explodes is `~O(n²)`
+in the transaction's own **input count**, entirely independent of sigops (F-93) -- up to
+~370-385 ms for one maximally-packed, ~2400-input, 98.6 kB transaction (K-3's own ceiling).
+Critically, this cost lives in mempool ATMP, not in `ConnectBlock`: the identical transaction,
+mined and IBD-synced cold by a second node that never ran it through its own mempool, cost ~70 ms
+(F-94) -- roughly 5x cheaper, not the same. **D-18 stands**: it was derived to bound
+`ConnectBlock`'s worst-case time, and that path does not show the blowup. What the packed-shape
+test actually surfaced is a different, likely pre-existing, non-decoupling-specific mempool DoS
+vector, whose real-world reach depends on whether the exploit shape (a trivially-spendable output
+with an empty scriptSig) can pass standardness policy at all -- open (F-93's own note).
 
 **No declared coinbase field is needed for any of it.** Bodies are self-authenticating, so a
 prefix whose accumulated work or bytes exceeds the cap already proves the block invalid and
