@@ -210,6 +210,15 @@ namespace NetMsgType {
     extern const char *SENDHEADERS;
 
 /**
+ * No payload. Sent after VERACK by a node that both advertises NODE_COMMITMENTS
+ * and has observed the peer advertising it too (build plan 1.1, F-85). Receiving
+ * this message -- not the service bit alone -- is what licenses sending that peer
+ * the commitment-form getdata inv type, since an unknown getdata type wedges a
+ * peer in this tree and the service bit alone is an unauthenticated claim.
+ */
+    extern const char *SENDCOMMITMENTS;
+
+/**
  * Contains a 1-byte bool and 8-byte LE version number.
  * Indicates that a node is willing to provide blocks via "cmpctblock" messages.
  * May indicate that a node prefers to receive new block announcements via a
@@ -388,6 +397,21 @@ static inline bool CanReceiveCommitments(ServiceFlags services) {
 /** The stream flags to serialize a block with, for a given peer. */
 static inline int BlockSerFlagsFor(ServiceFlags services) {
     return CanReceiveCommitments(services) ? (SER_NETWORK | SER_COMMITMENTS) : SER_NETWORK;
+}
+
+/**
+ * Whether we should offer a peer the SENDCOMMITMENTS handshake.
+ *
+ * NODE_COMMITMENTS is an unauthenticated advertisement, and sending the
+ * commitment-form getdata inv type to a peer who does not really support it
+ * wedges them in this tree (F-85: ProcessGetData never erases an unknown front
+ * item). Offering SENDCOMMITMENTS is itself safe against that bit alone -- an
+ * unrecognised message is just ignored -- but only claiming the bit ourselves,
+ * to a peer who has claimed it too, is worth the message. It is *receiving*
+ * SENDCOMMITMENTS back that licenses sending the getdata type, never this bit.
+ */
+static inline bool ShouldNegotiateCommitments(ServiceFlags ourServices, ServiceFlags peerServices) {
+    return CanReceiveCommitments(ourServices) && CanReceiveCommitments(peerServices);
 }
 
 static inline bool MayHaveUsefulAddressDB(ServiceFlags services) {

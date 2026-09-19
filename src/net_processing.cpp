@@ -354,6 +354,11 @@ namespace {
          */
         bool fSupportsDesiredCmpctVersion;
 
+        //! Whether this peer has told us, via SENDCOMMITMENTS, that it will answer
+        //! a commitment-form getdata. NODE_COMMITMENTS alone never sets this --
+        //! see ShouldNegotiateCommitments (F-85).
+        bool fProvidesCommitments;
+
         /** State used to enforce CHAIN_SYNC_TIMEOUT
           * Only in effect for outbound, non-manual connections, with
           * m_protect == false
@@ -467,6 +472,7 @@ namespace {
             fPreferHeaderAndIDs = false;
             fProvidesHeaderAndIDs = false;
             fSupportsDesiredCmpctVersion = false;
+            fProvidesCommitments = false;
             m_chain_sync = {0, nullptr, false, false};
             m_last_block_announcement = 0;
         }
@@ -2665,6 +2671,14 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
                                  msgMaker.Make(NetMsgType::SENDCMPCT, fAnnounceUsingCMPCTBLOCK, nCMPCTBLOCKVersion));
         }
 
+        // Offer the commitment-block handshake only once both sides have claimed
+        // the capability bit (F-85) -- receiving SENDCOMMITMENTS back is what
+        // actually licenses sending this peer a commitment-form getdata, never
+        // the bit alone.
+        if (ShouldNegotiateCommitments(pfrom->GetLocalServices(), ServiceFlags(pfrom->nServices))) {
+            connman->PushMessage(pfrom, msgMaker.Make(NetMsgType::SENDCOMMITMENTS));
+        }
+
         if (pfrom->nVersion >= SENDDSQUEUE_PROTO_VERSION) {
             // Tell our peer that he should send us CoinJoin queue messages
             connman->PushMessage(pfrom, msgMaker.Make(NetMsgType::SENDDSQUEUE, true));
@@ -2801,6 +2815,15 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
             State(pfrom->GetId())->fPreferHeaderAndIDs = fAnnounceUsingCMPCTBLOCK;
             State(pfrom->GetId())->fSupportsDesiredCmpctVersion = true;
         }
+        return true;
+    }
+
+
+    if (strCommand == NetMsgType::SENDCOMMITMENTS) {
+        // No payload. Only an explicit reply licenses sending this peer a
+        // commitment-form getdata (F-85) -- the service bit alone never does.
+        LOCK(cs_main);
+        State(pfrom->GetId())->fProvidesCommitments = true;
         return true;
     }
 
