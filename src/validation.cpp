@@ -4007,9 +4007,13 @@ bool CheckBlock(const CBlock &block, CValidationState &state, const Consensus::P
     // transaction validation, as otherwise we may mark the header as invalid
     // because we receive the wrong transactions for it.
 
-    // Size limits (relaxed)
-    if (block.vtx.empty() || block.vtx.size() > MaxBlockSize() ||
-        ::GetSerializeSize(block, SER_NETWORK, PROTOCOL_VERSION) > MaxBlockSize())
+    // Size limits (relaxed). Before 1.3's identifier/body split exists, this
+    // materialised block's own serialized size already IS the body bytes it
+    // commits to, so gating MaxBlockSize here is a faithful stand-in for the
+    // body-byte budget (1.2, Mike's ~110 MB / 1,500 tx/s derivation) until
+    // that split is real.
+    if (block.vtx.empty() || block.vtx.size() > MaxBlockSize(true, g_commitmentBudgetActive) ||
+        ::GetSerializeSize(block, SER_NETWORK, PROTOCOL_VERSION) > MaxBlockSize(true, g_commitmentBudgetActive))
         return state.DoS(100, false, REJECT_INVALID, "bad-blk-length", false, "size limits failed");
 
     // First transaction must be coinbase, the rest must not be
@@ -4040,6 +4044,14 @@ bool CheckBlock(const CBlock &block, CValidationState &state, const Consensus::P
     // sigops limits (relaxed)
     if (nSigOps > MaxBlockSigOps(true, g_commitmentBudgetActive))
         return state.DoS(100, false, REJECT_INVALID, "bad-blk-sigops", false, "out-of-bounds SigOpCount");
+
+    // Aggregate input-count limit (1.2, Mike): bounds worst-case ConnectBlock
+    // time independent of how generous the byte cap is, since input count --
+    // not bytes, not sigops -- is what F-93/F-94/F-97 found actually drives
+    // per-transaction validation cost. No view needed: input count is exact
+    // at this view-less stage, unlike the sigop budget's spend-side term.
+    if (g_commitmentBudgetActive && GetBlockInputCount(block) > MaxBlockInputs(true))
+        return state.DoS(100, false, REJECT_INVALID, "bad-blk-inputs", false, "out-of-bounds input count");
 
     if (fCheckPOW && fCheckMerkleRoot)
         block.fChecked = true;
@@ -4141,8 +4153,10 @@ static bool ContextualCheckBlock(const CBlock &block, CValidationState &state, c
     bool fDIP0001Active_context = consensusParams.DIP0001Enabled;
     bool fDIP0003Active_context = consensusParams.DIP0003Enabled;
 
-    // Size limits
-    unsigned int nMaxBlockSize = MaxBlockSize(fDIP0001Active_context);
+    // Size limits. See the identical comment in CheckBlock: this materialised
+    // block's own serialized size stands in for the body-byte budget (1.2)
+    // until 1.3's identifier/body split is real.
+    unsigned int nMaxBlockSize = MaxBlockSize(fDIP0001Active_context, g_commitmentBudgetActive);
     if (block.vtx.empty() || block.vtx.size() > nMaxBlockSize ||
         ::GetSerializeSize(block, SER_NETWORK, PROTOCOL_VERSION) > nMaxBlockSize)
         return state.DoS(100, false, REJECT_INVALID, "bad-blk-length", false, "size limits failed");
@@ -4167,6 +4181,10 @@ static bool ContextualCheckBlock(const CBlock &block, CValidationState &state, c
     // real accurate-count enforcement (including the spend side) is at ConnectBlock.
     if (nSigOps > MaxBlockSigOps(fDIP0001Active_context, g_commitmentBudgetActive))
         return state.DoS(100, false, REJECT_INVALID, "bad-blk-sigops", false, "out-of-bounds SigOpCount");
+
+    // Aggregate input-count limit. See the identical comment in CheckBlock.
+    if (g_commitmentBudgetActive && GetBlockInputCount(block) > MaxBlockInputs(true))
+        return state.DoS(100, false, REJECT_INVALID, "bad-blk-inputs", false, "out-of-bounds input count");
 
     // Enforce rule that the coinbase starts with serialized block height
     // After DIP3/DIP4 activation, we don't enforce the height in the input script anymore.

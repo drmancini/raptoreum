@@ -94,9 +94,14 @@ BlockAssembler::Options::Options() {
 BlockAssembler::BlockAssembler(const CTxMemPool &mempool, const CChainParams &params, const Options &options)
         : chainparams(params), m_mempool(mempool) {
     blockMinFeeRate = options.blockMinFeeRate;
-    // Limit size to between 1K and MaxBlockSize()-1K for sanity:
-    nBlockMaxSize = std::max((unsigned int) 1000, std::min((unsigned int) (MaxBlockSize(fDIP0001ActiveAtTip) - 1000),
-                                                           (unsigned int) options.nBlockMaxSize));
+    // Limit size to between 1K and MaxBlockSize()-1K for sanity. Under the
+    // commitment budget the consensus ceiling is the body-byte budget
+    // (1.2, Mike), not the byte-indexed legacy cap -- clamping against the
+    // old, much smaller ceiling here would silently stop the miner from
+    // filling toward the new one.
+    nBlockMaxSize = std::max((unsigned int) 1000,
+                             std::min((unsigned int) (MaxBlockSize(fDIP0001ActiveAtTip, g_commitmentBudgetActive) - 1000),
+                                      (unsigned int) options.nBlockMaxSize));
 }
 
 static BlockAssembler::Options DefaultOptions() {
@@ -124,6 +129,7 @@ void BlockAssembler::resetBlock() {
     // Reserve space for coinbase tx
     nBlockSize = 1000;
     nBlockSigOps = 100;
+    nBlockInputs = 0;   // coinbase's own dummy input is excluded, matching GetBlockInputCount
 
     // These counters do not include coinbase tx
     nBlockTx = 0;
@@ -283,13 +289,25 @@ void BlockAssembler::onlyUnconfirmed(CTxMemPool::setEntries &testSet) {
     }
 }
 
-bool BlockAssembler::TestPackage(uint64_t packageSize, unsigned int packageSigOps) const {
+bool BlockAssembler::TestPackage(uint64_t packageSize, unsigned int packageSigOps, unsigned int packageInputs) const {
     if (nBlockSize + packageSize >= nBlockMaxSize)
         return false;
     // 1.2 (D-18, F-89): packageSigOps already carries the accurate count when the
     // budget is active, since it comes straight from the mempool entry ATMP stored
     // it into (validation.cpp) -- this only has to swap the threshold to match.
     if (nBlockSigOps + packageSigOps >= MaxBlockSigOps(fDIP0001ActiveAtTip, g_commitmentBudgetActive))
+        return false;
+    // 1.2 (body-byte / input-count cap, Mike): packageInputs is only the
+    // candidate transaction's OWN input count, not ancestor-aware like
+    // packageSize/packageSigOps above -- the mempool has no cached
+    // "InputsWithAncestors" field, and building one would mean extending
+    // CTxMemPoolEntry's ancestor-update machinery for a miner-side heuristic
+    // that only exists to avoid wasted work. The real enforcement boundary
+    // (CheckBlock/ContextualCheckBlock's GetBlockInputCount) is exact; this
+    // can undercount by an ancestor chain's worth of inputs at most, bounded
+    // by the mempool's own ancestor-count limit, and only ever causes the
+    // miner to build a block slightly over budget -- not a consensus fault.
+    if (nBlockInputs + packageInputs >= MaxBlockInputs(g_commitmentBudgetActive))
         return false;
     return true;
 }
@@ -316,6 +334,7 @@ void BlockAssembler::AddToBlock(CTxMemPool::txiter iter) {
     nBlockSize += iter->GetTxSize();
     ++nBlockTx;
     nBlockSigOps += iter->GetSigOpCount();
+    nBlockInputs += iter->GetTx().vin.size();
     nFees += iter->GetFee();
     nSpecialTxFees += iter->GetSpecialTxFee();
     inBlock.insert(iter);
@@ -462,7 +481,7 @@ void BlockAssembler::addPackageTxs(int &nPackagesSelected, int &nDescendantsUpda
             return;
         }
 
-        if (!TestPackage(packageSize, packageSigOps)) {
+        if (!TestPackage(packageSize, packageSigOps, iter->GetTx().vin.size())) {
             if (fUsingModified) {
                 // Since we always look at the best entry in mapModifiedTx,
                 // we must erase failed entries so that we can consider the

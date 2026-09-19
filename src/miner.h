@@ -143,6 +143,12 @@ private:
     uint64_t nBlockSize;
     uint64_t nBlockTx;
     unsigned int nBlockSigOps;
+    // 1.2 (Mike): aggregate input count under the commitment budget. Unlike
+    // nBlockSigOps this has no ancestor-package machinery behind it yet --
+    // it's a miner-side heuristic to avoid building a block CheckBlock's
+    // FULL, accurate aggregate check (GetBlockInputCount) would then reject,
+    // not the enforcement boundary itself.
+    unsigned int nBlockInputs;
     CAmount nFees;
     CAmount nSpecialTxFees;
     CTxMemPool::setEntries inBlock;
@@ -190,7 +196,7 @@ private:
     void onlyUnconfirmed(CTxMemPool::setEntries &testSet);
 
     /** Test if a new package would "fit" in the block */
-    bool TestPackage(uint64_t packageSize, unsigned int packageSigOps) const;
+    bool TestPackage(uint64_t packageSize, unsigned int packageSigOps, unsigned int packageInputs) const;
 
     /** Perform checks on each transaction in a package:
       * locktime

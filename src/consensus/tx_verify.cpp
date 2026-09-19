@@ -6,6 +6,7 @@
 #include <consensus/tx_verify.h>
 
 #include <consensus/consensus.h>
+#include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <script/interpreter.h>
 #include <consensus/validation.h>
@@ -276,6 +277,16 @@ unsigned int GetAccurateSigOpCount(const CTransaction &tx, const CCoinsViewCache
     }
 
     return nSigOps;
+}
+
+unsigned int GetBlockInputCount(const CBlock &block) {
+    unsigned int nInputs = 0;
+    for (const auto &tx: block.vtx) {
+        if (tx->IsCoinBase())
+            continue;
+        nInputs += tx->vin.size();
+    }
+    return nInputs;
 }
 
 inline bool checkOutput(const CTxOut &out, CValidationState &state, CAmount &nValueIn,
