@@ -120,14 +120,16 @@ std::set<int> g_perf_withhold_heights;
 std::atomic<bool> g_commitmentBudgetActive{false};
 
 bool HaveBodies(const CBlockIndex *pindex) {
-    if (pindex == nullptr) {
+    return pindex != nullptr && (pindex->nStatus & BLOCK_HAVE_BODIES);
+}
+
+/** PERF: should this block be accepted without its bodies? Harness only. */
+static bool PerfWithholdBodies(const CBlockIndex *pindex) {
+    if (g_perf_withhold_hashes.empty() && g_perf_withhold_heights.empty()) {
         return false;
     }
-    if (g_perf_withhold_hashes.empty() && g_perf_withhold_heights.empty()) {
-        return true;
-    }
-    return !g_perf_withhold_hashes.count(pindex->GetBlockHash()) &&
-           !g_perf_withhold_heights.count(pindex->nHeight);
+    return g_perf_withhold_hashes.count(pindex->GetBlockHash()) ||
+           g_perf_withhold_heights.count(pindex->nHeight);
 }
 
 /** The script-check thread pool. Declared here rather than beside
@@ -154,7 +156,6 @@ bool fTimestampIndex = false;
 bool fSpentIndex = false;
 bool fFutureIndex = false;
 bool fHavePruned = false;
-bool fHaveCommitmentOnly = false;
 bool fPruneMode = false;
 bool fRequireStandard = true;
 bool fCheckBlockIndex = false;
@@ -3241,7 +3242,11 @@ CBlockIndex *CChainState::FindMostWorkChain() {
             // to a chain unless we have all the non-active-chain parent blocks.
             bool fFailedChain = pindexTest->nStatus & BLOCK_FAILED_MASK;
             bool fConflictingChain = pindexTest->nStatus & BLOCK_CONFLICT_CHAINLOCK;
-            bool fMissingData = !(pindexTest->nStatus & BLOCK_HAVE_DATA);
+            // PERF: a block whose bodies are not held is exactly as unusable for
+            // building a chain as one whose file was pruned, and for the same
+            // reason -- ConnectTip cannot execute it. Asking here is what keeps
+            // ConnectTip's guarantee that a selected block is readable.
+            bool fMissingData = !(pindexTest->nStatus & BLOCK_HAVE_DATA) || !HaveBodies(pindexTest);
             if (fFailedChain || fMissingData || fConflictingChain) {
                 // Candidate chain is not usable (either invalid or conflicting or missing data)
                 if (fFailedChain &&
@@ -3829,24 +3834,51 @@ CBlockIndex *BlockManager::AddToBlockIndex(const CBlockHeader &block, enum Block
 }
 
 /** Mark a block as having its data received and checked (up to BLOCK_VALID_TRANSACTIONS). */
+void CChainState::ReceivedBlockBodies(CBlockIndex *pindexNew) {
+    pindexNew->nStatus |= BLOCK_HAVE_BODIES;
+    setDirtyBlockIndex.insert(pindexNew);
+
+    // Chain selection dropped this block and parked its descendants in
+    // m_blocks_unlinked when the bodies were missing. Put back everything the
+    // arrival makes eligible again -- the same walk ReceivedBlockTransactions
+    // does, minus the nSequenceId stamp, because first-seen order has not changed.
+    if (pindexNew->pprev != nullptr && !pindexNew->pprev->HaveTxsDownloaded()) {
+        // Same guard ReceivedBlockTransactions uses. A block whose parent is still
+        // header-only is not connectable whatever we hold for it, and making it a
+        // candidate trips FindMostWorkChain's assert(HaveTxsDownloaded()).
+        return;
+    }
+    std::deque<CBlockIndex *> queue{pindexNew};
+    while (!queue.empty()) {
+        CBlockIndex *pindex = queue.front();
+        queue.pop_front();
+        if (!HaveBodies(pindex) || !pindex->HaveTxsDownloaded()) continue;
+        if (m_chain.Tip() == nullptr || !setBlockIndexCandidates.value_comp()(pindex, m_chain.Tip())) {
+            if (!(pindex->nStatus & BLOCK_CONFLICT_CHAINLOCK)) {
+                setBlockIndexCandidates.insert(pindex);
+            }
+        }
+        auto range = m_blockman.m_blocks_unlinked.equal_range(pindex);
+        while (range.first != range.second) {
+            auto it = range.first++;
+            queue.push_back(it->second);
+            m_blockman.m_blocks_unlinked.erase(it);
+        }
+    }
+}
+
 void CChainState::ReceivedBlockTransactions(const CBlock &block, CValidationState &state, CBlockIndex *pindexNew,
-                                            const FlatFilePos *pos) {
-    // Commitment-level: how many transactions this block commits to, and -- via
-    // the walk below -- how many the chain up to it commits to. Both are counts,
-    // not possessions, so they are known from the commitment list alone.
+                                            const FlatFilePos &pos, bool bodies_held) {
+    // The commitment block itself is always stored, so everything the index says
+    // about HAVING a block stays true and every invariant tying nTx to
+    // BLOCK_HAVE_DATA holds untouched. What decoupling adds is one further fact.
     pindexNew->nTx = block.vtx.size();
     pindexNew->nChainTx = 0;
+    pindexNew->nFile = pos.nFile;
+    pindexNew->nDataPos = pos.nPos;
     pindexNew->nUndoPos = 0;
-    // Body-level: where the bodies are, and the claim that we hold them.
-    if (pos != nullptr) {
-        pindexNew->nFile = pos->nFile;
-        pindexNew->nDataPos = pos->nPos;
-        pindexNew->nStatus |= BLOCK_HAVE_DATA;
-    } else {
-        fHaveCommitmentOnly = true;
-    }
-    // Tied to nTx, not to the bodies: CheckBlockIndex asserts this equivalence
-    // as pruning-independent.
+    pindexNew->nStatus |= BLOCK_HAVE_DATA;
+    if (bodies_held) pindexNew->nStatus |= BLOCK_HAVE_BODIES;
     pindexNew->RaiseValidity(BLOCK_VALID_TRANSACTIONS);
     setDirtyBlockIndex.insert(pindexNew);
 
@@ -4456,7 +4488,7 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock> &pblock, CVali
     // Try to process all requested blocks that we don't have, but only
     // process an unrequested block if it's new and has enough work to
     // advance our tip, and isn't too many blocks ahead.
-    bool fAlreadyHave = pindex->nStatus & BLOCK_HAVE_DATA;
+    bool fAlreadyHave = (pindex->nStatus & BLOCK_HAVE_DATA) && HaveBodies(pindex);
     bool fHasMoreOrSameWork = (m_chain.Tip() ? pindex->nChainWork >= m_chain.Tip()->nChainWork : true);
     // Blocks that are too out-of-order needlessly limit the effectiveness of
     // pruning, because pruning will not delete block files that contain any
@@ -4474,7 +4506,12 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock> &pblock, CVali
     // and unrequested blocks.
     if (fAlreadyHave) return true;
     if (!fRequested) {  // If we didn't ask for it:
-        if (pindex->nTx != 0) return true;    // This is a previously-processed block that was pruned
+        // PERF (1.3.1, F-36): nTx != 0 alone no longer means "pruned" -- it is
+        // also true of a commitment-only block, which is exactly the state an
+        // unrequested body arrival should be able to fill. HAVE_DATA is the
+        // discriminator: pruning clears it, decoupling's commitment-only state
+        // does not. Only skip the genuinely-pruned case here.
+        if (pindex->nTx != 0 && !(pindex->nStatus & BLOCK_HAVE_DATA)) return true;    // This is a previously-processed block that was pruned
         if (!fHasMoreOrSameWork) return true; // Don't process less-work chains
         if (fTooFarAhead) return true;        // Block height is too high
 
@@ -4501,14 +4538,18 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock> &pblock, CVali
 
     // Write block to history file
     if (fNewBlock) *fNewBlock = true;
-    if (!HaveBodies(pindex)) {
-        // PERF: accept the block's commitments without its bodies, which is the
-        // state a decoupled node is in between receiving a commitment block and
-        // fetching its bodies. Withholding at READ time cannot produce it: the
-        // block has to arrive this way.
-        LogPrintf("AcceptBlock: accepting %s (height %d) commitments only; bodies not held\n",
+    if (pindex->nStatus & BLOCK_HAVE_DATA && PerfWithholdBodies(pindex)) {
+        // Already stored, still withheld: nothing to do. Falling through would write
+        // a second copy and re-stamp nSequenceId for this block and its descendants.
+        return true;
+    }
+    if (PerfWithholdBodies(pindex)) {
+        LogPrintf("AcceptBlock: accepting %s (height %d) as commitments; bodies not held\n",
                   pindex->GetBlockHash().ToString(), pindex->nHeight);
-        ReceivedBlockTransactions(block, state, pindex, nullptr);
+    } else if (pindex->nStatus & BLOCK_HAVE_DATA) {
+        LogPrintf("AcceptBlock: bodies arrived for %s (height %d)\n",
+                  pindex->GetBlockHash().ToString(), pindex->nHeight);
+        ReceivedBlockBodies(pindex);
         CheckBlockIndex(chainparams.GetConsensus());
         return true;
     }
@@ -4518,7 +4559,7 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock> &pblock, CVali
             state.Error(strprintf("%s: Failed to find position to write new block to disk", __func__));
             return false;
         }
-        ReceivedBlockTransactions(block, state, pindex, &blockPos);
+        ReceivedBlockTransactions(block, state, pindex, blockPos, !PerfWithholdBodies(pindex));
     } catch (const std::runtime_error &e) {
         return AbortNode(state, std::string("System error: ") + e.what());
     }
@@ -4631,6 +4672,10 @@ void ChainstateManager::PruneOneBlockFile(const int fileNumber) {
         if (pindex->nFile == fileNumber) {
             pindex->nStatus &= ~BLOCK_HAVE_DATA;
             pindex->nStatus &= ~BLOCK_HAVE_UNDO;
+            // PERF: pruning deletes the block file, which is where the bodies are.
+            // Leaving the bit set would make the index claim bodies it no longer
+            // has -- and would break HAVE_BODIES => HAVE_DATA on every pruned node.
+            pindex->nStatus &= ~BLOCK_HAVE_BODIES;
             pindex->nFile = 0;
             pindex->nDataPos = 0;
             pindex->nUndoPos = 0;
@@ -4932,19 +4977,38 @@ EXCLUSIVE_LOCKS_REQUIRED(cs_main)
                 if (fHavePruned)
                 LogPrintf("LoadBlockIndexDB(): Block files have previously been pruned\n");
 
-                // PERF: re-derive the commitment-only flag rather than persisting it.
-                // It must be set before the run's first CheckBlockIndex and it can
-                // only be derived once fHavePruned is known, because the two states
-                // are indistinguishable per block -- both are "nTx > 0, no data" --
-                // which is precisely why the real design needs a per-block bit
-                // instead of a global flag.
-                if (!fHavePruned) {
-                    for (const auto &entry : chainman.m_blockman.m_block_index) {
-                        const CBlockIndex *pindex = entry.second;
-                        if (pindex->nTx > 0 && !(pindex->nStatus & BLOCK_HAVE_DATA)) {
-                            fHaveCommitmentOnly = true;
-                            break;
+                // PERF (1.3.1, F-41): a pre-1.3 datadir has BLOCK_HAVE_BODIES clear
+                // on every entry -- there was no such thing as a commitment-only
+                // block before this binary, so every entry that ever held
+                // BLOCK_HAVE_DATA held real bodies too. Gated by its own persisted
+                // flag, on the same pattern as "prunedblockfiles" above: an
+                // UNCONDITIONAL pass would re-mark genuine commitment-only blocks
+                // as bodies-held on the very next restart once this design
+                // produces real ones -- exactly the corruption class the
+                // HAVE_DATA/nTx invariant exists to catch (F-25k). Written
+                // synchronously and directly, before the flag that says it ran, so
+                // a crash mid-migration just leaves the flag unset and the (fully
+                // idempotent) pass retries next boot rather than silently losing
+                // some entries' bit.
+                bool fBodiesMigrated = false;
+                pblocktree->ReadFlag("bodiesmigrated", fBodiesMigrated);
+                if (!fBodiesMigrated) {
+                    std::vector<const CBlockIndex *> vMigrated;
+                    for (const std::pair<const uint256, CBlockIndex *> &item : chainman.BlockIndex()) {
+                        CBlockIndex *pindex = item.second;
+                        if ((pindex->nStatus & BLOCK_HAVE_DATA) && !(pindex->nStatus & BLOCK_HAVE_BODIES)) {
+                            pindex->nStatus |= BLOCK_HAVE_BODIES;
+                            vMigrated.push_back(pindex);
                         }
+                    }
+                    LogPrintf("LoadBlockIndexDB(): migrating %d pre-1.3 index entries to BLOCK_HAVE_BODIES\n",
+                              (int) vMigrated.size());
+                    std::vector<std::pair<int, const CBlockFileInfo *>> vFiles;
+                    if (!pblocktree->WriteBatchSync(vFiles, nLastBlockFile, vMigrated)) {
+                        return false;
+                    }
+                    if (!pblocktree->WriteFlag("bodiesmigrated", true)) {
+                        return false;
                     }
                 }
 
@@ -5323,7 +5387,7 @@ bool CChainState::AddGenesisBlock(const CChainParams &chainparams, const CBlock 
     if (blockPos.IsNull())
         return error("%s: writing genesis block to disk failed (%s)", __func__, FormatStateMessage(state));
     CBlockIndex *pindex = m_blockman.AddToBlockIndex(block);
-    ReceivedBlockTransactions(block, state, pindex, &blockPos);
+    ReceivedBlockTransactions(block, state, pindex, blockPos, true);
     return true;
 }
 
@@ -5525,6 +5589,10 @@ void CChainState::CheckBlockIndex(const Consensus::Params &consensusParams) {
     CBlockIndex *pindexFirstConflicing = nullptr; // Oldest ancestor of pindex which has BLOCK_CONFLICT_CHAINLOCK.
     CBlockIndex *pindexFirstMissing = nullptr; // Oldest ancestor of pindex which does not have BLOCK_HAVE_DATA.
     CBlockIndex *pindexFirstNeverProcessed = nullptr; // Oldest ancestor of pindex for which nTx == 0.
+    // PERF: sibling of pindexFirstMissing, for the second reason a block can be
+    // unusable. pindexFirstMissing keeps its exact meaning and every invariant
+    // written over it keeps its full force; this one carries the new fact.
+    CBlockIndex *pindexFirstMissingBodies = nullptr; // Oldest ancestor of pindex whose bodies are not held.
     CBlockIndex *pindexFirstNotTreeValid = nullptr; // Oldest ancestor of pindex which does not have BLOCK_VALID_TREE (regardless of being valid or not).
     CBlockIndex *pindexFirstNotTransactionsValid = nullptr; // Oldest ancestor of pindex which does not have BLOCK_VALID_TRANSACTIONS (regardless of being valid or not).
     CBlockIndex *pindexFirstNotChainValid = nullptr; // Oldest ancestor of pindex which does not have BLOCK_VALID_CHAIN (regardless of being valid or not).
@@ -5536,6 +5604,7 @@ void CChainState::CheckBlockIndex(const Consensus::Params &consensusParams) {
             pindexFirstConflicing = pindex;
         if (pindexFirstMissing == nullptr && !(pindex->nStatus & BLOCK_HAVE_DATA)) pindexFirstMissing = pindex;
         if (pindexFirstNeverProcessed == nullptr && pindex->nTx == 0) pindexFirstNeverProcessed = pindex;
+        if (pindexFirstMissingBodies == nullptr && !HaveBodies(pindex)) pindexFirstMissingBodies = pindex;
         if (pindex->pprev != nullptr && pindexFirstNotTreeValid == nullptr &&
             (pindex->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TREE)
             pindexFirstNotTreeValid = pindex;
@@ -5560,10 +5629,7 @@ void CChainState::CheckBlockIndex(const Consensus::Params &consensusParams) {
                    0);  // nSequenceId can't be set positive for blocks that aren't linked (negative is used for preciousblock)
         // VALID_TRANSACTIONS is equivalent to nTx > 0 for all nodes (whether or not pruning has occurred).
         // HAVE_DATA is only equivalent to nTx > 0 (or VALID_TRANSACTIONS) if no pruning has occurred.
-        // Holding a block's commitments without its bodies breaks the equivalence
-        // in exactly the way pruning does, and in the same direction: nTx can be
-        // positive with no BLOCK_HAVE_DATA. So it earns the same relaxation.
-        if (!fHavePruned && !fHaveCommitmentOnly) {
+        if (!fHavePruned) {
             // If we've never pruned, then HAVE_DATA should be equivalent to nTx > 0
             assert(!(pindex->nStatus & BLOCK_HAVE_DATA) == (pindex->nTx == 0));
             assert(pindexFirstMissing == pindexFirstNeverProcessed);
@@ -5572,6 +5638,12 @@ void CChainState::CheckBlockIndex(const Consensus::Params &consensusParams) {
             if (pindex->nStatus & BLOCK_HAVE_DATA) assert(pindex->nTx > 0);
         }
         if (pindex->nStatus & BLOCK_HAVE_UNDO) assert(pindex->nStatus & BLOCK_HAVE_DATA);
+        // PERF: the bodies live in the block file, so holding them implies holding it.
+        // Note what is NOT asserted here: that a block on the active chain has bodies.
+        // Connecting one requires them, but pruning removes them from blocks that stay
+        // connected, so it is a rule about the moment of connection and not a property
+        // of the index. Chain selection enforces it where it is true.
+        if (pindex->nStatus & BLOCK_HAVE_BODIES) assert(pindex->nStatus & BLOCK_HAVE_DATA);
         assert(((pindex->nStatus & BLOCK_VALID_MASK) >= BLOCK_VALID_TRANSACTIONS) ==
                (pindex->nTx > 0)); // This is pruning-independent.
         // All parents having had data (at some point) is equivalent to all parents being VALID_TRANSACTIONS, which is equivalent to HaveTxsDownloaded().
@@ -5605,7 +5677,8 @@ void CChainState::CheckBlockIndex(const Consensus::Params &consensusParams) {
                 // is valid and we have all data for its parents, it must be in
                 // setBlockIndexCandidates.  m_chain.Tip() must also be there
                 // even if some data has been pruned.
-                if (pindexFirstMissing == nullptr || pindex == m_chain.Tip()) {
+                if ((pindexFirstMissing == nullptr && pindexFirstMissingBodies == nullptr) ||
+                    pindex == m_chain.Tip()) {
                     assert(setBlockIndexCandidates.count(pindex));
                 }
                 // If some parent is missing, then it could be that this block was in
@@ -5634,15 +5707,22 @@ void CChainState::CheckBlockIndex(const Consensus::Params &consensusParams) {
         }
         if (!(pindex->nStatus & BLOCK_HAVE_DATA))
             assert(!foundInUnlinked); // Can't be in m_blocks_unlinked if we don't HAVE_DATA
-        if (pindexFirstMissing == nullptr)
+        if (pindexFirstMissing == nullptr && pindexFirstMissingBodies == nullptr)
             assert(!foundInUnlinked); // We aren't missing data for any parent -- cannot be in m_blocks_unlinked.
+        // PERF: the body-gap analogue of the rule below. A block we can build on,
+        // above a gap, that outranks the tip and is not a candidate must be parked in
+        // m_blocks_unlinked -- otherwise the narrowed guards above leave it checked by
+        // nothing at all, which is exactly the silent loss the invariants exist to catch.
+        if (pindex->pprev && HaveBodies(pindex) && pindexFirstNeverProcessed == nullptr &&
+            pindexFirstMissingBodies != nullptr && pindexFirstInvalid == nullptr &&
+            !CBlockIndexWorkComparator()(pindex, m_chain.Tip()) &&
+            setBlockIndexCandidates.count(pindex) == 0) {
+            assert(foundInUnlinked);
+        }
         if (pindex->pprev && (pindex->nStatus & BLOCK_HAVE_DATA) && pindexFirstNeverProcessed == nullptr &&
             pindexFirstMissing != nullptr) {
             // We HAVE_DATA for this block, have received data for all parents at some point, but we're currently missing data for some parent.
-            // Pruning is one way to get here and decoupling is the other: a body
-            // gap below a block we hold is exactly what a commitment-only
-            // ancestor looks like.
-            assert(fHavePruned || fHaveCommitmentOnly);
+            assert(fHavePruned); // We must have pruned.
             // This block may have entered m_blocks_unlinked if:
             //  - it has a descendant that at some point had more work than the
             //    tip, and
@@ -5678,6 +5758,7 @@ void CChainState::CheckBlockIndex(const Consensus::Params &consensusParams) {
             if (pindex == pindexFirstConflicing) pindexFirstConflicing = nullptr;
             if (pindex == pindexFirstMissing) pindexFirstMissing = nullptr;
             if (pindex == pindexFirstNeverProcessed) pindexFirstNeverProcessed = nullptr;
+            if (pindex == pindexFirstMissingBodies) pindexFirstMissingBodies = nullptr;
             if (pindex == pindexFirstNotTreeValid) pindexFirstNotTreeValid = nullptr;
             if (pindex == pindexFirstNotTransactionsValid) pindexFirstNotTransactionsValid = nullptr;
             if (pindex == pindexFirstNotChainValid) pindexFirstNotChainValid = nullptr;

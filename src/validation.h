@@ -256,11 +256,6 @@ extern CBlockIndex *pindexBestHeader;
 /** Pruning-related variables and constants */
 /** True if any block files have ever been pruned. */
 extern bool fHavePruned;
-/** True once any block has been accepted whose commitments we hold and whose
- *  bodies we do not. Plays the same role for decoupling that fHavePruned plays
- *  for pruning: it relaxes the index invariant that ties nTx to BLOCK_HAVE_DATA
- *  from an equivalence down to the implication that still holds. */
-extern bool fHaveCommitmentOnly;
 /** True if we're running in -prune mode. */
 extern bool fPruneMode;
 /** Number of MiB of block files that we're trying to stay below. */
@@ -913,8 +908,11 @@ private:
      * count, the cumulative count and the block's eligibility to be a chain
      * candidate are all commitment-level facts and are recorded either way;
      * the file position and BLOCK_HAVE_DATA are body-level and are not. */
+    /** Bodies arrived for a block whose commitments we already held. */
+    void ReceivedBlockBodies(CBlockIndex *pindexNew);
+
     void ReceivedBlockTransactions(const CBlock &block, CValidationState &state, CBlockIndex *pindexNew,
-                                   const FlatFilePos *pos);
+                                   const FlatFilePos &pos, bool bodies_held);
 
     bool RollforwardBlock(const CBlockIndex *pindex, CCoinsViewCache &inputs, const CChainParams &params,
                           CAssetsCache *assetsCache);

@@ -130,6 +130,23 @@ enum BlockStatus : uint32_t {
     BLOCK_FAILED_MASK = BLOCK_FAILED_VALID | BLOCK_FAILED_CHILD,
 
     BLOCK_CONFLICT_CHAINLOCK = 128, //!< conflicts with chainlock system
+
+    /**
+     * PERF (decoupling probe 0.1c): the transaction bodies this block commits to are held.
+     *
+     * Deliberately a bit and not a validity rung. Validity is an ordinal in a 3-bit field and
+     * BLOCK_VALID_TREE (2) and BLOCK_VALID_TRANSACTIONS (3) are adjacent, so a rung between them
+     * renumbers TRANSACTIONS, CHAIN and SCRIPTS -- and nStatus is persisted, so that is a
+     * block-index format change with a migration for every entry on disk.
+     *
+     * A bit avoids all of it, because the split is not ordinal in the first place. Of what
+     * BLOCK_VALID_TRANSACTIONS certifies above, a commitment block proves the structural half by
+     * itself -- coinbase present and well formed, no duplicate identifiers, merkle root, size --
+     * and leaves exactly two body properties, "transactions valid" and "sigops", which ConnectBlock
+     * re-checks anyway. So the rung stays where it is and the bit says whether the bodies behind it
+     * are in hand.
+     */
+    BLOCK_HAVE_BODIES = 256,
 };
 
 /** The block chain is a tree shaped structure starting with the

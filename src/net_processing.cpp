@@ -806,7 +806,8 @@ namespace {
                                 // We consider the chain that this peer is on invalid.
                                 return;
                             }
-                            if (pindex->nStatus & BLOCK_HAVE_DATA || ::ChainActive().Contains(pindex)) {
+                            if ((pindex->nStatus & BLOCK_HAVE_DATA && HaveBodies(pindex)) ||
+                                ::ChainActive().Contains(pindex)) {
                                 if (pindex->HaveTxsDownloaded())
                                     state->pindexLastCommonBlock = pindex;
                             } else if (mapBlocksInFlight.count(pindex->GetBlockHash()) == 0) {
@@ -2134,7 +2135,7 @@ bool static ProcessHeadersMessage(CNode *pfrom, CConnman *connman, ChainstateMan
             // Calculate all the blocks we'd need to switch to pindexLast, up to a limit.
             while (pindexWalk && !::ChainActive().Contains(pindexWalk) &&
                    vToFetch.size() <= MAX_BLOCKS_IN_TRANSIT_PER_PEER) {
-                if (!(pindexWalk->nStatus & BLOCK_HAVE_DATA) &&
+                if ((!(pindexWalk->nStatus & BLOCK_HAVE_DATA) || !HaveBodies(pindexWalk)) &&
                     !mapBlocksInFlight.count(pindexWalk->GetBlockHash())) {
                     // We don't have this block, and it's not yet in flight.
                     vToFetch.push_back(pindexWalk);
@@ -3421,11 +3422,15 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
             blockInFlightIt = mapBlocksInFlight.find(pindex->GetBlockHash());
             bool fAlreadyInFlight = blockInFlightIt != mapBlocksInFlight.end();
 
-            if (pindex->nStatus & BLOCK_HAVE_DATA) // Nothing to do here
+            // PERF (1.3.1, F-36): HAVE_DATA alone is no longer "nothing to do" --
+            // a commitment-only block has it set too. A body arriving by
+            // compact-block relay, the mainline path, must not be discarded here
+            // just because the commitment list was already held.
+            if ((pindex->nStatus & BLOCK_HAVE_DATA) && HaveBodies(pindex)) // Nothing to do here
                 return true;
 
             if (pindex->nChainWork <= ::ChainActive().Tip()->nChainWork || // We know something better
-                pindex->nTx != 0) { // We had this block at some point, but pruned it
+                (pindex->nTx != 0 && !(pindex->nStatus & BLOCK_HAVE_DATA))) { // We had this block at some point, but pruned it -- NOT commitment-only, which still wants the body
                 if (fAlreadyInFlight) {
                     // We requested this block for some reason, but our mempool will probably be useless
                     // so we just grab the block via normal getdata
