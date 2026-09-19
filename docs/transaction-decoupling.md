@@ -343,7 +343,7 @@ shape already bounds total block work, a third per-tx limit added nothing the re
 
 | limit | re-based to | constraint that picks the value |
 |---|---|---|
-| block sigop budget | committed identifier count | **a deliberate budget, not "match today"** — today's worst case is ~49 s per 2 MB block through an uncounted path, which is 40% of the interval and an accident of the accounting rather than a design choice |
+| block sigop budget | **250,000** (D-18) | ordinary 2-in/2-out traffic at ~4 accurate sigops/tx (F-11/F-30's corpus) needs 249,600 at the 520 tx/s sustained floor (X-1); worst-case validation ~32.4 s at ~130 µs/sigop (F-12), **~27% of the 120 s interval** — deliberate, not "match today"'s accidental ~41% (F-15) |
 | block body bytes | committed identifier count | bounds both the fetch and the permanent storage one block can impose |
 
 **Not yet a complete design (Fable review + independent verification, 2026-09-19 — F-86..F-90,
@@ -375,6 +375,16 @@ R-32).** Gaps found before this became an implementation plan, all traced to sou
 
 One correction already folded into the standardness discussion below (F-90): a bare multisig
 spend already relays today, which is why item 1's fix matters now, not only after activation.
+
+**Built (R-33, 2026-09-19).** Items 1-4 above are implemented: `GetAccurateSigOpCount`
+(`consensus/tx_verify.cpp`) is the additive counter from item 1, with `CScript::GetSigOpCount`'s
+new opt-in `fCountDataSig` parameter closing item 2 without touching any existing call site.
+`g_commitmentBudgetActive` (test-only, mirrors `g_perf_withhold_*`) is item 3's gate, threaded
+through `MaxBlockSigOps`'s new second parameter into ATMP, `ConnectBlock`, both view-less legacy
+checks, and `BlockAssembler::TestPackage` — closing item 4, since the miner reads its sigop
+accounting straight from the mempool entry ATMP populates, so one call site fixed both. A boost
+integration test proves the wiring reaches a real mempool entry end to end. The body-byte cap
+(the table's second row) is not yet built — still open, along with F-91's cost-model check.
 
 Open, not gaps in the reasoning: whether the ~130 µs/sigop, +40% cost constant holds at a packed
 worst-case shape rather than the two points it was measured at (F-91) — worth a targeted
