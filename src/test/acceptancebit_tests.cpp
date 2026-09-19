@@ -11,6 +11,7 @@
 
 #include <chain.h>
 #include <chainparams.h>
+#include <coins.h>
 #include <consensus/validation.h>
 #include <key.h>
 #include <node/context.h>
@@ -18,6 +19,7 @@
 #include <pubkey.h>
 #include <script/script.h>
 #include <script/standard.h>
+#include <txmempool.h>
 #include <validation.h>
 #include <test/test_raptoreum.h>
 
@@ -224,6 +226,131 @@ BOOST_AUTO_TEST_CASE(equal_work_tiebreak_survives_bodies_arriving_second) {
     BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblockB, /*fForceProcessing=*/false, nullptr));
     BOOST_CHECK(HaveBodies(pindexB));
     BOOST_CHECK_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), hashB.ToString());
+}
+
+// 1.3.3 (F-25j, Mike, 2026-09-19): out-of-order arrival is pre-existing
+// Bitcoin Core behaviour -- ReceivedBlockTransactions parks a block in
+// m_blocks_unlinked whenever ITS OWN parent is not yet HaveTxsDownloaded(),
+// "regardless of bodies" (F-25j's own wording). Decoupling does not touch
+// that guard, only what "downloaded" now records (commitments vs bodies).
+// This proves the guard still holds with the commitment layer wired in: a
+// fully-valid, fully-downloaded CHILD whose PARENT looks header-only must be
+// parked, not connected -- and must drain correctly once the parent's
+// commitments genuinely arrive.
+//
+// Building that PARENT/CHILD pair is not free: DIP3's CbTx merkle roots
+// (CalcCbTxMerkleRootMNList/Quorums, src/evo/cbtx.cpp) require the
+// deterministic masternode list to already be built for whatever pindexPrev
+// the child extends. That list is built incrementally, only by really
+// connecting a block -- there is no way to construct a DIP3-valid CHILD on
+// top of a parent that was never really connected (a fake CChain::SetTip
+// onto a header-only index, the upstream miner_tests.cpp trick for plain
+// subsidy math, reaches "*** Found EvoDB inconsistency, you must reindex to
+// continue" here, a fatal abort). So this builds the pair the only way DIP3
+// allows -- by really connecting the parent first -- and then rolls the
+// parent back to header-only via the real DisconnectTip (which correctly
+// reverses its coin/evoDB effects, unlike hand-editing nStatus over live
+// state), leaving only its own nTx/nChainTx bookkeeping to reset directly.
+struct CommitmentBudgetGuard {
+    ~CommitmentBudgetGuard() { g_commitmentBudgetActive = false; }
+};
+
+BOOST_AUTO_TEST_CASE(out_of_order_arrival_parks_a_child_until_its_parent_downloads) {
+    CommitmentBudgetGuard guard;
+    g_commitmentBudgetActive = true;
+
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    CChainState &chainstate = ::ChainstateActive();
+    const CChainParams &chainparams = Params();
+    CChain &active = ::ChainActive();
+
+    CBlockIndex *pindexRealTip = active.Tip();
+    BOOST_REQUIRE(pindexRealTip != nullptr);
+    uint256 hashRealTip = pindexRealTip->GetBlockHash();
+
+    // Really connect the parent -- DIP3's deterministic MN list is now
+    // genuinely cached for it, so a child built on top of it is DIP3-valid.
+    CBlock parent = CreateAndProcessBlock({}, coinbaseKey);
+    uint256 hashParent = parent.GetHash();
+    CBlockIndex *pindexParent = LookupBlockIndex(hashParent);
+    BOOST_REQUIRE(pindexParent != nullptr);
+    BOOST_REQUIRE_EQUAL(active.Tip()->GetBlockHash().ToString(), hashParent.ToString());
+
+    // Build the child on top of the (still really connected) parent tip --
+    // ordinary construction, no fakery, so its own CbTx is genuinely correct.
+    CBlock child = CreateBlock({}, coinbaseKey);
+    BOOST_REQUIRE_EQUAL(child.hashPrevBlock.ToString(), hashParent.ToString());
+
+    // Roll the parent back off the active chain through the real mechanism,
+    // which correctly reverses its coin/evoDB effects. DisconnectTip queues
+    // every one of the block's txs (coinbase included) for mempool
+    // resurrection -- deciding which ones actually get resurrected is the
+    // real reorg caller's (UpdateMempoolForReorg's) job, done elsewhere, so
+    // here it is enough to drain the queue directly: a coinbase can never be
+    // mempool-eligible, and DisconnectedBlockTransactions's own destructor
+    // asserts the queue is empty.
+    {
+        LOCK2(cs_main, m_node.mempool->cs);
+        CValidationState dcState;
+        DisconnectedBlockTransactions disconnectpool;
+        BOOST_REQUIRE(chainstate.DisconnectTip(dcState, chainparams, &disconnectpool));
+        disconnectpool.clear();
+    }
+    BOOST_REQUIRE_EQUAL(active.Tip()->GetBlockHash().ToString(), hashRealTip.ToString());
+
+    // setBlockIndexCandidates only keeps entries "as good as the current tip
+    // or better" -- real tip pruned it out once the (strictly better) parent
+    // overtook it, on the assumption (true for a real reorg, not here) that
+    // ActivateBestChain would immediately follow within the same call and
+    // reconnect something at least as good. CheckBlockIndex asserts the
+    // active tip is always a member, so restore that invariant by hand.
+    chainstate.setBlockIndexCandidates.insert(pindexRealTip);
+
+    // DisconnectTip reverses the parent's EFFECTS but leaves its own
+    // "this block's transactions were downloaded" bookkeeping untouched --
+    // correctly so, since DisconnectTip models "no longer active", not
+    // "never downloaded". Reset exactly that bookkeeping by hand (the same
+    // kind of direct nStatus surgery genuinely_pruned_arrival_is_still_discarded
+    // uses to simulate pruning) so the parent now looks exactly like a
+    // genuine headers-first registration: known, ordered, but never given to
+    // ReceivedBlockTransactions.
+    chainstate.setBlockIndexCandidates.erase(pindexParent);
+    pindexParent->nStatus &= ~(BLOCK_HAVE_DATA | BLOCK_HAVE_BODIES | BLOCK_HAVE_UNDO);
+    pindexParent->nStatus = (pindexParent->nStatus & ~BLOCK_VALID_MASK) | BLOCK_VALID_TREE;
+    pindexParent->nTx = 0;
+    pindexParent->nChainTx = 0;
+    // nSequenceId is only ever assigned inside ReceivedBlockTransactions, so
+    // a genuine header-only block always reads 0 -- CheckBlockIndex asserts
+    // exactly this for every not-yet-linked block.
+    pindexParent->nSequenceId = 0;
+    BOOST_REQUIRE(!pindexParent->HaveTxsDownloaded());
+    BOOST_REQUIRE(!(pindexParent->nStatus & BLOCK_HAVE_DATA));
+
+    // The child arrives, fully formed. Its own parent is (as far as the
+    // index can tell) still only header-known.
+    std::shared_ptr<const CBlock> shared_pchild = std::make_shared<const CBlock>(child);
+    bool fNewBlock = false;
+    BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pchild, /*fForceProcessing=*/true, &fNewBlock));
+    BOOST_REQUIRE(fNewBlock);
+
+    // The child is fully downloaded on its own -- HAVE_DATA is set -- but it
+    // must NOT become the tip, because its own parent has never had
+    // ReceivedBlockTransactions called on it. "Regardless of bodies"
+    // (F-25j): the child carries a full, decoded body and it still cannot
+    // connect.
+    const CBlockIndex *pindexChild = LookupBlockIndex(child.GetHash());
+    BOOST_REQUIRE(pindexChild != nullptr);
+    BOOST_CHECK(pindexChild->nStatus & BLOCK_HAVE_DATA);
+    BOOST_CHECK_EQUAL(active.Tip()->GetBlockHash().ToString(), hashRealTip.ToString());
+
+    // Now the parent's commitments arrive, genuinely, through the normal
+    // path. ReceivedBlockTransactions's own drain loop (validation.cpp) must
+    // find the child in m_blocks_unlinked and connect both blocks in one go.
+    std::shared_ptr<const CBlock> shared_pparent = std::make_shared<const CBlock>(parent);
+    BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pparent, /*fForceProcessing=*/true, nullptr));
+
+    BOOST_CHECK_EQUAL(active.Tip()->GetBlockHash().ToString(), child.GetHash().ToString());
+    BOOST_CHECK_EQUAL(active.Height(), pindexRealTip->nHeight + 2);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
