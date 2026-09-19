@@ -274,6 +274,16 @@ range, so any other software using bit 24 would be wedged by us. That argues for
 explicit `sendcommitments` negotiation message alongside the bit, exactly as BIP152 pairs
 `sendcmpct` with `MSG_CMPCT_BLOCK`, rather than trusting the advertisement alone.
 
+**Decided and built (R-31, 2026-09-19).** `sendcommitments`, no payload, sent after
+VERACK when `ShouldNegotiateCommitments` holds -- both our own local services and the
+peer's advertised services carry `NODE_COMMITMENTS`. Only *receiving* the message back
+sets `CNodeState::fProvidesCommitments`; the service bit alone never does, and nothing
+sends the commitment-form `getdata` type without checking that flag first (still
+unwired -- F-83/1.3 owns the consumer). Offering the handshake to a peer that merely
+squats on bit 24 for something unrelated costs nothing: an unrecognised command is
+silently ignored in this tree (`net_processing.cpp:3962`), unlike an unknown `getdata`
+inv type.
+
 `SER_COMMITMENTS` then has no remaining job on the wire. It is kept only if the body
 store wants it for the on-disk form, where `nType` *is* settable (`CAutoFile`) — a
 node-local choice that can be taken in phase 2 rather than now.
@@ -299,8 +309,10 @@ Three limits therefore have to be re-based, and they interact, so they are one d
 commitment block naming 62,500 such payments carries 125,000 and is **invalid**: `CheckBlock`
 sums across the block and rejects above the cap with `DoS(100)` (`validation.cpp:3935-3941`,
 again at `:4051-4064`, and with P2SH counted at `:2374-2375`). The cap admits roughly 20,000
-transactions — **167 tx/s against a 520 tx/s design point** — and the miner simply stops
-filling (`miner.cpp:TestPackage`), silently.
+transactions — **167 tx/s against a 520 tx/s design point, at the 2 MB consensus cap** (this branch
+currently runs `MAX_DIP0001_BLOCK_SIZE = 8,000,000` for an unrelated perf experiment — F-46b — which
+would put the admitted count at 667 tx/s; re-derive against whichever cap D-14's activation actually
+ships) — and the miner simply stops filling (`miner.cpp:TestPackage`), silently.
 
 This is §16.3's relay cap in a second place: a limit indexed to block *bytes*, which stop
 tracking what the block commits to the moment bodies leave the block.
@@ -332,6 +344,35 @@ consensus.
 | per-transaction work | accurate sigops over **spent** scripts × size | caps the quadratic term per transaction. **Measured 2026-09-18: ~130 µs per sigop of work, plus ~40% more from the size term at the 100 kB ceiling.** |
 | block body bytes | committed identifier count | bounds both the fetch and the permanent storage one block can impose |
 
+**Not yet a complete design (Fable review + independent verification, 2026-09-19 — F-86..F-92,
+R-32).** Four gaps found before this became an implementation plan, all traced to source:
+
+1. **The "accurate spent-scriptPubKey" unit still misses scriptSig-side work (F-86).**
+   `SCRIPT_VERIFY_SIGPUSHONLY` exists but is not in `GetBlockScriptFlags`'s consensus set — push-only
+   is enforced only for P2SH prevouts. A scriptSig spending a plain non-P2SH output a miner-attacker
+   created himself can run arbitrary `CHECKMULTISIG` ops the "spent scriptPubKey" count charges
+   nothing for. Same hole as F-13, moved rather than closed. **The counter must charge scriptSig,
+   spent scriptPubKey, and P2SH redeemScript — all three executed scripts, not one.**
+2. **`OP_CHECKDATASIG`(`VERIFY`) is priced by no sigop counter at all, legacy or proposed (F-87).**
+   It executes a full ECDSA verify and is already consensus-active under DIP0020. `GetSigOpCount`
+   only recognises CHECKSIG/CHECKMULTISIG. **The new counter must add it explicitly.**
+3. **No retirement or gating story for the legacy checks (F-88).** `ConnectBlock` re-invokes
+   `CheckBlock` on the materialised block, which still runs the old sigop and size checks against
+   the old cap. §1A proposes new caps but never says how the old ones are turned off post-activation
+   without also breaking pre-fork replay (IBD, `-reindex`). **Needs an explicit height/deployment
+   gate.**
+4. **No miner- or mempool-side re-basing (F-89).** `BlockAssembler::TestPackage` checks raw byte
+   size against the unmodified `DEFAULT_BLOCK_MAX_SIZE` and the legacy `MaxBlockSigOps()`; the
+   mempool's own `sigOpCount` is legacy-plus-P2SH. An honest miner cannot build a
+   62,500-identifier block under either without both being re-based, and 1.2 cannot be tested
+   end-to-end without it. **This has to be in scope, not deferred past 1.2.**
+
+Two further open questions, not gaps in the reasoning but unresolved before implementation: whether
+the ~130 µs/sigop, +40% cost constant holds at a packed worst-case shape rather than the two points
+it was measured at (F-91), and what the per-transaction work cap bounds that the sigop-count and
+byte caps don't already bound at the block level, given it has no connect-time enforcement point yet
+either (F-92, and see D-16/1.3).
+
 **No declared coinbase field is needed for any of it.** Bodies are self-authenticating, so a
 prefix whose accumulated work or bytes exceeds the cap already proves the block invalid and
 aborts the fetch. `sum == declared` buys nothing over `<= MAX`, and a declared field would be
@@ -347,9 +388,17 @@ sighash once per public key tried and nothing examines the spent scriptPubKey.
 correctly — 15 per input, ~130 µs each, holding a maximally loaded 2 MB block to ~5.2 s — and
 prices bare multisig at nothing. A 2 MB block of bare-multisig spends is ~49 s of validation
 charged ~42 sigops of a 40,000 budget; the same count as *commitments* implies ~41 hours. **So the
-rule charges an accurate count over every spent scriptPubKey, not just P2SH ones.** Bare 15-key
-multisig is non-standard and does not relay, but a miner can mine it, and a miner is who fills
-blocks. See `perf-results.md`.
+rule charges an accurate count over every spent scriptPubKey, not just P2SH ones.**
+
+**Corrected (F-90, 2026-09-19) — "non-standard and does not relay" is wrong for the spend.**
+*Creating* a bare multisig output with more than 3 keys is non-standard (`IsStandard` rejects
+`n > 3`). *Spending* one already on chain is not: `AreInputsStandard` only rejects
+`TX_NONSTANDARD` prevouts, and `Solver`/`MatchMultisig` classify up to `MAX_PUBKEYS_PER_MULTISIG =
+20` keys as `TX_MULTISIG`, which passes. So once one such output exists — mined once by an
+attacker, standardness does not apply to what a miner includes — every spend of it **relays into
+every mempool today**, not only at mining time. And per F-86, this is not even limited to bare
+multisig: any scriptSig spending a non-P2SH output can carry work the accurate-count rule as
+proposed does not see.
 
 **Per-transaction is the checkable unit.** A node cannot know what a commitment block implies
 before fetching; it can reject each body as it arrives. The one term needing the UTXO view is
