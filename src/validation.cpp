@@ -4587,12 +4587,28 @@ bool ChainstateManager::ProcessNewBlock(const CChainParams &chainparams, const s
         CBlockIndex *pindex = nullptr;
         if (fNewBlock) *fNewBlock = false;
         CValidationState state;
-        // Ensure that CheckBlock() passes before calling AcceptBlock, as
-        // belt-and-suspenders.
-        int nHeight = ::ChainActive().Tip()->nHeight + 1;
-        bool ret = CheckBlock(*pblock, state, chainparams.GetConsensus(), nHeight);
 
         LOCK(cs_main);
+
+        // Ensure that CheckBlock() passes before calling AcceptBlock, as
+        // belt-and-suspenders. F-45 (1.3.2, Mike): the height used here must
+        // come from the block's REAL parent, not an assumption that it
+        // extends the current tip -- computing it as Tip()->nHeight + 1
+        // BEFORE taking cs_main was both a data race (an unsynchronized read
+        // of chain-active state) and wrong whenever the submitted block
+        // doesn't build on the current tip (a sibling of the tip, or any
+        // block arriving mid-reorg -- not just under a race). CheckBlock's
+        // founder-payment enforcement is height-dependent, and on success it
+        // sets the shared, mutable CBlock::fChecked flag, which every later
+        // CheckBlock call on this same object -- including ConnectBlock's --
+        // trusts and skips re-verifying. A wrong guess here plus that cache
+        // is a silently-wrong founder-payment verdict surviving to connect
+        // time. Looking up the real parent needs cs_main for a consistent
+        // read, which is also why this moved inside the lock rather than
+        // gaining a second, redundant height computation.
+        const CBlockIndex *pindexPrev = LookupBlockIndex(pblock->hashPrevBlock);
+        int nHeight = (pindexPrev ? pindexPrev->nHeight : 0) + 1;
+        bool ret = CheckBlock(*pblock, state, chainparams.GetConsensus(), nHeight);
 
         if (ret) {
             // Store to disk
