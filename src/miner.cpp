@@ -286,7 +286,10 @@ void BlockAssembler::onlyUnconfirmed(CTxMemPool::setEntries &testSet) {
 bool BlockAssembler::TestPackage(uint64_t packageSize, unsigned int packageSigOps) const {
     if (nBlockSize + packageSize >= nBlockMaxSize)
         return false;
-    if (nBlockSigOps + packageSigOps >= MaxBlockSigOps(fDIP0001ActiveAtTip))
+    // 1.2 (D-18, F-89): packageSigOps already carries the accurate count when the
+    // budget is active, since it comes straight from the mempool entry ATMP stored
+    // it into (validation.cpp) -- this only has to swap the threshold to match.
+    if (nBlockSigOps + packageSigOps >= MaxBlockSigOps(fDIP0001ActiveAtTip, g_commitmentBudgetActive))
         return false;
     return true;
 }

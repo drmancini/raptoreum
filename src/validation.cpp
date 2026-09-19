@@ -116,6 +116,9 @@ bool g_parallel_script_checks{false};
 std::set<uint256> g_perf_withhold_hashes;
 std::set<int> g_perf_withhold_heights;
 
+/** 1.2 (D-18, F-88); see validation.h. */
+std::atomic<bool> g_commitmentBudgetActive{false};
+
 bool HaveBodies(const CBlockIndex *pindex) {
     if (pindex == nullptr) {
         return false;
@@ -755,7 +758,13 @@ static bool AcceptToMemoryPoolWorker(const CChainParams &chainparams, CTxMemPool
         // Check for non-standard pay-to-script-hash in inputs
         if (fRequireStandard && !AreInputsStandard(tx, view))
             return state.Invalid(false, REJECT_NONSTANDARD, "bad-txns-nonstandard-inputs");
-        unsigned int nSigOps = GetTransactionSigOpCount(tx, view, STANDARD_SCRIPT_VERIFY_FLAGS);
+        // 1.2 (D-18, F-89): under the commitment budget, the miner's block-assembly
+        // sigop accounting reads straight from this stored entry (miner.cpp:315), so
+        // the accurate count has to be set here or it never reaches the path that
+        // matters, regardless of what ConnectBlock enforces.
+        unsigned int nSigOps = g_commitmentBudgetActive
+                               ? GetAccurateSigOpCount(tx, view)
+                               : GetTransactionSigOpCount(tx, view, STANDARD_SCRIPT_VERIFY_FLAGS);
 
         // nModifiedFees includes any fee deltas from PrioritiseTransaction
         CAmount nModifiedFees = nFees;
@@ -2427,8 +2436,12 @@ bool CChainState::ConnectBlock(const CBlock &block, CValidationState &state, CBl
         // GetTransactionSigOpCount counts 2 types of sigops:
         // * legacy (always)
         // * p2sh (when P2SH enabled in flags and excludes coinbase)
-        nSigOps += GetTransactionSigOpCount(tx, view, flags);
-        if (nSigOps > MaxBlockSigOps(fDIP0001Active_context))
+        // 1.2 (D-18, F-86, F-88): under the commitment budget this switches to the
+        // accurate counter and the committed-count threshold instead.
+        nSigOps += g_commitmentBudgetActive
+                   ? GetAccurateSigOpCount(tx, view)
+                   : GetTransactionSigOpCount(tx, view, flags);
+        if (nSigOps > MaxBlockSigOps(fDIP0001Active_context, g_commitmentBudgetActive))
             return state.DoS(100, error("ConnectBlock(): too many sigops"),
                              REJECT_INVALID, "bad-blk-sigops");
 
@@ -4017,8 +4030,10 @@ bool CheckBlock(const CBlock &block, CValidationState &state, const Consensus::P
     for (const auto &tx: block.vtx) {
         nSigOps += GetLegacySigOpCount(*tx);
     }
-    // sigops limits (relaxed)
-    if (nSigOps > MaxBlockSigOps())
+    // sigops limits (relaxed). No view here, so this stays a legacy (undercounting)
+    // pre-check either way (1.2, F-88) -- the real accurate-count enforcement is at
+    // ConnectBlock, where a UTXO view exists.
+    if (nSigOps > MaxBlockSigOps(true, g_commitmentBudgetActive))
         return state.DoS(100, false, REJECT_INVALID, "bad-blk-sigops", false, "out-of-bounds SigOpCount");
 
     if (fCheckPOW && fCheckMerkleRoot)
@@ -4140,8 +4155,9 @@ static bool ContextualCheckBlock(const CBlock &block, CValidationState &state, c
         nSigOps += GetLegacySigOpCount(*tx);
     }
 
-    // Check sigops
-    if (nSigOps > MaxBlockSigOps(fDIP0001Active_context))
+    // Check sigops. No view here (1.2, F-88): stays a legacy pre-check either way,
+    // real accurate-count enforcement is at ConnectBlock.
+    if (nSigOps > MaxBlockSigOps(fDIP0001Active_context, g_commitmentBudgetActive))
         return state.DoS(100, false, REJECT_INVALID, "bad-blk-sigops", false, "out-of-bounds SigOpCount");
 
     // Enforce rule that the coinbase starts with serialized block height

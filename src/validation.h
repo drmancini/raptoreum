@@ -200,6 +200,12 @@ extern bool g_parallel_script_checks;
 extern std::set<uint256> g_perf_withhold_hashes;
 extern std::set<int> g_perf_withhold_heights;
 
+/** 1.2 (D-18, F-88): gates the committed-count sigop budget (COMMITMENT_BUDGET_SIGOPS)
+ *  in place of the byte-indexed legacy cap, and switches ATMP/ConnectBlock to
+ *  GetAccurateSigOpCount. Test-only until 4.6 has a real deployment bit --
+ *  mirrors g_perf_withhold_* above, not a consensus parameter yet. */
+extern std::atomic<bool> g_commitmentBudgetActive;
+
 /** Do we hold the transaction bodies for this block?
  *
  *  The acceptance layer the decoupling design needs (see docs, §2) splits one
