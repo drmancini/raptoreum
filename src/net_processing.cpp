@@ -3045,7 +3045,13 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
         LOCK(cs_main);
 
         const CBlockIndex *pindex = LookupBlockIndex(req.blockhash);
-        if (!pindex || !(pindex->nStatus & BLOCK_HAVE_DATA)) {
+        // PERF (H-2, Fable review, 2026-09-19): HAVE_DATA alone is no longer
+        // "we have it" -- a commitment-only block has it set too, and the
+        // ReadBlockFromDisk call below asserts success unconditionally. The
+        // serve-side gate at the getdata path already learned this the hard
+        // way (F-40's own note: "one 37-byte getdata kills the process");
+        // this sibling handler needed the identical fix.
+        if (!pindex || !(pindex->nStatus & BLOCK_HAVE_DATA) || !HaveBodies(pindex)) {
             LogPrint(BCLog::NET, "Peer %d sent us a getblocktxn for a block we don't have\n", pfrom->GetId());
             return true;
         }

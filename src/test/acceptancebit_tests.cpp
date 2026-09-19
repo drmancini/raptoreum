@@ -76,6 +76,12 @@ BOOST_AUTO_TEST_CASE(unrequested_arrival_fills_a_commitment_only_block) {
     // F-100 corrected the plan draft over.
     const CBlockIndex *pindex = LookupBlockIndex(hash);
     BOOST_REQUIRE(!HaveBodies(pindex));
+    // Test review (2026-09-19): capture where the commitment record already
+    // lives, so a re-offer that wrongly writes a SECOND copy (exactly what
+    // ReceivedBlockBodies exists to avoid -- see the "already-stored,
+    // still-withheld" comment in AcceptBlock) is caught, not just the bit.
+    const int nFileBefore = pindex->nFile;
+    const unsigned int nDataPosBefore = pindex->nDataPos;
 
     // Re-offer the identical block, UNREQUESTED (fForceProcessing = false).
     // Before the F-36 fix, AcceptBlock's "if (pindex->nTx != 0) return true"
@@ -94,6 +100,18 @@ BOOST_AUTO_TEST_CASE(unrequested_arrival_fills_a_commitment_only_block) {
     BOOST_CHECK(HaveBodies(pindex));
     BOOST_CHECK(pindex->nStatus & BLOCK_HAVE_BODIES);
     BOOST_CHECK(pindex->nStatus & BLOCK_HAVE_DATA);
+
+    // Test review (2026-09-19), HIGH: the mechanism's actual point -- a
+    // commitment-only block whose bodies arrive must become connectable, not
+    // just carry the right bits. Deleting ReceivedBlockBodies's candidate
+    // re-arm walk (the "put back everything the arrival makes eligible
+    // again" loop) would leave every assertion above passing while the tip
+    // never advances.
+    BOOST_CHECK(::ChainActive().Tip()->GetBlockHash() == hash);
+    // And no second copy was written -- the record's own file position is
+    // unchanged, not merely re-created identically.
+    BOOST_CHECK_EQUAL(pindex->nFile, nFileBefore);
+    BOOST_CHECK_EQUAL(pindex->nDataPos, nDataPosBefore);
 }
 
 // The fix must not touch pruning's own, deliberate "ignore a re-offered
