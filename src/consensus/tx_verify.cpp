@@ -250,7 +250,7 @@ unsigned int GetTransactionSigOpCount(const CTransaction &tx, const CCoinsViewCa
     return nSigOps;
 }
 
-unsigned int GetAccurateSigOpCount(const CTransaction &tx, const CCoinsViewCache &inputs) {
+unsigned int GetAccurateOwnSigOpCount(const CTransaction &tx) {
     unsigned int nSigOps = 0;
     for (const auto &txin: tx.vin) {
         nSigOps += txin.scriptSig.GetSigOpCount(/*fAccurate=*/true, /*fCountDataSig=*/true);
@@ -258,6 +258,11 @@ unsigned int GetAccurateSigOpCount(const CTransaction &tx, const CCoinsViewCache
     for (const auto &txout: tx.vout) {
         nSigOps += txout.scriptPubKey.GetSigOpCount(/*fAccurate=*/true, /*fCountDataSig=*/true);
     }
+    return nSigOps;
+}
+
+unsigned int GetAccurateSigOpCount(const CTransaction &tx, const CCoinsViewCache &inputs) {
+    unsigned int nSigOps = GetAccurateOwnSigOpCount(tx);
 
     if (tx.IsCoinBase())
         return nSigOps;

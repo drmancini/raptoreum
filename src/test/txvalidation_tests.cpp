@@ -17,6 +17,13 @@
 #include <boost/test/unit_test.hpp>
 
 
+// F6 (1.2 review, 2026-09-19): a thrown BOOST_REQUIRE between setting
+// g_commitmentBudgetActive = true and resetting it would leave the global on
+// for every later test in the process. RAII guarantees the reset regardless.
+struct CommitmentBudgetGuard {
+    ~CommitmentBudgetGuard() { g_commitmentBudgetActive = false; }
+};
+
 BOOST_AUTO_TEST_SUITE(txvalidation_tests)
 
 /**
@@ -135,6 +142,7 @@ BOOST_FIXTURE_TEST_CASE(mempool_entry_uses_accurate_sigops_when_budget_active, T
     BOOST_REQUIRE(SignSignature(keystore, CTransaction(fundTx), spendTx, 0, SIGHASH_ALL));
 
     LOCK(cs_main);
+    CommitmentBudgetGuard guard;
 
     g_commitmentBudgetActive = false;
     CValidationState stateLegacy;
@@ -155,9 +163,13 @@ BOOST_FIXTURE_TEST_CASE(mempool_entry_uses_accurate_sigops_when_budget_active, T
     m_node.mempool->removeRecursive(CTransaction(spendTx), MemPoolRemovalReason::MANUAL);
     g_commitmentBudgetActive = false;
 
-    // Legacy never sees the spent bare multisig script at all; the accurate
-    // path adds the 1-of-3's 3 sigops on top.
-    BOOST_CHECK_EQUAL(accurateCount, legacyCount + 3);
+    // Absolute values, not just the delta (1.2 test review, 2026-09-19): a
+    // delta-only check passes under any additive error shared by both
+    // branches. spendTx's scriptSig is OP_0 <sig> (0 sigops of its own), its
+    // output is P2PKH (1 CHECKSIG), and the bare 1-of-3 prevout is invisible
+    // to legacy/P2SH -- so legacy must be exactly 1, accurate exactly 4.
+    BOOST_CHECK_EQUAL(legacyCount, 1U);
+    BOOST_CHECK_EQUAL(accurateCount, 4U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

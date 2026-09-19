@@ -4028,11 +4028,16 @@ bool CheckBlock(const CBlock &block, CValidationState &state, const Consensus::P
 
     unsigned int nSigOps = 0;
     for (const auto &tx: block.vtx) {
-        nSigOps += GetLegacySigOpCount(*tx);
+        // No view here, so under the commitment budget this can only ever be the
+        // view-independent HALF of the accurate count -- but it must be that, not
+        // legacy: legacy is not a uniform undercount (1.2 review, F1) and can
+        // overcount a small created multisig output enough to make CheckBlock
+        // reject a block the miner correctly built within the accurate budget.
+        // The real, complete accurate-count enforcement is at ConnectBlock, where
+        // a UTXO view exists.
+        nSigOps += g_commitmentBudgetActive ? GetAccurateOwnSigOpCount(*tx) : GetLegacySigOpCount(*tx);
     }
-    // sigops limits (relaxed). No view here, so this stays a legacy (undercounting)
-    // pre-check either way (1.2, F-88) -- the real accurate-count enforcement is at
-    // ConnectBlock, where a UTXO view exists.
+    // sigops limits (relaxed)
     if (nSigOps > MaxBlockSigOps(true, g_commitmentBudgetActive))
         return state.DoS(100, false, REJECT_INVALID, "bad-blk-sigops", false, "out-of-bounds SigOpCount");
 
@@ -4152,11 +4157,14 @@ static bool ContextualCheckBlock(const CBlock &block, CValidationState &state, c
         if (!ContextualCheckTransaction(*tx, state, consensusParams, pindexPrev)) {
             return false;
         }
-        nSigOps += GetLegacySigOpCount(*tx);
+        // See the identical comment in CheckBlock: legacy overcounts a small
+        // created multisig output badly enough to false-reject a block the
+        // miner built within the accurate budget (1.2 review, F1).
+        nSigOps += g_commitmentBudgetActive ? GetAccurateOwnSigOpCount(*tx) : GetLegacySigOpCount(*tx);
     }
 
-    // Check sigops. No view here (1.2, F-88): stays a legacy pre-check either way,
-    // real accurate-count enforcement is at ConnectBlock.
+    // Check sigops. No view here: this is the view-independent half either way,
+    // real accurate-count enforcement (including the spend side) is at ConnectBlock.
     if (nSigOps > MaxBlockSigOps(fDIP0001Active_context, g_commitmentBudgetActive))
         return state.DoS(100, false, REJECT_INVALID, "bad-blk-sigops", false, "out-of-bounds SigOpCount");
 

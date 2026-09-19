@@ -826,7 +826,7 @@ static UniValue getblocktemplate(const JSONRPCRequest &request) {
     result.pushKV("mintime", (int64_t) pindexPrev->GetMedianTimePast() + 1);
     result.pushKV("mutable", aMutable);
     result.pushKV("noncerange", "00000000ffffffff");
-    result.pushKV("sigoplimit", (int64_t) MaxBlockSigOps(fDIP0001ActiveAtTip));
+    result.pushKV("sigoplimit", (int64_t) MaxBlockSigOps(fDIP0001ActiveAtTip, g_commitmentBudgetActive));
     result.pushKV("sizelimit", (int64_t) MaxBlockSize(fDIP0001ActiveAtTip));
     result.pushKV("curtime", pblock->GetBlockTime());
     result.pushKV("bits", strprintf("%08x", pblock->nBits));
