@@ -343,7 +343,7 @@ shape already bounds total block work, a third per-tx limit added nothing the re
 
 | limit | re-based to | constraint that picks the value |
 |---|---|---|
-| block sigop budget | **250,000** (D-18) | ordinary 2-in/2-out traffic at ~4 accurate sigops/tx (F-11/F-30's corpus) needs 249,600 at the 520 tx/s sustained floor (X-1); worst-case validation ~32.4 s at ~130 µs/sigop (F-12), **~27% of the 120 s interval** — deliberate, not "match today"'s accidental ~41% (F-15) |
+| block sigop budget | **250,000** (D-18) | ordinary 2-in/2-out traffic at ~4 accurate sigops/tx (F-11/F-30's corpus) needs 249,600 at the 520 tx/s sustained floor (X-1). **Worst-case time redone twice (D-18):** first pass used F-12's 130 µs/sigop, "~27%, tighter than today" — wrong, cherry-picked the optimistic point. F-13's own 196 µs/sigop gives "~41%, parity with today" — also superseded. F-97 measured `ConnectBlock` directly at K-3's real per-tx ceiling: **~320 µs/sigop, ~80 s, ~67% of the 120 s interval** |
 | block body bytes | committed identifier count | bounds both the fetch and the permanent storage one block can impose |
 
 **Not yet a complete design (Fable review + independent verification, 2026-09-19 — F-86..F-90,
@@ -386,19 +386,26 @@ accounting straight from the mempool entry ATMP populates, so one call site fixe
 integration test proves the wiring reaches a real mempool entry end to end. The body-byte cap
 (the table's second row) is not yet built — still open.
 
-**F-91 resolved, redirected (R-34, 2026-09-19).** A live packed-shape benchmark (isolated node,
-mario) found the hypothesised mechanism -- sighash recomputed per key, scaling with preimage size
--- is not what dominates: forcing 15 CheckSig attempts vs 1 changes cost under 3%, and a
-transaction with **zero sigops at all** costs the same again. What actually explodes is `~O(n²)`
-in the transaction's own **input count**, entirely independent of sigops (F-93) -- up to
-~370-385 ms for one maximally-packed, ~2400-input, 98.6 kB transaction (K-3's own ceiling).
-Critically, this cost lives in mempool ATMP, not in `ConnectBlock`: the identical transaction,
-mined and IBD-synced cold by a second node that never ran it through its own mempool, cost ~70 ms
-(F-94) -- roughly 5x cheaper, not the same. **D-18 stands**: it was derived to bound
-`ConnectBlock`'s worst-case time, and that path does not show the blowup. What the packed-shape
-test actually surfaced is a different, likely pre-existing, non-decoupling-specific mempool DoS
-vector, whose real-world reach depends on whether the exploit shape (a trivially-spendable output
-with an empty scriptSig) can pass standardness policy at all -- open (F-93's own note).
+**F-91 resolved, redirected, then partly reinstated (R-34, F-97, 2026-09-19).** A live
+packed-shape benchmark (isolated node, mario) found the hypothesised mechanism -- sighash
+recomputed per key, scaling with preimage size -- is not what dominates a ZERO-sigop packed
+transaction: forcing 15 CheckSig attempts vs 1 changes cost under 3% there, and a transaction with
+**zero sigops at all** costs the same again. What dominates that shape is `~O(n²)` in the
+transaction's own **input count**, independent of sigops (F-93) -- up to ~370-385 ms for one
+maximally-packed, ~2400-input, 98.6 kB transaction. That cost lives in mempool ATMP, not
+`ConnectBlock`: the identical zero-sigop transaction, mined and IBD-synced cold by a second node
+that never ran it through its own mempool, cost ~70 ms (F-94) -- roughly 5x cheaper.
+
+That comparison used a zero-sigop transaction, which is exactly where F-91's own mechanism
+contributes nothing to measure. Redone with 225 REAL sigops present (F-97): at low input count,
+`ConnectBlock`'s cold cost tracks ATMP's closely (both near F-12's 130 µs/sigop -- no cache
+advantage exists for a transaction neither node has ever validated). But at K-3's real ~100 kB
+ceiling (2,325 total inputs), cold `ConnectBlock` cost is **~320 µs/sigop, confirmed over a 6-rep
+median** -- higher than F-13's 196 µs (measured at n=800, short of that shape's own ceiling) and
+squarely `ConnectBlock`-side, not an ATMP artifact. F-91's mechanism is real and reaches
+`ConnectBlock`; D-18 is corrected accordingly, twice. The separate F-93 mempool DoS question
+stands as its own item, whose real-world reach still depends on whether the exploit shape can pass
+standardness policy at all -- open (F-93's own note).
 
 **No declared coinbase field is needed for any of it.** Bodies are self-authenticating, so a
 prefix whose accumulated work or bytes exceeds the cap already proves the block invalid and
