@@ -12,8 +12,12 @@
 #include <chain.h>
 #include <chainparams.h>
 #include <consensus/validation.h>
+#include <key.h>
 #include <node/context.h>
 #include <primitives/block.h>
+#include <pubkey.h>
+#include <script/script.h>
+#include <script/standard.h>
 #include <validation.h>
 #include <test/test_raptoreum.h>
 
@@ -159,6 +163,67 @@ BOOST_AUTO_TEST_CASE(genuinely_pruned_arrival_is_still_discarded) {
     // arrival, matching the characterisation test's pinned pruning behaviour.
     BOOST_CHECK(!(pindex->nStatus & BLOCK_HAVE_DATA));
     BOOST_CHECK(!HaveBodies(pindex));
+}
+
+// 1.3.4 (F-35/F-42, Mike, 2026-09-19): the equal-work tie-break. Settled by
+// construction when ReceivedBlockBodies was built (1.3.1) -- it deliberately
+// does NOT re-stamp nSequenceId, on the reasoning that first-seen order has
+// not changed when a body merely catches up to already-held commitments.
+// This proves it: a block (B) whose COMMITMENTS arrive first, but whose BODY
+// arrives second (after an equal-work rival (A) has arrived whole and become
+// tip), must still WIN the tie once its body fills in -- exactly what B
+// would have won had it arrived whole first, matching unmodified Bitcoin's
+// own first-seen tie-break (CBlockIndexWorkComparator, lower nSequenceId
+// wins). F-35's bug was the opposite: re-stamping on body arrival would move
+// B's sequence id LATER than A's, making B lose a tie it should have won.
+BOOST_AUTO_TEST_CASE(equal_work_tiebreak_survives_bodies_arriving_second) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    const CChainParams &chainparams = Params();
+
+    // Two distinct children of the same tip -- equal chainwork by
+    // construction (same nBits at the same height) -- built with different
+    // coinbase scriptPubKeys so they are genuinely different blocks, not the
+    // same bytes twice. NOTE: TestChainSetup::CreateBlock's CKey overload
+    // ignores its argument and always uses the fixture's own coinbaseKey (a
+    // pre-existing quirk in test_raptoreum.cpp, out of scope here) -- use
+    // the CScript overload directly instead.
+    CKey keyB;
+    keyB.MakeNewKey(true);
+    CScript scriptPubKeyB = CScript() << ToByteVector(keyB.GetPubKey()) << OP_CHECKSIG;
+    CBlock blockB = CreateBlock({}, scriptPubKeyB);
+    CBlock blockA = CreateBlock({}, coinbaseKey);
+    BOOST_REQUIRE(blockA.GetHash() != blockB.GetHash());
+
+    std::shared_ptr<const CBlock> shared_pblockB = std::make_shared<const CBlock>(blockB);
+    std::shared_ptr<const CBlock> shared_pblockA = std::make_shared<const CBlock>(blockA);
+    uint256 hashA = blockA.GetHash();
+    uint256 hashB = blockB.GetHash();
+
+    // B's commitments arrive first, bodies withheld -- not yet connectable,
+    // so it cannot become tip regardless of its (currently low) sequence id.
+    {
+        PerfWithholdGuard guard(hashB);
+        BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblockB, /*fForceProcessing=*/true, nullptr));
+    }
+    const CBlockIndex *pindexB = LookupBlockIndex(hashB);
+    BOOST_REQUIRE(pindexB != nullptr);
+    BOOST_REQUIRE(!HaveBodies(pindexB));
+
+    // A arrives whole, second, and becomes tip -- the only connectable
+    // candidate at this point.
+    BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblockA, /*fForceProcessing=*/true, nullptr));
+    const CBlockIndex *pindexA = LookupBlockIndex(hashA);
+    BOOST_REQUIRE(pindexA != nullptr);
+    BOOST_REQUIRE(::ChainActive().Tip()->GetBlockHash() == hashA);
+    BOOST_REQUIRE(pindexA->nChainWork == pindexB->nChainWork);   // genuinely a tie
+    BOOST_REQUIRE_LT(pindexB->nSequenceId, pindexA->nSequenceId);   // B really was seen first
+
+    // B's body now arrives, unrequested -- ReceivedBlockBodies must NOT
+    // re-stamp nSequenceId, so B's (earlier) id is unchanged and it wins the
+    // tie against A, becoming the new tip.
+    BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblockB, /*fForceProcessing=*/false, nullptr));
+    BOOST_CHECK(HaveBodies(pindexB));
+    BOOST_CHECK_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), hashB.ToString());
 }
 
 BOOST_AUTO_TEST_SUITE_END()
