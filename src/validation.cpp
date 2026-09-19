@@ -4097,6 +4097,70 @@ bool CheckBlock(const CBlock &block, CValidationState &state, const Consensus::P
     return true;
 }
 
+bool CheckCommitmentBlock(const CCommitmentBlock &block, CValidationState &state,
+                          const Consensus::Params &consensusParams, int nHeight,
+                          bool fCheckPOW, bool fCheckMerkleRoot) {
+    // Header validity (PoW, header sanity) -- CCommitmentBlock IS-A
+    // CBlockHeader, so the existing check applies unchanged.
+    if (!CheckBlockHeader(block, state, consensusParams, fCheckPOW))
+        return false;
+
+    if (block.IsNull())
+        return state.DoS(100, false, REJECT_INVALID, "bad-cb-missing", false,
+                         "commitment block carries no coinbase");
+
+    // A malicious peer controls this field over the wire -- CCommitmentBlock's
+    // type does not itself guarantee its "coinbase" field actually is one.
+    // Mirrors CheckBlock's own "first transaction must be coinbase" rule.
+    if (!block.coinbase->IsCoinBase())
+        return state.DoS(100, false, REJECT_INVALID, "bad-cb-missing", false,
+                         "commitment block's coinbase field is not a coinbase");
+
+    // The merkle root over Identifiers() -- coinbase hash as leaf 0, then the
+    // committed identifiers -- IS the binding F-83 found missing: nothing
+    // else ties an identifier list to the header it arrived with. F-78
+    // already retired a separate id[0]==hash(coinbase) rule as redundant with
+    // this, since Identifiers()'s own first leaf is the coinbase hash.
+    if (fCheckMerkleRoot) {
+        bool mutated = false;
+        uint256 hashMerkleRoot2 = block.ComputeMerkleRoot(&mutated);
+        if (block.hashMerkleRoot != hashMerkleRoot2)
+            return state.DoS(100, false, REJECT_INVALID, "bad-txnmrklroot", true, "hashMerkleRoot mismatch");
+
+        // Merkle tree malleability (CVE-2012-2459), mirrored from CheckBlock.
+        if (mutated)
+            return state.DoS(100, false, REJECT_INVALID, "bad-txns-duplicate", true, "duplicate transaction");
+
+        // F-43b: the merkle check above compares adjacent pairs at EVEN
+        // positions only, so a duplicate identifier at an odd boundary passes
+        // it entirely. A commitment block naming the same transaction twice
+        // is not a block anyone can fill, and nothing downstream catches this
+        // once bodies are fetched by identifier rather than embedded inline --
+        // this is the rung rule the format needs and the merkle check cannot
+        // provide.
+        if (block.HasDuplicateIdentifiers())
+            return state.DoS(100, false, REJECT_INVALID, "bad-cmt-duplicate-ids", true,
+                             "duplicate committed identifier");
+    }
+
+    // Coinbase CheckTransaction: length, no asset, the founder payment.
+    // Reused as-is -- CheckTransaction takes a single transaction, not a
+    // block, so nothing about it is body-dependent.
+    CAmount blockReward = GetBlockSubsidy(1, nHeight - 1, consensusParams, false);
+    if (!CheckTransaction(*block.coinbase, state, nHeight - 1, blockReward))
+        return state.Invalid(false, state.GetRejectCode(), state.GetRejectReason(),
+                             strprintf("Transaction check failed (tx hash %s) %s",
+                                       block.coinbase->GetHash().ToString(), state.GetDebugMessage()));
+
+    // Deliberately NOT checked here: block size / sigop / input-count budgets
+    // (1.2, D-19). Those are stated over the MATERIALISED block's serialized
+    // size and per-transaction input counts -- a bare identifier list cannot
+    // answer either. CheckBlock/ContextualCheckBlock enforce them once a real
+    // CBlock exists, which by construction is only once bodies are held.
+
+    return true;
+}
+
 /** Context-dependent validity checks.
  *  By "context", we mean only the previous block headers, but not the UTXO
  *  set; UTXO-related validity checks are done in ConnectBlock().
@@ -4235,6 +4299,41 @@ static bool ContextualCheckBlock(const CBlock &block, CValidationState &state, c
             return state.DoS(100, false, REJECT_INVALID, "bad-cb-type", false, "coinbase is not a CbTx");
         }
     }
+
+    return true;
+}
+
+// 1.3.2 (F-83): the two commitment-checkable rows needing chain context.
+// Mirrors ContextualCheckBlock's own nHeight/nLockTimeCutoff derivation --
+// a commitment block's coinbase is bound to the tree no differently.
+bool ContextualCheckCommitmentBlock(const CCommitmentBlock &block, CValidationState &state,
+                                    const Consensus::Params &consensusParams, const CBlockIndex *pindexPrev) {
+    const int nHeight = pindexPrev == nullptr ? 0 : pindexPrev->nHeight + 1;
+
+    int nLockTimeFlags = 0;
+    if (consensusParams.BIPCSVEnabled) {
+        nLockTimeFlags |= LOCKTIME_MEDIAN_TIME_PAST;
+    }
+    int64_t nLockTimeCutoff = (nLockTimeFlags & LOCKTIME_MEDIAN_TIME_PAST) && pindexPrev != nullptr
+                              ? pindexPrev->GetMedianTimePast()
+                              : block.GetBlockTime();
+
+    if (block.IsNull())
+        return state.DoS(100, false, REJECT_INVALID, "bad-cb-missing", false,
+                         "commitment block carries no coinbase");
+
+    // Coinbase finality (bad-txns-nonfinal): CheckBlock/ContextualCheckBlock
+    // apply this to every transaction in the loop over block.vtx, which
+    // includes vtx[0] -- so this is exactly that same check for the one
+    // transaction a commitment block actually carries.
+    if (!IsFinalTx(*block.coinbase, nHeight, nLockTimeCutoff))
+        return state.DoS(10, false, REJECT_INVALID, "bad-txns-nonfinal", false, "non-final coinbase");
+
+    // DIP3 coinbase is a CbTx (bad-cb-type). SS2.4: has no connect-time home,
+    // must stay at the rung.
+    bool fDIP0003Active_context = consensusParams.DIP0003Enabled;
+    if (fDIP0003Active_context && nHeight != 0 && block.coinbase->nType != TRANSACTION_COINBASE)
+        return state.DoS(100, false, REJECT_INVALID, "bad-cb-type", false, "coinbase is not a CbTx");
 
     return true;
 }

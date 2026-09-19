@@ -483,6 +483,39 @@ bool UndoReadFromDisk(CBlockUndo &blockundo, const CBlockIndex *pindex);
 bool CheckBlock(const CBlock &block, CValidationState &state, const Consensus::Params &consensusParams, int nHeight,
                 bool fCheckPOW = true, bool fCheckMerkleRoot = true);
 
+/**
+ * 1.3.2 (F-83, Mike, 2026-09-19): the commitment format's validation entry
+ * point -- until this exists, nothing binds an identifier list to its header
+ * (F-83: CCommitmentBlock::ComputeMerkleRoot()/HasDuplicateIdentifiers() have
+ * zero production callers). Checks every row of transaction-decoupling.md
+ * SS2.4's table classified "commitment": header validity (delegated to
+ * CheckBlockHeader, which CCommitmentBlock inherits), the merkle root over
+ * Identifiers() -- which IS the id[0]==hash(coinbase) binding F-78 retired as
+ * a separate rule, since Identifiers()'s own first leaf is the coinbase hash
+ * -- merkle malleation, identifier uniqueness (F-43b, the rung rule the
+ * merkle check's even-position-only comparison cannot catch), the coinbase
+ * present and well-formed, and the coinbase's own CheckTransaction (length,
+ * no asset, the founder payment). Deliberately does NOT check body-byte or
+ * aggregate-input-count budgets (1.2/D-19): those are stated in terms of the
+ * MATERIALISED block's serialized size and per-transaction input counts,
+ * neither of which a bare identifier list can answer -- enforcing them stays
+ * at CheckBlock/ContextualCheckBlock, which only ever run once bodies exist.
+ */
+bool CheckCommitmentBlock(const CCommitmentBlock &block, CValidationState &state,
+                          const Consensus::Params &consensusParams, int nHeight,
+                          bool fCheckPOW = true, bool fCheckMerkleRoot = true);
+
+/**
+ * 1.3.2 (F-83): the two commitment-checkable rows that need chain context --
+ * coinbase finality (bad-txns-nonfinal) and the DIP3 CbTx type (bad-cb-type),
+ * both of which SS2.4 found have no connect-time home and must stay at the
+ * rung. Mirrors ContextualCheckBlock's own nLockTimeCutoff/nHeight derivation
+ * exactly, since a commitment block's coinbase is checked no differently once
+ * bound to the tree.
+ */
+bool ContextualCheckCommitmentBlock(const CCommitmentBlock &block, CValidationState &state,
+                                    const Consensus::Params &consensusParams, const CBlockIndex *pindexPrev);
+
 /** Check a block is completely valid from start to finish (only works on top of our current best block) */
 bool TestBlockValidity(CValidationState &state, const CChainParams &chainparams, const CBlock &block,
                        CBlockIndex *pindexPrev, bool fCheckPOW = true, bool fCheckMerkleRoot = true)
