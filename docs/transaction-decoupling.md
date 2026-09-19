@@ -344,7 +344,8 @@ shape already bounds total block work, a third per-tx limit added nothing the re
 | limit | re-based to | constraint that picks the value |
 |---|---|---|
 | block sigop budget | **250,000** (D-18) | ordinary 2-in/2-out traffic at ~4 accurate sigops/tx (F-11/F-30's corpus) needs 249,600 at the 520 tx/s sustained floor (X-1). **Worst-case time redone twice (D-18):** first pass used F-12's 130 µs/sigop, "~27%, tighter than today" — wrong, cherry-picked the optimistic point. F-13's own 196 µs/sigop gives "~41%, parity with today" — also superseded. F-97 measured `ConnectBlock` directly at K-3's real per-tx ceiling: **~320 µs/sigop, ~80 s, ~67% of the 120 s interval** |
-| block body bytes | committed identifier count | bounds both the fetch and the permanent storage one block can impose |
+| block body bytes | **110,000,000 (110 MB)** (D-19) | sized for a **1,500 tx/s theoretical ceiling of realistic multi-input/output traffic** (Mike's explicit direction — not the 520 tx/s sustained floor, and not the 2-in/2-out shape used everywhere else in this section). A 3-in/3-out planning shape (~556 B, chosen the way K-14 chose 400 B) needs 1,500 × 120 × 556 ≈ 100 MB; 110 MB leaves storage/throughput headroom. **Deliberately generous relative to time** — see the input-count row for why bytes alone cannot be the time bound |
+| aggregate block input count | **700,000** (D-19) | the row that actually bounds worst-case time, independent of the byte cap's size. Realistic 3-in/3-out traffic needs 1,500 × 120 × 3 = 540,000 inputs; 700,000 is ~30% headroom over that. **Why bytes alone can't do this job:** realistic traffic runs ~185 B/input at the 3-in/3-out shape, but F-91/F-93's attack shape (minimal ~41-byte blanked-preimage inputs) packs ~4.5× the input count into the same byte budget — a byte cap generous enough for 1,500 tx/s of real traffic is, by construction, far too generous against the actual cost driver, which F-93/F-94/F-97 all found is input count, not bytes or even sigops alone. At F-97's own rate re-expressed per input (72.0 ms / 2,325 inputs ≈ 31 µs/input), 700,000 × 31 µs ≈ 21.7 s, ~18% of the 120 s interval |
 
 **Not yet a complete design (Fable review + independent verification, 2026-09-19 — F-86..F-90,
 R-32).** Gaps found before this became an implementation plan, all traced to source:
@@ -383,8 +384,8 @@ new opt-in `fCountDataSig` parameter closing item 2 without touching any existin
 through `MaxBlockSigOps`'s new second parameter into ATMP, `ConnectBlock`, both view-less legacy
 checks, and `BlockAssembler::TestPackage` — closing item 4, since the miner reads its sigop
 accounting straight from the mempool entry ATMP populates, so one call site fixed both. A boost
-integration test proves the wiring reaches a real mempool entry end to end. The body-byte cap
-(the table's second row) is not yet built — still open.
+integration test proves the wiring reaches a real mempool entry end to end. The body-byte and
+input-count caps (the table's second and third rows) are built — see below.
 
 **F-91 resolved, redirected, then partly reinstated (R-34, F-97, 2026-09-19).** A live
 packed-shape benchmark (isolated node, mario) found the hypothesised mechanism -- sighash
@@ -406,6 +407,24 @@ squarely `ConnectBlock`-side, not an ATMP artifact. F-91's mechanism is real and
 `ConnectBlock`; D-18 is corrected accordingly, twice. The separate F-93 mempool DoS question
 stands as its own item, whose real-world reach still depends on whether the exploit shape can pass
 standardness policy at all -- open (F-93's own note).
+
+**Body-byte and input-count caps built (D-19, F-98, 2026-09-19).** Two limits, not one — see the
+table above for why a byte cap alone cannot bound worst-case time once realistic traffic is sized
+at 1,500 tx/s of genuinely multi-input/output transactions rather than the 2-in/2-out shape used
+for the sigop budget. `MaxBlockSize`/`MaxBlockInputs` (`consensus/consensus.h`) extend the same
+`fCommitmentBudgetActive` default-parameter pattern as `MaxBlockSigOps`; a new
+`GetBlockInputCount(const CBlock&)` (`consensus/tx_verify.h/.cpp`) sums non-coinbase `vin.size()`
+across a block, exact and view-independent (unlike the sigop budget's spend-side term), so both
+`CheckBlock` and `ContextualCheckBlock` enforce it exactly. The byte-cap gating itself had to be
+wired in too — `fCommitmentBudgetActive` existed as a parameter but nothing passed `true` for it
+at either view-less site yet. On the miner side, `nBlockInputs` is exact when accumulated
+per-transaction (matching `GetBlockInputCount`'s own unit), but the pre-add `TestPackage` check
+uses only the candidate's own input count, not an ancestor-aware package total — no
+`InputsWithAncestors` field exists in `CTxMemPoolEntry`, and building one was judged out of scope
+for a heuristic that only avoids wasted miner work, not the enforcement boundary itself. That can
+let the miner build a block slightly over budget by an ancestor chain's worth of inputs; `CheckBlock`
+would then reject it — a liveness/wasted-work risk, not a consensus fault, and a bounded,
+documented approximation rather than F-95's wrong-method bug.
 
 **No declared coinbase field is needed for any of it.** Bodies are self-authenticating, so a
 prefix whose accumulated work or bytes exceeds the cap already proves the block invalid and
