@@ -301,12 +301,16 @@ bool BlockAssembler::TestPackage(uint64_t packageSize, unsigned int packageSigOp
     // candidate transaction's OWN input count, not ancestor-aware like
     // packageSize/packageSigOps above -- the mempool has no cached
     // "InputsWithAncestors" field, and building one would mean extending
-    // CTxMemPoolEntry's ancestor-update machinery for a miner-side heuristic
-    // that only exists to avoid wasted work. The real enforcement boundary
-    // (CheckBlock/ContextualCheckBlock's GetBlockInputCount) is exact; this
-    // can undercount by an ancestor chain's worth of inputs at most, bounded
-    // by the mempool's own ancestor-count limit, and only ever causes the
-    // miner to build a block slightly over budget -- not a consensus fault.
+    // CTxMemPoolEntry's ancestor-update machinery for a cheap early-out.
+    // This is ONLY a pre-filter: it can under-count a package whose
+    // unconfirmed ancestors carry more inputs than the candidate alone, so
+    // addPackageTxs() re-checks the exact aggregate over the whole resolved
+    // ancestor set before actually committing to it (F1, Fable review,
+    // 2026-09-19) -- an under-count surviving to that point would otherwise
+    // make CreateNewBlock's TestBlockValidity call throw, and every caller
+    // (getblocktemplate, generateBlocks) rebuilds from the same mempool and
+    // hits the identical exception again: a deterministic stall, not a
+    // one-off wasted block.
     if (nBlockInputs + packageInputs >= MaxBlockInputs(g_commitmentBudgetActive))
         return false;
     return true;
@@ -506,6 +510,28 @@ void BlockAssembler::addPackageTxs(int &nPackagesSelected, int &nDescendantsUpda
 
         onlyUnconfirmed(ancestors);
         ancestors.insert(iter);
+
+        // 1.2 (F1, Fable adversarial review, 2026-09-19): TestPackage's own-
+        // count-only pre-check can pass a candidate whose UNCONFIRMED
+        // ANCESTORS push the whole package over the input budget once all of
+        // them are added -- CreateNewBlock's TestBlockValidity call would
+        // then throw, and every caller (getblocktemplate, generateBlocks)
+        // rebuilds from the same mempool and hits the identical exception
+        // again: a deterministic stall under exactly the saturated-mempool
+        // traffic 1.2 exists for, not the "one wasted block" this was first
+        // reasoned to be. Now that the full ancestor set is known, re-check
+        // its EXACT aggregate input count before committing to it -- mirrors
+        // how packageSize/packageSigOps are already ancestor-aware above.
+        unsigned int packageInputs = 0;
+        for (CTxMemPool::txiter it: ancestors)
+            packageInputs += it->GetTx().vin.size();
+        if (nBlockInputs + packageInputs >= MaxBlockInputs(g_commitmentBudgetActive)) {
+            if (fUsingModified) {
+                mapModifiedTx.get<ancestor_score>().erase(modit);
+                failedTx.insert(iter);
+            }
+            continue;
+        }
 
         // Test if all tx's are Final and safe
         if (!TestPackageTransactions(ancestors)) {
