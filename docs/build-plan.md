@@ -81,7 +81,7 @@ Nothing in phase 1 starts before **0.1c** settles the rung. **Settled 2026-09-18
 | # | Component | Effort | Design |
 |---|---|---|---|
 | 1.1 | **Block format.** Second `CBlock` serialization — coinbase in full, every other entry a bare 32-byte identifier. Selector is a stream flag negotiated by service bit, never a header bit. Raw-commitment read API distinct from a materialising one; materialisation produces a fresh object so `ConnectBlock`'s own `CheckBlock` cannot short-circuit on `fChecked`. | 1-2 w | straightforward |
-| 1.2 | **Block resource budget** (§1A). Sigop cap re-based to committed count, a per-transaction work cap, and a consensus body-byte cap — one joint decision, because the sigop cap is also what bounds worst-case hashing. **0.3 measured the unit: an accurate count over *spent* scripts, since legacy counting charges an 800-input bare-multisig spend 2 sigops for 2.35 s of work; the constant is ~130 µs per sigop.** | 2-3 w | design-sensitive |
+| 1.2 | **Block resource budget** (§1A). Sigop cap re-based to committed count, a per-transaction work cap, and a consensus body-byte cap — one joint decision, because the sigop cap is also what bounds worst-case hashing. **0.3 measured the unit: an accurate count over *spent* scripts, since legacy counting charges an 800-input bare-multisig spend 2 sigops for 2.35 s of work; the constant is ~130 µs per sigop.** **Not yet scoped as a plan (R-32, 2026-09-19)**: pre-implementation review found the unit still misses scriptSig and `CHECKDATASIG` work (F-86, F-87), no gating story against the surviving legacy checks (F-88), and no miner/mempool side (F-89) — see §1A's revision. | 2-3 w | **design-sensitive, not yet scoped** |
 | 1.3 | **Acceptance layer.** Having the identifiers and having the bodies become two facts: a new status bit (a persisted block-index format change), a new validity rung, and the sites above `ConnectBlock` that read "do we have this block" — chain selection, candidate maintenance, `CheckBlockIndex`'s invariants, `NewPoWValidBlock`, pruning, `VerifyDB`, crash replay, `-reindex`, and the `InvalidateBlock` / `MarkConflictingBlock` / `EnforceBestChainLock` interactions. Plus a durable retry queue with per-block exponential backoff that never keys off accumulated work. **Re-estimated after 0.1**, and only for the half the probe reached: chain selection is largely built already, for pruning (F-25f). Everything else stands — the rung (which decides whether the probe's encoding survives at all, F-25e3), the persisted bit, out-of-order arrival (F-25j), the fetch cursor at `net_processing.cpp:FindNextBlocksToDownload` that jumps the gap (F-25e2), the unrequested and compact-block arrival paths (F-36), `-reindex`, ChainLock enforcement, and equal-work ties (F-35). | **8-16 w** | **partly known** — chain selection demonstrated; the rung, the bit and the fetch layer are not |
 | 1.4 | **Fork envelope** (D-14). The 8 MB cap (K-1) and the message-length raise (K-7) ride this activation; 2 MB by policy. | in 4.6 | straightforward |
 
@@ -98,9 +98,11 @@ storage.
 **Why 1.2 is not optional** (K-2, F-13). `MaxBlockSigOps() = MaxBlockSize()/50` is 40,000 at 2 MB, and
 `GetLegacySigOpCount` counts sigops per output (F-13), so a two-output payment is 2. A 2 MB commitment
 block naming 62,500 payments carries 125,000 sigops and is **invalid** (K-2) — the cap admits about
-20,000, i.e. **167 tx/s, not 520** (K-2) — and the miner silently stops filling. It is the relay cap
-bug in a second place: a consensus limit indexed to block bytes, which stop tracking what the
-block commits to.
+20,000, i.e. **167 tx/s, not 520** (K-2), at the 2 MB consensus cap (F-46b: this branch's rig-only
+8 MB build gives 667 tx/s instead — re-derive against whichever cap D-14's activation ships) — and
+the miner silently stops filling. It is the relay cap bug in a second place: a consensus limit
+indexed to block bytes, which stop tracking what the block commits to. **Re-basing it is not yet a
+scoped design** — see R-32 and §1A's revision in `transaction-decoupling.md`.
 
 ## Phase 2 — data plane · 7-11 weeks
 
