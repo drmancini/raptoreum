@@ -2348,6 +2348,26 @@ bool CChainState::ConnectBlock(const CBlock &block, CValidationState &state, CBl
         const CTransaction &tx = *(block.vtx[i]);
         const uint256 txhash = tx.GetHash();
 
+        // 1.3.2 (F-44): the connect-time home for absolute nLockTime
+        // finality and type/version, on every transaction including the
+        // coinbase -- exactly ContextualCheckBlock's own per-tx loop,
+        // relocated here since D-16 grants BLOCK_VALID_TRANSACTIONS without
+        // re-invoking ContextualCheckBlock. See the nLockTimeCutoffAbsolute
+        // comment above for why this is a separate flag/cutoff pair from the
+        // BIP68 one enforced below via SequenceLocks. Placed first in the
+        // loop body (Fable review, 2026-09-19): depends only on tx and
+        // pindex, so checking it before CheckTxInputs/SequenceLocks/the
+        // address-index work rejects a bad block without doing any of that
+        // first, with no semantic change.
+        if (g_commitmentBudgetActive) {
+            if (!IsFinalTx(tx, pindex->nHeight, nLockTimeCutoffAbsolute))
+                return state.DoS(10, error("ConnectBlock(): non-final transaction"),
+                                 REJECT_INVALID, "bad-txns-nonfinal");
+            if (!ContextualCheckTransaction(tx, state, chainparams.GetConsensus(), pindex->pprev))
+                return error("%s: ContextualCheckTransaction: %s, %s", __func__, tx.GetHash().ToString(),
+                             FormatStateMessage(state));
+        }
+
         nInputs += tx.vin.size();
 
         if (!tx.IsCoinBase()) {
@@ -2466,22 +2486,6 @@ bool CChainState::ConnectBlock(const CBlock &block, CValidationState &state, CBl
         if (nSigOps > MaxBlockSigOps(fDIP0001Active_context, g_commitmentBudgetActive))
             return state.DoS(100, error("ConnectBlock(): too many sigops"),
                              REJECT_INVALID, "bad-blk-sigops");
-
-        // 1.3.2 (F-44): the connect-time home for absolute nLockTime
-        // finality and type/version, on every transaction including the
-        // coinbase -- exactly ContextualCheckBlock's own per-tx loop,
-        // relocated here since D-16 grants BLOCK_VALID_TRANSACTIONS without
-        // re-invoking ContextualCheckBlock. See the nLockTimeCutoffAbsolute
-        // comment above for why this is a separate flag/cutoff pair from the
-        // BIP68 one already enforced below via SequenceLocks.
-        if (g_commitmentBudgetActive) {
-            if (!IsFinalTx(tx, pindex->nHeight, nLockTimeCutoffAbsolute))
-                return state.DoS(10, error("ConnectBlock(): non-final transaction"),
-                                 REJECT_INVALID, "bad-txns-nonfinal");
-            if (!ContextualCheckTransaction(tx, state, chainparams.GetConsensus(), pindex->pprev))
-                return error("%s: ContextualCheckTransaction: %s, %s", __func__, tx.GetHash().ToString(),
-                             FormatStateMessage(state));
-        }
 
         txdata.emplace_back(tx);
         if (!tx.IsCoinBase()) {
@@ -4187,8 +4191,18 @@ bool CheckCommitmentBlock(const CCommitmentBlock &block, CValidationState &state
         // once bodies are fetched by identifier rather than embedded inline --
         // this is the rung rule the format needs and the merkle check cannot
         // provide.
+        //
+        // corruption=false (Fable review, 2026-09-19): reached only after the
+        // merkle root has ALREADY matched -- barring a hash collision, no
+        // distinct, duplicate-free identifier list could have produced this
+        // same root, so the duplicate is a fact about what THIS header
+        // commits to, not something relay corruption could explain away.
+        // Same reasoning H-1 already applied to bad-cb-missing after the
+        // merkle check: a corruption=true verdict here would mean AcceptBlock
+        // never stamps BLOCK_FAILED_VALID, and every peer whose best chain
+        // includes this header would re-request an unfillable block forever.
         if (block.HasDuplicateIdentifiers())
-            return state.DoS(100, false, REJECT_INVALID, "bad-cmt-duplicate-ids", true,
+            return state.DoS(100, false, REJECT_INVALID, "bad-cmt-duplicate-ids", false,
                              "duplicate committed identifier");
     }
 
@@ -4696,12 +4710,16 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock> &pblock, CVali
 
     // 1.3.2 (F-83, Mike, 2026-09-19): validate the commitment-level facts --
     // the merkle root over Identifiers(), identifier uniqueness, the coinbase
-    // and its founder payment, coinbase finality, DIP3 type -- BEFORE any
-    // per-transaction work runs, and critically before nTx/nChainTx/HAVE_DATA
-    // are ever recorded below (F-83's ordering trap: a bad list must be
-    // re-requested, not treated as a poisoned header). Gated by
-    // g_commitmentBudgetActive, matching D-14's "one fork" activation for
-    // every other 1.x rule -- test-only until 4.6 has a real bit.
+    // and its founder payment, coinbase finality, DIP3 type -- critically
+    // before nTx/nChainTx/HAVE_DATA are ever recorded below (F-83's ordering
+    // trap: a bad list must be re-requested, not treated as a poisoned
+    // header). NOT actually "before any per-transaction work runs" on
+    // today's only real path: ProcessNewBlock already ran the full CheckBlock
+    // loop over every transaction before ever calling AcceptBlock (Fable
+    // review, 2026-09-19). The ordering guarantee that matters is the one
+    // named above. Gated by g_commitmentBudgetActive, matching D-14's "one
+    // fork" activation for every other 1.x rule -- test-only until 4.6 has a
+    // real bit.
     //
     // Nothing yet delivers a genuine standalone CCommitmentBlock over the
     // wire (that split is phase 2's fetch protocol, F-83's own scoping); this
@@ -4709,11 +4727,12 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock> &pblock, CVali
     // ACCEPTANCE LOGIC is exercised exactly as it will run once a real
     // commitment-only arrival exists -- only the "how do we get a
     // CCommitmentBlock" step changes later, not this call or its ordering.
-    // CheckCommitmentBlock's rules are a strict subset of CheckBlock's own
-    // commitment-checkable rows, so a block that would pass CheckBlock passes
-    // this too; the value today is catching a bad commitment-level property
-    // at the cheapest possible check, before any per-transaction work, with
-    // the corruption semantics H-1 already fixed.
+    // CheckCommitmentBlock's rules are a subset of the FULL PIPELINE's
+    // commitment-checkable rows (CheckBlock + ContextualCheckBlock +
+    // ConnectBlock), not of CheckBlock alone -- HasDuplicateIdentifiers is
+    // strictly stronger than anything CheckBlock itself checks (Fable
+    // review: the earlier "strict subset of CheckBlock" wording here was
+    // wrong and contradicted by this feature's own test).
     if (g_commitmentBudgetActive) {
         CCommitmentBlock commitmentView = CommitmentsFromBlock(block);
         if (!CheckCommitmentBlock(commitmentView, state, chainparams.GetConsensus(), pindex->nHeight) ||
@@ -4722,7 +4741,7 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock> &pblock, CVali
                 pindex->nStatus |= BLOCK_FAILED_VALID;
                 setDirtyBlockIndex.insert(pindex);
             }
-            return error("%s: %s", __func__, FormatStateMessage(state));
+            return error("%s: Consensus::CheckCommitmentBlock: %s", __func__, FormatStateMessage(state));
         }
     }
 

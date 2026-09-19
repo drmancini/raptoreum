@@ -21,6 +21,13 @@
 // Build-plan item 1.1: the commitment form of a block. These are the properties the
 // rest of the design leans on, so they are asserted rather than assumed.
 
+// F6 (test review precedent, txvalidation_tests.cpp/blockbudget_tests.cpp): a
+// thrown BOOST_REQUIRE between setting g_commitmentBudgetActive = true and
+// resetting it would leave the global on for every later test in the process.
+struct CommitmentBudgetGuard {
+    ~CommitmentBudgetGuard() { g_commitmentBudgetActive = false; }
+};
+
 BOOST_FIXTURE_TEST_SUITE(commitmentblock_tests, BasicTestingSetup)
 
 static CTransactionRef MakeTx(uint32_t nonce, uint32_t nLockTime = 0) {
@@ -567,6 +574,13 @@ BOOST_AUTO_TEST_CASE(checkcommitmentblock_rejects_duplicate_ids_the_merkle_check
     BOOST_CHECK(!CheckCommitmentBlock(c, state, Params().GetConsensus(), height,
                                       /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true));
     BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-cmt-duplicate-ids");
+    // Fable review, 2026-09-19: reached only after the merkle root already
+    // matched, so this is a fact about what the header itself commits to,
+    // not corruption in transit -- corruption=true here would mean
+    // AcceptBlock never stamps BLOCK_FAILED_VALID, and every peer whose best
+    // chain includes this header would re-request an unfillable block
+    // forever.
+    BOOST_CHECK(!state.CorruptionPossible());
 }
 
 // M-1 (Fable review, 2026-09-19): ContextualCheckCommitmentBlock also calls
@@ -657,20 +671,71 @@ BOOST_AUTO_TEST_CASE(connectblock_enforces_nonfinal_coinbase_when_relocation_is_
     LOCK(cs_main);
     auto dbTx = evoDb->BeginTransaction();   // rolled back when dbTx goes out of scope
 
+    CommitmentBudgetGuard guard;
     g_commitmentBudgetActive = true;
     CValidationState state;
     bool ok = ::ChainstateActive().ConnectBlock(block, state, &indexDummy, viewNew, Params(), passetsCache.get(),
                                                 /*fJustCheck=*/true);
-    g_commitmentBudgetActive = false;
 
     BOOST_CHECK(!ok);
     BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-txns-nonfinal");
 }
 
+// Test review, 2026-09-19 (MEDIUM): the sibling test above only exercises
+// IsFinalTx -- deleting the ContextualCheckTransaction call entirely would
+// still pass it. This isolates that call specifically, on a NON-coinbase
+// transaction (the "every transaction including the coinbase" claim's other
+// half, also untested until now), using bad-txns-type (a v1/v2 transaction
+// carrying a nonzero nType) since it needs no real spendable UTXO: the fake
+// prevout is never reached because the relocated check now runs FIRST in
+// the loop body, before CheckTxInputs.
+BOOST_AUTO_TEST_CASE(connectblock_enforces_type_check_on_a_non_coinbase_tx) {
+    CBlock block = CreateBlock({}, coinbaseKey);
+
+    CMutableTransaction badTypeTx;
+    badTypeTx.nVersion = 1;   // pre-DIP2: nType must be TRANSACTION_NORMAL
+    badTypeTx.nType = 99;     // wire-reachable regardless of nVersion -- transaction.h
+                             // unpacks nType from the high 16 bits unconditionally
+    badTypeTx.vin.resize(1);
+    badTypeTx.vin[0].prevout = COutPoint(uint256S("1"), 0);   // never resolved: rejected before CheckTxInputs
+    badTypeTx.vout.resize(1);
+    badTypeTx.vout[0].nValue = 1000;
+    badTypeTx.vout[0].scriptPubKey = CScript() << OP_TRUE;
+    block.vtx.push_back(MakeTransactionRef(badTypeTx));
+
+    CBlockIndex *pindexPrev = ::ChainActive().Tip();
+    CCoinsViewCache viewNew(&::ChainstateActive().CoinsTip());
+    uint256 block_hash(block.GetHash());
+    CBlockIndex indexDummy(block);
+    indexDummy.pprev = pindexPrev;
+    indexDummy.nHeight = pindexPrev->nHeight + 1;
+    indexDummy.phashBlock = &block_hash;
+
+    LOCK(cs_main);
+    auto dbTx = evoDb->BeginTransaction();
+
+    CommitmentBudgetGuard guard;
+    g_commitmentBudgetActive = true;
+    CValidationState state;
+    bool ok = ::ChainstateActive().ConnectBlock(block, state, &indexDummy, viewNew, Params(), passetsCache.get(),
+                                                /*fJustCheck=*/true);
+
+    BOOST_CHECK(!ok);
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-txns-type");
+    // Pin the DoS level too: ContextualCheckBlock's per-tx loop (the path
+    // this shadows on every real accept today) and this relocated site both
+    // score bad-txns-type at 100 via ContextualCheckTransaction directly --
+    // distinct from the relocated nLockTime check's own DoS(10), so this
+    // also confirms the two are genuinely different call sites, not the same
+    // check reporting under two names.
+    int nDoS = 0;
+    BOOST_REQUIRE(state.IsInvalid(nDoS));
+    BOOST_CHECK_EQUAL(nDoS, 100);
+}
+
 BOOST_AUTO_TEST_CASE(connectblock_does_not_enforce_relocated_rules_when_flag_is_off) {
     // Control: the identical mutated block, with the flag off, must connect
-    // (or at least not fail on bad-txns-nonfinal) -- proving the relocation
-    // is genuinely gated, not accidentally always-on.
+    // -- proving the relocation is genuinely gated, not accidentally always-on.
     CBlock block = CreateBlock({}, coinbaseKey);
 
     CMutableTransaction mutCoinbase(*block.vtx[0]);
@@ -711,22 +776,27 @@ BOOST_AUTO_TEST_SUITE_END()
 // rejection with exactly this reason can only have come from the new call.
 BOOST_FIXTURE_TEST_SUITE(acceptblock_commitment_wiring_tests, TestChain100Setup)
 
-BOOST_AUTO_TEST_CASE(acceptblock_calls_checkcommitmentblock) {
-    // Height 100 (this fixture's tip) falls inside regtest's DKG mining
-    // window (dkgInterval=30, window 10..18 -- 100 % 30 == 10), so
-    // CreateBlock at height 101 carries an extra quorum-commitment
-    // transaction, making the identifier list 4 long once the duplicate pair
-    // below is appended -- an EVEN count, where the pair becomes a genuine
-    // (non-padding) adjacent match malleation legitimately catches, not the
-    // odd-boundary case this test wants to isolate. Mine past the window.
-    while (true) {
+// Test review, 2026-09-19: mines past regtest's DKG window (dkgInterval=30,
+// window 10..18), returning a coinbase-only block at the resulting tip + 1.
+// Bounded rather than `while (true)`, and asserts the tip actually advances
+// each iteration -- an unbounded loop over a call whose return value is
+// discarded (CreateAndProcessBlock) would spin forever on a CI hang, not a
+// red test, if any mined block were ever rejected.
+static CBlock MineToOutsideDkgWindowAndBuild(TestChainSetup &fixture, const CKey &coinbaseKey) {
+    for (int i = 0; i < 30; i++) {
         int nextHeightMod = (::ChainActive().Tip()->nHeight + 1) % 30;
         if (nextHeightMod < 10 || nextHeightMod > 18) break;
-        CreateAndProcessBlock({}, coinbaseKey);
+        int heightBefore = ::ChainActive().Tip()->nHeight;
+        fixture.CreateAndProcessBlock({}, coinbaseKey);
+        BOOST_REQUIRE_GT(::ChainActive().Tip()->nHeight, heightBefore);
     }
-
-    CBlock block = CreateBlock({}, coinbaseKey);
+    CBlock block = fixture.CreateBlock({}, coinbaseKey);
     BOOST_REQUIRE_EQUAL(block.vtx.size(), 1U);   // coinbase only, confirming the window is cleared
+    return block;
+}
+
+BOOST_AUTO_TEST_CASE(acceptblock_calls_checkcommitmentblock) {
+    CBlock block = MineToOutsideDkgWindowAndBuild(*this, coinbaseKey);
 
     CTransactionRef dupTx = commitmentblock_tests::MakeTx(1);
     block.vtx.push_back(dupTx);
@@ -742,14 +812,57 @@ BOOST_AUTO_TEST_CASE(acceptblock_calls_checkcommitmentblock) {
     // is observable -- proving THIS specific check fired, not merely that
     // the block was rejected for some unrelated reason.
     LOCK(cs_main);
+    CommitmentBudgetGuard guard;
     g_commitmentBudgetActive = true;
     CValidationState state;
     bool ok = ::ChainstateActive().AcceptBlock(shared_pblock, state, Params(), &pindex, /*fRequested=*/true,
                                                nullptr, nullptr);
-    g_commitmentBudgetActive = false;
 
     BOOST_CHECK(!ok);
     BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-cmt-duplicate-ids");
+
+    // Test review, 2026-09-19 (HIGH): the commit's actual claim is ORDERING
+    // -- this check must run before nTx/nChainTx/HAVE_DATA are recorded --
+    // which the reject-reason assertion alone does not prove (it would pass
+    // identically even if the new check ran AFTER SaveBlockToDisk /
+    // ReceivedBlockTransactions). Assert the index entry directly.
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_CHECK_EQUAL(pindex->nTx, 0U);
+    BOOST_CHECK(!(pindex->nStatus & BLOCK_HAVE_DATA));
+    // bad-cmt-duplicate-ids is corruption=false (this header commits to an
+    // unfillable list, its own fault -- see the fix above), so this is NOT
+    // asserting "never marked failed"; it specifically proves AcceptBlock's
+    // failure-handling stamped BLOCK_FAILED_VALID as the correct response to
+    // a non-corruption-possible rejection.
+    BOOST_CHECK(pindex->nStatus & BLOCK_FAILED_VALID);
+}
+
+// Test review, 2026-09-19 (MEDIUM): the commit message's central claim --
+// "without this wiring the identical block is fully ACCEPTED" -- was
+// asserted only in prose, not pinned as a test. Sibling to the test above,
+// flag off, otherwise identical.
+BOOST_AUTO_TEST_CASE(acceptblock_does_not_call_checkcommitmentblock_when_flag_is_off) {
+    CBlock block = MineToOutsideDkgWindowAndBuild(*this, coinbaseKey);
+
+    CTransactionRef dupTx = commitmentblock_tests::MakeTx(2);
+    block.vtx.push_back(dupTx);
+    block.vtx.push_back(dupTx);
+    block.hashMerkleRoot = BlockMerkleRoot(block);
+    while (!CheckProofOfWork(block.GetPOWHash(), block.nBits, Params().GetConsensus())) ++block.nNonce;
+
+    std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
+    CBlockIndex *pindex = nullptr;
+
+    LOCK(cs_main);
+    BOOST_REQUIRE(!g_commitmentBudgetActive);   // explicit: this is the off state
+    CValidationState state;
+    bool ok = ::ChainstateActive().AcceptBlock(shared_pblock, state, Params(), &pindex, /*fRequested=*/true,
+                                               nullptr, nullptr);
+
+    BOOST_CHECK(ok);
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_CHECK(pindex->nStatus & BLOCK_HAVE_DATA);
+    BOOST_CHECK_NE(state.GetRejectReason(), "bad-cmt-duplicate-ids");
 }
 
 BOOST_AUTO_TEST_SUITE_END()
