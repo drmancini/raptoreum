@@ -336,42 +336,49 @@ block. A fee floor scaling with body bytes is policy, which a miner-attacker ign
 §8's full replication that is a permanent network-wide storage bill, so the bound must be
 consensus.
 
-**Proposed.** One rule set, chosen together:
+**Proposed, revised (D-17, 2026-09-19).** Two limits, chosen together — the per-transaction work
+cap originally proposed here is **dropped**: the re-based sigop budget times the worst legal
+shape already bounds total block work, a third per-tx limit added nothing the review could name
+(F-92), and its only plausible connect-time home doesn't exist without 1.3's rung (D-16).
 
 | limit | re-based to | constraint that picks the value |
 |---|---|---|
 | block sigop budget | committed identifier count | **a deliberate budget, not "match today"** — today's worst case is ~49 s per 2 MB block through an uncounted path, which is 40% of the interval and an accident of the accounting rather than a design choice |
-| per-transaction work | accurate sigops over **spent** scripts × size | caps the quadratic term per transaction. **Measured 2026-09-18: ~130 µs per sigop of work, plus ~40% more from the size term at the 100 kB ceiling.** |
 | block body bytes | committed identifier count | bounds both the fetch and the permanent storage one block can impose |
 
-**Not yet a complete design (Fable review + independent verification, 2026-09-19 — F-86..F-92,
-R-32).** Four gaps found before this became an implementation plan, all traced to source:
+**Not yet a complete design (Fable review + independent verification, 2026-09-19 — F-86..F-90,
+R-32).** Gaps found before this became an implementation plan, all traced to source:
 
-1. **The "accurate spent-scriptPubKey" unit still misses scriptSig-side work (F-86).**
-   `SCRIPT_VERIFY_SIGPUSHONLY` exists but is not in `GetBlockScriptFlags`'s consensus set — push-only
-   is enforced only for P2SH prevouts. A scriptSig spending a plain non-P2SH output a miner-attacker
-   created himself can run arbitrary `CHECKMULTISIG` ops the "spent scriptPubKey" count charges
-   nothing for. Same hole as F-13, moved rather than closed. **The counter must charge scriptSig,
-   spent scriptPubKey, and P2SH redeemScript — all three executed scripts, not one.**
+1. **The counting rule as first drafted was ambiguous about what it keeps (F-86, corrected).**
+   `GetLegacySigOpCount` already counts a transaction's *own* scriptSig ops and *created* output
+   ops — what it never does is examine a *spent* scriptPubKey unless it's P2SH
+   (`GetP2SHSigOpCount` is P2SH-only). Read as "replace legacy with spent-script counting alone,"
+   the rule drops scriptSig-side counting and lets an attacker embed the expensive opcode in the
+   scriptSig itself against a trivial (e.g. `OP_TRUE`) prevout he controls. **The fix is additive,
+   not a replacement:** keep `GetLegacySigOpCount`'s scriptSig/created-output term, and extend
+   `GetP2SHSigOpCount`'s accurate spent-script counting to *every* prevout type, not just P2SH.
+   That closes both F-13's original bare-multisig-spend hole and the scriptSig-embedded variant.
 2. **`OP_CHECKDATASIG`(`VERIFY`) is priced by no sigop counter at all, legacy or proposed (F-87).**
    It executes a full ECDSA verify and is already consensus-active under DIP0020. `GetSigOpCount`
-   only recognises CHECKSIG/CHECKMULTISIG. **The new counter must add it explicitly.**
+   only recognises CHECKSIG/CHECKMULTISIG. **A new accurate-counting path must add it explicitly —
+   not by editing the shared `CScript::GetSigOpCount`, which pre-fork validation still depends on
+   and must not change retroactively.**
 3. **No retirement or gating story for the legacy checks (F-88).** `ConnectBlock` re-invokes
    `CheckBlock` on the materialised block, which still runs the old sigop and size checks against
-   the old cap. §1A proposes new caps but never says how the old ones are turned off post-activation
-   without also breaking pre-fork replay (IBD, `-reindex`). **Needs an explicit height/deployment
-   gate.**
+   the old cap. **Fix: gate the new caps behind a boolean parameter mirroring the existing
+   `fDIP0001Active` pattern** (`MaxBlockSize(bool)`, `MaxBlockSigOps(bool)`) — the same shape this
+   tree already uses for its last deployment, driven by a test-only flag until 4.6 has a real one.
 4. **No miner- or mempool-side re-basing (F-89).** `BlockAssembler::TestPackage` checks raw byte
    size against the unmodified `DEFAULT_BLOCK_MAX_SIZE` and the legacy `MaxBlockSigOps()`; the
-   mempool's own `sigOpCount` is legacy-plus-P2SH. An honest miner cannot build a
-   62,500-identifier block under either without both being re-based, and 1.2 cannot be tested
-   end-to-end without it. **This has to be in scope, not deferred past 1.2.**
+   mempool's own `sigOpCount` is legacy-plus-P2SH. Both need the accurate counter and the re-based
+   budget when the flag is active, or an honest miner can't build a compliant block.
 
-Two further open questions, not gaps in the reasoning but unresolved before implementation: whether
-the ~130 µs/sigop, +40% cost constant holds at a packed worst-case shape rather than the two points
-it was measured at (F-91), and what the per-transaction work cap bounds that the sigop-count and
-byte caps don't already bound at the block level, given it has no connect-time enforcement point yet
-either (F-92, and see D-16/1.3).
+One correction already folded into the standardness discussion below (F-90): a bare multisig
+spend already relays today, which is why item 1's fix matters now, not only after activation.
+
+Open, not gaps in the reasoning: whether the ~130 µs/sigop, +40% cost constant holds at a packed
+worst-case shape rather than the two points it was measured at (F-91) — worth a targeted
+`bench_inputs.py` run before the budget's actual numeric value is chosen.
 
 **No declared coinbase field is needed for any of it.** Bodies are self-authenticating, so a
 prefix whose accumulated work or bytes exceeds the cap already proves the block invalid and
