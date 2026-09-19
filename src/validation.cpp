@@ -4105,17 +4105,29 @@ bool CheckCommitmentBlock(const CCommitmentBlock &block, CValidationState &state
     if (!CheckBlockHeader(block, state, consensusParams, fCheckPOW))
         return false;
 
+    // IsNull() only guards a direct dereference below (Identifiers() etc.) --
+    // it is not wire-reachable, since deserializing a CTransactionRef always
+    // allocates. corruption=false is correct here: there is no header/body
+    // relationship to protect yet, nothing has been bound to anything.
     if (block.IsNull())
         return state.DoS(100, false, REJECT_INVALID, "bad-cb-missing", false,
                          "commitment block carries no coinbase");
 
-    // A malicious peer controls this field over the wire -- CCommitmentBlock's
-    // type does not itself guarantee its "coinbase" field actually is one.
-    // Mirrors CheckBlock's own "first transaction must be coinbase" rule.
-    if (!block.coinbase->IsCoinBase())
-        return state.DoS(100, false, REJECT_INVALID, "bad-cb-missing", false,
-                         "commitment block's coinbase field is not a coinbase");
-
+    // All potential-corruption validation (the merkle root, which binds this
+    // SPECIFIC coinbase+identifier-list pair to the header) must run before
+    // any check whose failure would otherwise be blamed on the header itself
+    // -- mirrored from CheckBlock's own comment and ordering. Fable review,
+    // 2026-09-19 (H-1): this function originally ran the IsCoinBase() check
+    // BEFORE the merkle root, with corruption=false. That inverted the
+    // invariant: F-83's exact threat is a peer pairing a genuine, already-
+    // proof-of-worked header (zero cost to obtain) with a WRONG coinbase --
+    // the merkle root cannot match such a pairing, which is corruption
+    // (the header may be perfectly genuine), not a fault IN the header. With
+    // the check in the old position, AcceptBlock-shaped wiring that stamps
+    // BLOCK_FAILED_VALID on `IsInvalid() && !CorruptionPossible()` would
+    // permanently invalid a genuine header -- and every descendant with
+    // it -- over a coinbase substitution that was never the header's fault.
+    //
     // The merkle root over Identifiers() -- coinbase hash as leaf 0, then the
     // committed identifiers -- IS the binding F-83 found missing: nothing
     // else ties an identifier list to the header it arrived with. F-78
@@ -4142,6 +4154,16 @@ bool CheckCommitmentBlock(const CCommitmentBlock &block, CValidationState &state
             return state.DoS(100, false, REJECT_INVALID, "bad-cmt-duplicate-ids", true,
                              "duplicate committed identifier");
     }
+
+    // A malicious peer controls this field over the wire -- CCommitmentBlock's
+    // type does not itself guarantee its "coinbase" field actually is one.
+    // Mirrors CheckBlock's own "first transaction must be coinbase" rule,
+    // including its position AFTER the merkle-root/corruption checks: once
+    // the root has matched, this coinbase is genuinely bound to this header,
+    // so a failure here is the header's own fault, not corruption in transit.
+    if (!block.coinbase->IsCoinBase())
+        return state.DoS(100, false, REJECT_INVALID, "bad-cb-missing", false,
+                         "commitment block's coinbase field is not a coinbase");
 
     // Coinbase CheckTransaction: length, no asset, the founder payment.
     // Reused as-is -- CheckTransaction takes a single transaction, not a
@@ -4328,6 +4350,20 @@ bool ContextualCheckCommitmentBlock(const CCommitmentBlock &block, CValidationSt
     // transaction a commitment block actually carries.
     if (!IsFinalTx(*block.coinbase, nHeight, nLockTimeCutoff))
         return state.DoS(10, false, REJECT_INVALID, "bad-txns-nonfinal", false, "non-final coinbase");
+
+    // M-1 (Fable review, 2026-09-19): ContextualCheckBlock's per-tx loop also
+    // runs ContextualCheckTransaction on vtx[0] -- dropped here in the first
+    // pass, a real gap against the "every commitment-checkable row" claim.
+    // ContextualCheckTransaction takes one tx plus pindexPrev, so it is fully
+    // commitment-checkable, and on the coinbase it additionally enforces
+    // bad-txns-type (a v1/v2 coinbase carrying a nonzero nType, which
+    // transaction.h unpacks from the wire unconditionally regardless of
+    // version -- bad-cb-type below only catches the v3-and-wrong-type case),
+    // bad-txns-cb-type (SS2.4's own row, classified commitment), and
+    // bad-txns-oversize (K-6, the connect-time home F-44 found missing --
+    // catching it here at the rung is strictly better than not at all).
+    if (!ContextualCheckTransaction(*block.coinbase, state, consensusParams, pindexPrev))
+        return false;
 
     // DIP3 coinbase is a CbTx (bad-cb-type). SS2.4: has no connect-time home,
     // must stay at the rung.
@@ -4705,9 +4741,17 @@ bool ChainstateManager::ProcessNewBlock(const CChainParams &chainparams, const s
         // time. Looking up the real parent needs cs_main for a consistent
         // read, which is also why this moved inside the lock rather than
         // gaining a second, redundant height computation.
+        // L-2 (Fable review, 2026-09-19): an unknown parent (pindexPrev ==
+        // nullptr) has no real height to guess from -- AcceptBlockHeader
+        // rejects such a block anyway (prev-blk-not-found), so skip this
+        // belt-and-suspenders check rather than run it at a fabricated
+        // height and risk caching that guess's verdict into fChecked.
         const CBlockIndex *pindexPrev = LookupBlockIndex(pblock->hashPrevBlock);
-        int nHeight = (pindexPrev ? pindexPrev->nHeight : 0) + 1;
-        bool ret = CheckBlock(*pblock, state, chainparams.GetConsensus(), nHeight);
+        bool ret = pindexPrev == nullptr;
+        if (!ret) {
+            int nHeight = pindexPrev->nHeight + 1;
+            ret = CheckBlock(*pblock, state, chainparams.GetConsensus(), nHeight);
+        }
 
         if (ret) {
             // Store to disk
@@ -5493,6 +5537,20 @@ bool ChainstateManager::LoadBlockIndex(const CChainParams &chainparams) {
         // Use the provided setting for -futureindex in the new database
         fFutureIndex = gArgs.GetBoolArg("-futureindex", DEFAULT_FUTUREINDEX);
         pblocktree->WriteFlag("futureindex", fFutureIndex);
+
+        // PERF (H-3, Fable review, 2026-09-19): a fresh or fully-reindexed DB
+        // never needs the pre-1.3 BLOCK_HAVE_BODIES migration in
+        // LoadBlockIndexDB -- it's either genuinely empty, or being rebuilt
+        // from scratch by THIS binary, which already sets the bit correctly
+        // as each block is reprocessed through AcceptBlock. Without this,
+        // needs_init (true for the whole fReindex branch, since
+        // LoadBlockIndexDB -- where the migration and its flag live -- is
+        // never even called here) meant a `-reindex` under `-perfwithhold*`
+        // produced genuine HAVE_DATA-without-HAVE_BODIES entries with the
+        // migration flag still unset; the next ordinary boot would then run
+        // the migration and wrongly stamp those deliberately-withheld
+        // entries as bodies-held.
+        pblocktree->WriteFlag("bodiesmigrated", true);
     }
     return true;
 }
@@ -5603,8 +5661,13 @@ void LoadExternalBlockFile(const CChainParams &chainparams, FILE *fileIn, FlatFi
                     }
 
                     // process in case the block isn't known yet
+                    // M-2 (Fable review, 2026-09-19): HAVE_DATA alone is no
+                    // longer "already have it" -- a commitment-only entry has
+                    // it set too, and a -loadblock file offering that block's
+                    // real bodies would be skipped as redundant. Same
+                    // conflation as F-36's AcceptBlock/CMPCTBLOCK sites.
                     CBlockIndex *pindex = LookupBlockIndex(hash);
-                    if (!pindex || (pindex->nStatus & BLOCK_HAVE_DATA) == 0) {
+                    if (!pindex || (pindex->nStatus & BLOCK_HAVE_DATA) == 0 || !HaveBodies(pindex)) {
                         CValidationState state;
                         if (::ChainstateActive().AcceptBlock(pblock, state, chainparams, nullptr, true, dbp, nullptr)) {
                             nLoaded++;

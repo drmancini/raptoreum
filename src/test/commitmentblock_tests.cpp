@@ -459,9 +459,13 @@ BOOST_AUTO_TEST_CASE(checkcommitmentblock_rejects_a_null_block) {
 }
 
 // A malicious peer controls the wire form of this field -- the C++ type
-// alone does not guarantee it. Checked before the merkle root, so an
-// otherwise-consistent (root still matches the OLD coinbase) block is
-// rejected here, not waved through to a root-mismatch instead.
+// alone does not guarantee it. Checked AFTER the merkle root (H-1, Fable
+// review, 2026-09-19: the original ordering had this before the root, with
+// corruption=false -- inverting CheckBlock's own "corruption checks first"
+// invariant, since a wrong-coinbase pairing under a genuine header is
+// corruption, not the header's fault). The root is recomputed here so the
+// pairing is otherwise self-consistent and the ONLY failure reachable is
+// the IsCoinBase() guard itself, not an (now upstream) root mismatch.
 BOOST_AUTO_TEST_CASE(checkcommitmentblock_rejects_a_non_coinbase_in_the_coinbase_field) {
     int height;
     CCommitmentBlock c = RealCommitmentBlock(&height);
@@ -474,10 +478,47 @@ BOOST_AUTO_TEST_CASE(checkcommitmentblock_rejects_a_non_coinbase_in_the_coinbase
     notCoinbase.vout[0].scriptPubKey = CScript() << OP_TRUE;
     c.coinbase = MakeTransactionRef(notCoinbase);
     BOOST_REQUIRE(!c.coinbase->IsCoinBase());
+    c.hashMerkleRoot = c.ComputeMerkleRoot();   // self-consistent: isolates the IsCoinBase() check
+
+    // fCheckPOW=false: the recomputed root changes the header hash (same
+    // reason as the wrong-merkle-root test below).
+    CValidationState state;
+    BOOST_CHECK(!CheckCommitmentBlock(c, state, Params().GetConsensus(), height,
+                                      /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-cb-missing");
+}
+
+// H-1's actual scenario, not merely a differently-worded repeat of the test
+// above: a genuine header (this real block's own hashMerkleRoot, left
+// UNCHANGED) paired with a coinbase that does not belong to it. The reject
+// REASON alone cannot distinguish check ordering here -- ANY ordering that
+// rejects this input can say "bad-cb-missing" or "bad-txnmrklroot" and both
+// are "rejected". What ordering actually controls is the corruption flag:
+// mismatched data under an otherwise-genuine header is corruption
+// (state.CorruptionPossible() must be true, matching CheckBlock's own
+// hashMerkleRoot-mismatch treatment), not a fault of the header itself. The
+// H-1 bug had the IsCoinBase() check firing FIRST with corruption=false,
+// which would have made AcceptBlock-shaped wiring permanently invalidate a
+// perfectly genuine header over a coinbase substitution that was never its
+// fault.
+BOOST_AUTO_TEST_CASE(checkcommitmentblock_treats_a_mismatched_pairing_as_corruption) {
+    int height;
+    CCommitmentBlock c = RealCommitmentBlock(&height);
+
+    CMutableTransaction notCoinbase;
+    notCoinbase.vin.resize(1);
+    notCoinbase.vin[0].prevout = COutPoint(uint256S("1"), 0);
+    notCoinbase.vout.resize(1);
+    notCoinbase.vout[0].nValue = 1000;
+    notCoinbase.vout[0].scriptPubKey = CScript() << OP_TRUE;
+    c.coinbase = MakeTransactionRef(notCoinbase);
+    // hashMerkleRoot deliberately NOT recomputed: this header is genuine and
+    // unrelated to the swap, which is exactly the pairing a peer controls.
 
     CValidationState state;
-    BOOST_CHECK(!CheckCommitmentBlock(c, state, Params().GetConsensus(), height));
-    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-cb-missing");
+    BOOST_CHECK(!CheckCommitmentBlock(c, state, Params().GetConsensus(), height,
+                                      /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true));
+    BOOST_CHECK(state.CorruptionPossible());
 }
 
 BOOST_AUTO_TEST_CASE(checkcommitmentblock_rejects_a_wrong_merkle_root) {
@@ -502,8 +543,15 @@ BOOST_AUTO_TEST_CASE(checkcommitmentblock_rejects_a_wrong_merkle_root) {
 BOOST_AUTO_TEST_CASE(checkcommitmentblock_rejects_duplicate_ids_the_merkle_check_misses) {
     int height;
     CCommitmentBlock c = RealCommitmentBlock(&height);
-    BOOST_REQUIRE_GE(c.vCommitments.size(), 1U);
-    c.vCommitments.insert(c.vCommitments.begin(), c.vCommitments[0]);
+    // Test review (2026-09-19): CheckCommitmentBlock never resolves an
+    // identifier to a body, so any fabricated uint256 pair tests the same
+    // thing without depending on this fixture's real commitment list --
+    // the original version relied on c.vCommitments[0] existing, which is
+    // only true because regtest height 100 happens to fall in an LLMQ DKG
+    // mining window (dkgInterval=30, window 10..18) and so carries a
+    // quorum-commitment identifier; a 99- or 101-block fixture would have
+    // broken this test with no hint why.
+    c.vCommitments = {uint256S("aa"), uint256S("aa")};
 
     bool mutated = false;
     c.hashMerkleRoot = c.ComputeMerkleRoot(&mutated);
@@ -518,6 +566,16 @@ BOOST_AUTO_TEST_CASE(checkcommitmentblock_rejects_duplicate_ids_the_merkle_check
     BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-cmt-duplicate-ids");
 }
 
+// M-1 (Fable review, 2026-09-19): ContextualCheckCommitmentBlock also calls
+// ContextualCheckTransaction on the coinbase, mirroring ContextualCheckBlock's
+// own per-tx loop -- and that function's tx.IsCoinBase() && nType!=COINBASE
+// check (reject reason bad-txns-cb-type) fires before this function's own,
+// separately-named bad-cb-type check ever gets reached, exactly as it does
+// in ContextualCheckBlock (the loop runs before the block's own trailing
+// bad-cb-type check). The separate check is therefore reachable only when
+// DIP3 is off, in which case ContextualCheckTransaction's equivalent check
+// is skipped identically -- kept for symmetry with ContextualCheckBlock's
+// shape and to document SS2.4's row, not because it fires first here.
 BOOST_AUTO_TEST_CASE(contextualcheckcommitmentblock_rejects_a_non_cbtx_coinbase) {
     int height;
     CCommitmentBlock c = RealCommitmentBlock(&height);
@@ -526,11 +584,14 @@ BOOST_AUTO_TEST_CASE(contextualcheckcommitmentblock_rejects_a_non_cbtx_coinbase)
     mutCoinbase.nType = TRANSACTION_NORMAL;   // was TRANSACTION_COINBASE
     c.coinbase = MakeTransactionRef(mutCoinbase);
     BOOST_REQUIRE(c.coinbase->IsCoinBase());   // still a coinbase by null-prevout; just the wrong DIP3 type
+    // Self-consistent: a real accept pipeline would reach ContextualCheckCommitmentBlock
+    // only after CheckCommitmentBlock's own merkle check already passed.
+    c.hashMerkleRoot = c.ComputeMerkleRoot();
 
     const CBlockIndex *pindexPrev = ::ChainActive().Tip()->pprev;
     CValidationState state;
     BOOST_CHECK(!ContextualCheckCommitmentBlock(c, state, Params().GetConsensus(), pindexPrev));
-    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-cb-type");
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-txns-cb-type");
 }
 
 BOOST_AUTO_TEST_CASE(contextualcheckcommitmentblock_rejects_a_nonfinal_coinbase) {
@@ -541,6 +602,10 @@ BOOST_AUTO_TEST_CASE(contextualcheckcommitmentblock_rejects_a_nonfinal_coinbase)
     mutCoinbase.nLockTime = 999999;      // height-based, far beyond any test chain height
     mutCoinbase.vin[0].nSequence = 1;    // not SEQUENCE_FINAL -- required for nLockTime to bind
     c.coinbase = MakeTransactionRef(mutCoinbase);
+    // Self-consistent: nLockTime/nSequence change the coinbase's own hash
+    // (Identifiers()'s leaf 0), same reachability reasoning as the
+    // bad-cb-type test above.
+    c.hashMerkleRoot = c.ComputeMerkleRoot();
 
     const CBlockIndex *pindexPrev = ::ChainActive().Tip()->pprev;
     CValidationState state;
