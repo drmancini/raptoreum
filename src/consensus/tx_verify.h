@@ -60,13 +60,36 @@ unsigned int GetP2SHSigOpCount(const CTransaction &tx, const CCoinsViewCache &ma
 unsigned int GetTransactionSigOpCount(const CTransaction &tx, const CCoinsViewCache &inputs, int flags);
 
 /**
+ * The view-independent half of GetAccurateSigOpCount: every scriptSig and
+ * created-output script, counted accurately (fAccurate=true, OP_CHECKDATASIG
+ * (VERIFY) included). No UTXO view needed, so this is what the two view-less
+ * validation sites (CheckBlock, ContextualCheckBlock) must use under the
+ * commitment budget -- NOT GetLegacySigOpCount.
+ *
+ * That matters because legacy is not a uniform undercount relative to the
+ * accurate count (1.2 review, F1, 2026-09-19): GetSigOpCount(false) charges
+ * MAX_PUBKEYS_PER_MULTISIG (20) for every CHECKMULTISIG regardless of the real
+ * key count, so a transaction that only CREATES a small bare multisig output
+ * (say 1-of-3, standard, 3 real sigops) is charged 20 by legacy -- a massive
+ * OVERcount in this direction, the opposite of F-13's spend-side undercount.
+ * A miner filling to the accurate 250,000 budget could build a block whose
+ * legacy count exceeds 250,000 at a much smaller true sigop count, and
+ * CheckBlock would reject it -- stalling block production even though the
+ * block was within budget by the measure the miner used to build it.
+ *
+ * @param[in] tx Transaction for which we are counting sigops
+ * @return Accurate signature operation count for tx's own scriptSigs and
+ *         created outputs, excluding the spend side
+ */
+unsigned int GetAccurateOwnSigOpCount(const CTransaction &tx);
+
+/**
  * Accurate sigop count for the block resource budget (1.2, D-17, F-86, F-87).
  *
  * GetLegacySigOpCount + GetP2SHSigOpCount leave two gaps: neither examines a
  * spent scriptPubKey unless it's P2SH, and neither counts OP_CHECKDATASIG(VERIFY).
  * This counts, per transaction: every scriptSig and created-output script
- * accurately (as GetLegacySigOpCount does, but with fAccurate=true and
- * OP_CHECKDATASIG(VERIFY) included), plus an accurate count of every SPENT
+ * accurately (GetAccurateOwnSigOpCount), plus an accurate count of every SPENT
  * scriptPubKey -- P2SH redeem script or the prevout script directly, whichever
  * applies -- for every prevout type, not just P2SH.
  *
