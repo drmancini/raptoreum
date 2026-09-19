@@ -294,7 +294,7 @@ bool CScript::IsAssetScript(int &nIndex) const {
     return false;
 }
 
-unsigned int CScript::GetSigOpCount(bool fAccurate) const {
+unsigned int CScript::GetSigOpCount(bool fAccurate, bool fCountDataSig) const {
     unsigned int n = 0;
     const_iterator pc = begin();
     opcodetype lastOpcode = OP_INVALIDOPCODE;
@@ -309,15 +309,17 @@ unsigned int CScript::GetSigOpCount(bool fAccurate) const {
                 n += DecodeOP_N(lastOpcode);
             else
                 n += MAX_PUBKEYS_PER_MULTISIG;
+        } else if (fCountDataSig && (opcode == OP_CHECKDATASIG || opcode == OP_CHECKDATASIGVERIFY)) {
+            n++;
         }
         lastOpcode = opcode;
     }
     return n;
 }
 
-unsigned int CScript::GetSigOpCount(const CScript &scriptSig) const {
+unsigned int CScript::GetSigOpCount(const CScript &scriptSig, bool fCountDataSig) const {
     if (!IsPayToScriptHash())
-        return GetSigOpCount(true);
+        return GetSigOpCount(true, fCountDataSig);
 
     // This is a pay-to-script-hash scriptPubKey;
     // get the last item that the scriptSig
@@ -334,7 +336,7 @@ unsigned int CScript::GetSigOpCount(const CScript &scriptSig) const {
 
     /// ... and return its opcount:
     CScript subscript(vData.begin(), vData.end());
-    return subscript.GetSigOpCount(true);
+    return subscript.GetSigOpCount(true, fCountDataSig);
 }
 
 bool CScript::IsPayToPublicKeyHash() const {

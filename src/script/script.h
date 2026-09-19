@@ -509,14 +509,19 @@ public:
      * CHECKMULTISIGs serialized in scriptSigs are
      * counted more accurately, assuming they are of the form
      *  ... OP_N CHECKMULTISIG ...
+     *
+     * fCountDataSig defaults false so every existing call site is unchanged --
+     * this function is shared with pre-fork validation, which must not see
+     * OP_CHECKDATASIG(VERIFY) start counting retroactively (1.2, F-87).
      */
-    unsigned int GetSigOpCount(bool fAccurate) const;
+    unsigned int GetSigOpCount(bool fAccurate, bool fCountDataSig = false) const;
 
     /**
      * Accurately count sigOps, including sigOps in
-     * pay-to-script-hash transactions:
+     * pay-to-script-hash transactions. Same fCountDataSig default-false
+     * reasoning as above.
      */
-    unsigned int GetSigOpCount(const CScript &scriptSig) const;
+    unsigned int GetSigOpCount(const CScript &scriptSig, bool fCountDataSig = false) const;
 
     bool IsPayToPublicKeyHash() const;
 

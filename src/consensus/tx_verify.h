@@ -60,6 +60,27 @@ unsigned int GetP2SHSigOpCount(const CTransaction &tx, const CCoinsViewCache &ma
 unsigned int GetTransactionSigOpCount(const CTransaction &tx, const CCoinsViewCache &inputs, int flags);
 
 /**
+ * Accurate sigop count for the block resource budget (1.2, D-17, F-86, F-87).
+ *
+ * GetLegacySigOpCount + GetP2SHSigOpCount leave two gaps: neither examines a
+ * spent scriptPubKey unless it's P2SH, and neither counts OP_CHECKDATASIG(VERIFY).
+ * This counts, per transaction: every scriptSig and created-output script
+ * accurately (as GetLegacySigOpCount does, but with fAccurate=true and
+ * OP_CHECKDATASIG(VERIFY) included), plus an accurate count of every SPENT
+ * scriptPubKey -- P2SH redeem script or the prevout script directly, whichever
+ * applies -- for every prevout type, not just P2SH.
+ *
+ * A new path. Does NOT alter GetLegacySigOpCount, GetP2SHSigOpCount or
+ * GetTransactionSigOpCount, which pre-fork validation still depends on and
+ * must not change retroactively for history already on chain.
+ *
+ * @param[in] tx     Transaction for which we are counting sigops
+ * @param[in] inputs Map of previous transactions that have outputs we're spending
+ * @return Accurate signature operation count for a tx
+ */
+unsigned int GetAccurateSigOpCount(const CTransaction &tx, const CCoinsViewCache &inputs);
+
+/**
  * Check if transaction is final and can be included in a block with the
  * specified height and time. Consensus critical.
  */
