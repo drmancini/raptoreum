@@ -9,6 +9,7 @@
 // the plan draft that described a vacuous encoding where the bit collapsed
 // onto BLOCK_HAVE_DATA; these tests exercise the real, distinct bit.
 
+#include <algorithm>
 #include <chain.h>
 #include <chainparams.h>
 #include <coins.h>
@@ -338,10 +339,19 @@ BOOST_AUTO_TEST_CASE(out_of_order_arrival_parks_a_child_until_its_parent_downloa
     // ReceivedBlockTransactions called on it. "Regardless of bodies"
     // (F-25j): the child carries a full, decoded body and it still cannot
     // connect.
-    const CBlockIndex *pindexChild = LookupBlockIndex(child.GetHash());
+    CBlockIndex *pindexChild = LookupBlockIndex(child.GetHash());
     BOOST_REQUIRE(pindexChild != nullptr);
     BOOST_CHECK(pindexChild->nStatus & BLOCK_HAVE_DATA);
     BOOST_CHECK_EQUAL(active.Tip()->GetBlockHash().ToString(), hashRealTip.ToString());
+    // Direct evidence of the parked state itself (Fable review, 2026-09-19:
+    // the mutation-tested crash above proves SOME invariant broke, not that
+    // these specific facts are what the test is actually checking).
+    BOOST_CHECK(!pindexChild->HaveTxsDownloaded());
+    BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(pindexChild), 0U);
+    auto rangeUnlinked = chainman.m_blockman.m_blocks_unlinked.equal_range(pindexParent);
+    bool childFoundUnlinked = std::any_of(rangeUnlinked.first, rangeUnlinked.second,
+                                          [&](const auto &kv) { return kv.second == pindexChild; });
+    BOOST_CHECK(childFoundUnlinked);
 
     // Now the parent's commitments arrive, genuinely, through the normal
     // path. ReceivedBlockTransactions's own drain loop (validation.cpp) must
@@ -349,6 +359,109 @@ BOOST_AUTO_TEST_CASE(out_of_order_arrival_parks_a_child_until_its_parent_downloa
     std::shared_ptr<const CBlock> shared_pparent = std::make_shared<const CBlock>(parent);
     BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pparent, /*fForceProcessing=*/true, nullptr));
 
+    BOOST_CHECK_EQUAL(active.Tip()->GetBlockHash().ToString(), child.GetHash().ToString());
+    BOOST_CHECK_EQUAL(active.Height(), pindexRealTip->nHeight + 2);
+}
+
+// 1.3.3, take two (Fable adversarial review, 2026-09-19): the test above
+// exercises ReceivedBlockTransactions's generic parent-guard, which is
+// unmodified Bitcoin Core code -- it passes identically with
+// g_commitmentBudgetActive off, so it proves nothing decoupling-specific.
+// The real decoupling-era gap lives in FindMostWorkChain (validation.cpp,
+// the "PERF" comment on fMissingData): a candidate whose OWN bodies are
+// present can still have an ANCESTOR that is commitment-only, and
+// FindMostWorkChain must recognise the whole candidate chain as unusable
+// and re-park it in m_blocks_unlinked -- not silently drop it, and not let
+// it become tip (ConnectTip cannot execute a block whose parent's UTXO
+// effects were never applied). This is the shape F-25j actually named
+// ("regardless of bodies") that the first test never built: a PARENT that
+// is genuinely commitment-only, extended by a fully-bodied CHILD.
+//
+// Building a commitment-only PARENT with a DIP3-valid CHILD on top of it
+// has the same constraint the first test's comment already documents:
+// DIP3's deterministic MN list is only ever built by really connecting a
+// block, so this builds the pair by really connecting the parent (getting
+// a real list cached for it and a real child built on top), then
+// downgrades the parent to commitment-only by hand -- clearing only
+// BLOCK_HAVE_BODIES/BLOCK_HAVE_UNDO and the validity rung down to
+// BLOCK_VALID_TRANSACTIONS (what a genuine commitment-only arrival grants,
+// per D-16), while leaving nTx/nChainTx/nSequenceId untouched, since its
+// commitments really were downloaded. The child is never submitted until
+// after this downgrade, so it carries no stale index/candidate state of
+// its own to account for.
+BOOST_AUTO_TEST_CASE(commitment_only_ancestor_parks_a_fully_bodied_descendant) {
+    CommitmentBudgetGuard guard;
+    g_commitmentBudgetActive = true;
+
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    CChainState &chainstate = ::ChainstateActive();
+    const CChainParams &chainparams = Params();
+    CChain &active = ::ChainActive();
+
+    CBlockIndex *pindexRealTip = active.Tip();
+    BOOST_REQUIRE(pindexRealTip != nullptr);
+    uint256 hashRealTip = pindexRealTip->GetBlockHash();
+
+    // Really connect the parent (DIP3 list genuinely cached for it), build
+    // the child on top of it (also DIP3-valid), but do not submit the child
+    // yet -- it must not acquire any index state before the parent is
+    // downgraded below.
+    CBlock parent = CreateAndProcessBlock({}, coinbaseKey);
+    uint256 hashParent = parent.GetHash();
+    CBlockIndex *pindexParent = LookupBlockIndex(hashParent);
+    BOOST_REQUIRE(pindexParent != nullptr);
+    BOOST_REQUIRE_EQUAL(active.Tip()->GetBlockHash().ToString(), hashParent.ToString());
+
+    CBlock child = CreateBlock({}, coinbaseKey);
+    BOOST_REQUIRE_EQUAL(child.hashPrevBlock.ToString(), hashParent.ToString());
+
+    // Roll the parent back off the active chain through the real mechanism.
+    {
+        LOCK2(cs_main, m_node.mempool->cs);
+        CValidationState dcState;
+        DisconnectedBlockTransactions disconnectpool;
+        BOOST_REQUIRE(chainstate.DisconnectTip(dcState, chainparams, &disconnectpool));
+        disconnectpool.clear();
+    }
+    BOOST_REQUIRE_EQUAL(active.Tip()->GetBlockHash().ToString(), hashRealTip.ToString());
+    chainstate.setBlockIndexCandidates.insert(pindexRealTip);
+
+    // Downgrade the parent to genuinely commitment-only: bodies withdrawn,
+    // rung lowered to what a real commitment-only arrival grants, tx-level
+    // bookkeeping (nTx/nChainTx/nSequenceId) untouched since commitments
+    // really were downloaded for it.
+    chainstate.setBlockIndexCandidates.erase(pindexParent);
+    pindexParent->nStatus &= ~(BLOCK_HAVE_BODIES | BLOCK_HAVE_UNDO);
+    pindexParent->nStatus = (pindexParent->nStatus & ~BLOCK_VALID_MASK) | BLOCK_VALID_TRANSACTIONS;
+    BOOST_REQUIRE(pindexParent->nStatus & BLOCK_HAVE_DATA);
+    BOOST_REQUIRE(pindexParent->HaveTxsDownloaded());
+    BOOST_REQUIRE(!HaveBodies(pindexParent));
+
+    // The fully-bodied child arrives. Its own data is complete, but its
+    // parent's bodies are not -- FindMostWorkChain must refuse to connect
+    // it and must park it, not lose it.
+    std::shared_ptr<const CBlock> shared_pchild = std::make_shared<const CBlock>(child);
+    bool fNewBlock = false;
+    BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pchild, /*fForceProcessing=*/true, &fNewBlock));
+    BOOST_REQUIRE(fNewBlock);
+
+    CBlockIndex *pindexChild = LookupBlockIndex(child.GetHash());
+    BOOST_REQUIRE(pindexChild != nullptr);
+    BOOST_CHECK(HaveBodies(pindexChild));
+    BOOST_CHECK_EQUAL(active.Tip()->GetBlockHash().ToString(), hashRealTip.ToString());
+    BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(pindexChild), 0U);
+    auto rangeUnlinked = chainman.m_blockman.m_blocks_unlinked.equal_range(pindexParent);
+    bool childFoundUnlinked = std::any_of(rangeUnlinked.first, rangeUnlinked.second,
+                                          [&](const auto &kv) { return kv.second == pindexChild; });
+    BOOST_CHECK(childFoundUnlinked);
+
+    // The parent's body now arrives, genuinely. Its own ReceivedBlockBodies
+    // re-arm walk (1.3.1) must find the child in m_blocks_unlinked and
+    // connect both blocks.
+    std::shared_ptr<const CBlock> shared_pparent = std::make_shared<const CBlock>(parent);
+    BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pparent, /*fForceProcessing=*/false, nullptr));
+
+    BOOST_CHECK(HaveBodies(pindexParent));
     BOOST_CHECK_EQUAL(active.Tip()->GetBlockHash().ToString(), child.GetHash().ToString());
     BOOST_CHECK_EQUAL(active.Height(), pindexRealTip->nHeight + 2);
 }
