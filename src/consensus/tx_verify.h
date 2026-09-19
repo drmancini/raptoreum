@@ -11,6 +11,8 @@
 #include <stdint.h>
 #include <vector>
 
+class CBlock;
+
 class CBlockIndex;
 
 class CCoinsViewCache;
@@ -102,6 +104,21 @@ unsigned int GetAccurateOwnSigOpCount(const CTransaction &tx);
  * @return Accurate signature operation count for a tx
  */
 unsigned int GetAccurateSigOpCount(const CTransaction &tx, const CCoinsViewCache &inputs);
+
+/**
+ * 1.2 (body-byte / input-count cap, Mike, 2026-09-19): aggregate real
+ * (non-coinbase) input count across a block. The coinbase's own single dummy
+ * input touches no UTXO and costs none of the per-input validation work this
+ * bounds -- F-91/F-93/F-94/F-97's mechanism is about real spends, so it is
+ * excluded. No UTXO view needed: input count is directly available from
+ * tx.vin.size(), so this is fully accurate at the view-less validation sites
+ * (CheckBlock, ContextualCheckBlock), unlike the sigop budget's spend-side
+ * term.
+ *
+ * @param[in] block Block for which we are counting aggregate inputs
+ * @return Aggregate non-coinbase input count across the block
+ */
+unsigned int GetBlockInputCount(const CBlock &block);
 
 /**
  * Check if transaction is final and can be included in a block with the
