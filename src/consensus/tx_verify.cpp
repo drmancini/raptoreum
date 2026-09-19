@@ -250,6 +250,29 @@ unsigned int GetTransactionSigOpCount(const CTransaction &tx, const CCoinsViewCa
     return nSigOps;
 }
 
+unsigned int GetAccurateSigOpCount(const CTransaction &tx, const CCoinsViewCache &inputs) {
+    unsigned int nSigOps = 0;
+    for (const auto &txin: tx.vin) {
+        nSigOps += txin.scriptSig.GetSigOpCount(/*fAccurate=*/true, /*fCountDataSig=*/true);
+    }
+    for (const auto &txout: tx.vout) {
+        nSigOps += txout.scriptPubKey.GetSigOpCount(/*fAccurate=*/true, /*fCountDataSig=*/true);
+    }
+
+    if (tx.IsCoinBase())
+        return nSigOps;
+
+    for (const auto &txin: tx.vin) {
+        const CTxOut &prevout = inputs.AccessCoin(txin.prevout).out;
+        // GetSigOpCount(scriptSig) already generalises past P2SH: for a
+        // non-P2SH prevout it falls back to counting the prevout's own
+        // script accurately, which is exactly the extension F-86 calls for.
+        nSigOps += prevout.scriptPubKey.GetSigOpCount(txin.scriptSig, /*fCountDataSig=*/true);
+    }
+
+    return nSigOps;
+}
+
 inline bool checkOutput(const CTxOut &out, CValidationState &state, CAmount &nValueIn,
                         std::map <std::string, CAmount> &nAssetVin,
                         std::map <std::string, std::vector<std::pair<uint64_t, uint64_t>>> &nMapids) {
