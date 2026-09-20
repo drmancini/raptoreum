@@ -9,6 +9,7 @@
 #include <sync.h>
 #include <util/system.h>
 
+#include <cstdio>
 #include <vector>
 
 namespace {
@@ -23,6 +24,11 @@ namespace {
     std::vector<CBodyFileInfo> vinfoBodyFile GUARDED_BY(cs_LastBodyFile);
     int nLastBodyFile GUARDED_BY(cs_LastBodyFile) = 0;
 
+    // 4 bytes per offset, matching WriteBodyRecord's fixed-width encoding
+    // (2.1.1 review finding #1 -- CompactSize's 32 MiB ceiling made a
+    // full-budget record unreadable).
+    const size_t BODY_OFFSET_WIDTH = 4;
+
 } // namespace
 
 FlatFileSeq BodyFileSeq() {
@@ -33,7 +39,28 @@ FILE *OpenBodyFile(const FlatFilePos &pos, bool fReadOnly) {
     return BodyFileSeq().Open(pos, fReadOnly);
 }
 
+uint64_t GetBodyRecordSerializedSize(const std::vector<CTransactionRef> &bodies) {
+    uint64_t size = ::GetSizeOfCompactSize(bodies.size());
+    size += (uint64_t) bodies.size() * BODY_OFFSET_WIDTH;
+    for (const auto &tx : bodies) {
+        size += GetSerializeSize(*tx, SER_DISK, CLIENT_VERSION);
+    }
+    return size;
+}
+
 bool FindBodyPos(FlatFilePos &pos, unsigned int nAddSize) {
+    // A whole body record must land in one file -- WriteBodyRecord/ReadBodyRecord
+    // open a single file and read or write it sequentially. A record this size
+    // could never fit in a fresh file, so rolling over would loop forever
+    // (2.1.1 review finding #2) -- the static_assert in bodystore.h already
+    // guarantees a real body record can't reach this, but a caller passing a
+    // bad nAddSize (or a future budget change without updating the assert)
+    // must fail loudly here instead.
+    if (nAddSize >= MAX_BODYFILE_SIZE) {
+        return error("FindBodyPos: %u bytes cannot fit in one body file (limit %u)",
+                     nAddSize, MAX_BODYFILE_SIZE);
+    }
+
     LOCK(cs_LastBodyFile);
 
     unsigned int nFile = nLastBodyFile;
@@ -41,15 +68,12 @@ bool FindBodyPos(FlatFilePos &pos, unsigned int nAddSize) {
         vinfoBodyFile.resize(nFile + 1);
     }
 
-    // A whole body record must land in one file -- WriteBodyRecord/ReadBodyRecord
-    // open a single file and read or write it sequentially -- so a record that
-    // would cross MAX_BODYFILE_SIZE starts a fresh file instead, exactly as
-    // FindBlockPos does for blk*.dat. COMMITMENT_BUDGET_BODY_BYTES (~110 MB) is
-    // comfortably under MAX_BODYFILE_SIZE (128 MiB) today; a future budget raise
-    // past that would need this reconsidered, same latent constraint blk*.dat
-    // already accepts for an oversized single block.
+    // Exactly FindBlockPos's own rollover condition (validation.cpp) against
+    // MAX_BODYFILE_SIZE in place of MAX_BLOCKFILE_SIZE.
+    bool fRolled = false;
     while (vinfoBodyFile[nFile].nSize + (uint64_t) nAddSize >= MAX_BODYFILE_SIZE) {
         nFile++;
+        fRolled = true;
         if (vinfoBodyFile.size() <= nFile) {
             vinfoBodyFile.resize(nFile + 1);
         }
@@ -57,6 +81,14 @@ bool FindBodyPos(FlatFilePos &pos, unsigned int nAddSize) {
     pos.nFile = (int) nFile;
     pos.nPos = vinfoBodyFile[nFile].nSize;
 
+    if (fRolled) {
+        // FindBlockPos's own FlushBlockFile(finalize=true) truncates the
+        // finished file to its used size and fsyncs it, rather than leaving it
+        // at its full chunk-sized preallocation forever (2.1.1 review finding
+        // #4). Finalize the file we're LEAVING, not the one we're entering.
+        FlatFilePos finishedPos((int) nLastBodyFile, vinfoBodyFile[nLastBodyFile].nSize);
+        BodyFileSeq().Flush(finishedPos, /*finalize=*/true);
+    }
     nLastBodyFile = (int) nFile;
     vinfoBodyFile[nFile].nSize += nAddSize;
 
@@ -75,17 +107,17 @@ bool WriteBodyRecord(const FlatFilePos &pos, const std::vector<CTransactionRef> 
         return error("WriteBodyRecord: OpenBodyFile failed");
     }
 
-    std::vector<uint64_t> offsets;
+    std::vector<uint32_t> offsets;
     offsets.reserve(bodies.size());
     uint64_t cumulative = 0;
     for (const auto &tx : bodies) {
         cumulative += GetSerializeSize(*tx, SER_DISK, CLIENT_VERSION);
-        offsets.push_back(cumulative);
+        offsets.push_back((uint32_t) cumulative);
     }
 
     WriteCompactSize(fileout, bodies.size());
-    for (uint64_t offset : offsets) {
-        WriteCompactSize(fileout, offset);
+    for (uint32_t offset : offsets) {
+        fileout << offset;
     }
     for (const auto &tx : bodies) {
         fileout << *tx;
@@ -98,12 +130,20 @@ namespace {
 
     // Reads the [count][offsets...] header at the current file position, leaving
     // the file positioned at the start of the transaction bytes.
-    bool ReadBodyRecordHeader(CAutoFile &filein, std::vector<uint64_t> &offsetsOut) {
+    bool ReadBodyRecordHeader(CAutoFile &filein, std::vector<uint32_t> &offsetsOut) {
         try {
             uint64_t count = ReadCompactSize(filein);
+            // A corrupt count byte must not drive an oversized allocation before
+            // a single real offset has been read (2.1.1 review finding #11) --
+            // no legal record ever names more transactions than the input-count
+            // budget allows (every non-coinbase tx needs >=1 input, F-115's own
+            // reasoning).
+            if (count > COMMITMENT_BUDGET_MAX_INPUTS) {
+                return error("ReadBodyRecordHeader: implausible count %llu", (unsigned long long) count);
+            }
             offsetsOut.resize(count);
-            for (uint64_t &offset : offsetsOut) {
-                offset = ReadCompactSize(filein);
+            for (uint32_t &offset : offsetsOut) {
+                filein >> offset;
             }
         } catch (const std::exception &e) {
             return error("ReadBodyRecordHeader: %s", e.what());
@@ -119,7 +159,7 @@ bool ReadBodyRecord(const FlatFilePos &pos, std::vector<CTransactionRef> &bodies
         return error("ReadBodyRecord: OpenBodyFile failed for %s", pos.ToString());
     }
 
-    std::vector<uint64_t> offsets;
+    std::vector<uint32_t> offsets;
     if (!ReadBodyRecordHeader(filein, offsets)) {
         return false;
     }
@@ -147,7 +187,11 @@ bool ReadBodyRecordCount(const FlatFilePos &pos, unsigned int &countOut) {
     }
 
     try {
-        countOut = (unsigned int) ReadCompactSize(filein);
+        uint64_t count = ReadCompactSize(filein);
+        if (count > COMMITMENT_BUDGET_MAX_INPUTS) {
+            return error("ReadBodyRecordCount: implausible count %llu", (unsigned long long) count);
+        }
+        countOut = (unsigned int) count;
     } catch (const std::exception &e) {
         return error("ReadBodyRecordCount: %s", e.what());
     }
@@ -160,7 +204,7 @@ bool ReadBodyAt(const FlatFilePos &pos, unsigned int index, CTransactionRef &txO
         return error("ReadBodyAt: OpenBodyFile failed for %s", pos.ToString());
     }
 
-    std::vector<uint64_t> offsets;
+    std::vector<uint32_t> offsets;
     if (!ReadBodyRecordHeader(filein, offsets)) {
         return false;
     }
@@ -168,11 +212,15 @@ bool ReadBodyAt(const FlatFilePos &pos, unsigned int index, CTransactionRef &txO
         return error("ReadBodyAt: index %u out of range (%u bodies)", index, (unsigned int) offsets.size());
     }
 
-    // Skip every body before `index` without deserializing it -- the offset
-    // table's whole point (bodystore.h).
-    uint64_t skipBytes = (index == 0) ? 0 : offsets[index - 1];
+    // Seek straight to body `index`'s bytes -- a real fseek, not a read-and-
+    // discard loop (2.1.1 review finding #3: CAutoFile::ignore() still reads
+    // every skipped byte from disk/page cache, which is not what "seek"
+    // claimed and defeats the offset table's whole purpose for a large record).
+    uint32_t skipBytes = (index == 0) ? 0 : offsets[index - 1];
+    if (fseek(filein.Get(), (long) skipBytes, SEEK_CUR) != 0) {
+        return error("ReadBodyAt: fseek failed");
+    }
     try {
-        filein.ignore(skipBytes);
         filein >> txOut;
     } catch (const std::exception &e) {
         return error("ReadBodyAt: %s", e.what());
