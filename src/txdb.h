@@ -6,6 +6,7 @@
 #ifndef BITCOIN_TXDB_H
 #define BITCOIN_TXDB_H
 
+#include <bodystore.h>
 #include <coins.h>
 #include <dbwrapper.h>
 #include <chain.h>
@@ -116,6 +117,15 @@ public:
     bool ReadBlockFileInfo(int nFile, CBlockFileInfo &info);
 
     bool ReadLastBlockFile(int &nFile);
+
+    // 2.1.2: the body-file series' own analogue of the pair above, persisted
+    // independently since body-file bookkeeping has nothing to do with a
+    // block-index flush's own atomicity requirements.
+    bool WriteBodyFileInfoBatch(const std::vector <std::pair<int, const CBodyFileInfo *>> &fileInfo, int nLastFile);
+
+    bool ReadBodyFileInfo(int nFile, CBodyFileInfo &info);
+
+    bool ReadLastBodyFile(int &nFile);
 
     bool WriteReindexing(bool fReindexing);
 

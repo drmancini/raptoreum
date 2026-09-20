@@ -36,6 +36,8 @@ static const char DB_HEAD_BLOCKS = 'H';
 static const char DB_FLAG = 'F';
 static const char DB_REINDEX_FLAG = 'R';
 static const char DB_LAST_BLOCK = 'l';
+static const char DB_BODY_FILES = 'y';    // 2.1.2
+static const char DB_LAST_BODY_FILE = 'Y'; // 2.1.2
 
 namespace {
 
@@ -174,6 +176,24 @@ void CBlockTreeDB::ReadReindexing(bool &fReindexing) {
 
 bool CBlockTreeDB::ReadLastBlockFile(int &nFile) {
     return Read(DB_LAST_BLOCK, nFile);
+}
+
+bool CBlockTreeDB::WriteBodyFileInfoBatch(const std::vector <std::pair<int, const CBodyFileInfo *>> &fileInfo,
+                                          int nLastFile) {
+    CDBBatch batch(*this);
+    for (const auto &entry : fileInfo) {
+        batch.Write(std::make_pair(DB_BODY_FILES, entry.first), *entry.second);
+    }
+    batch.Write(DB_LAST_BODY_FILE, nLastFile);
+    return WriteBatch(batch, true);
+}
+
+bool CBlockTreeDB::ReadBodyFileInfo(int nFile, CBodyFileInfo &info) {
+    return Read(std::make_pair(DB_BODY_FILES, nFile), info);
+}
+
+bool CBlockTreeDB::ReadLastBodyFile(int &nFile) {
+    return Read(DB_LAST_BODY_FILE, nFile);
 }
 
 CCoinsViewCursor *CCoinsViewDB::Cursor() const {
