@@ -36,6 +36,7 @@ from test_framework.util import assert_equal, wait_until
 DKG_INTERVAL = 30         # llmq_test, quorums_parameters.h
 MINING_WINDOW = (10, 18)  # dkgMiningWindowStart .. End
 PARENT_HEIGHT = 201       # 200 primed blocks + 1; 201 % 30 == 21, outside the window
+WITHHOLD_COUNT = 2        # exactly WITHHOLD_COUNT+1 real deliveries must occur to converge
 
 
 class FeatureBodyRefetchTest(BitcoinTestFramework):
@@ -44,7 +45,7 @@ class FeatureBodyRefetchTest(BitcoinTestFramework):
         self.setup_clean_chain = True
         self.extra_args = [[
             "-perfwithholdheight=%d" % PARENT_HEIGHT,
-            "-perfwithholdcount=2",
+            "-perfwithholdcount=%d" % WITHHOLD_COUNT,
         ]]
 
     def run_test(self):
@@ -100,13 +101,19 @@ class FeatureBodyRefetchTest(BitcoinTestFramework):
         wait_until(lambda: node.getblockcount() == PARENT_HEIGHT + 1, timeout=20)
         assert_equal(node.getbestblockhash(), child.hash)
 
-        # And it must have taken genuine re-fetching to get there, not luck:
-        # -perfwithholdcount=2 means the parent's body could only be accepted
-        # on (at least) a second delivery.
+        # And it must have taken EXACTLY the right number of genuine
+        # deliveries to get there, not merely "more than one": with
+        # -perfwithholdcount=N, PerfWithholdBodies must be evaluated exactly
+        # once per AcceptBlock call (F-111's shared-counter fix) for the
+        # parent to be accepted on exactly the (N+1)th delivery -- no
+        # sooner. A weaker ">= 2" bound here would still pass if that fix
+        # regressed: reverting it (three call sites decrementing the same
+        # counter instead of one cached evaluation) converges in only 2
+        # deliveries for N=2, since a fresh block's first delivery costs 2
+        # decrements instead of 1 (verified directly against the mutant).
         parent_requests = requests_for(parent.sha256)
         self.log.info("parent was requested %d time(s) before converging", parent_requests)
-        assert parent_requests >= 2, \
-            "expected at least 2 getdata requests for the withheld parent (count=2), saw %d" % parent_requests
+        assert_equal(parent_requests, WITHHOLD_COUNT + 1)
 
         node.disconnect_p2ps()
         network_thread_join()

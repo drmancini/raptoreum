@@ -502,6 +502,17 @@ BOOST_AUTO_TEST_CASE(startup_activation_is_non_fatal_past_a_commitment_only_best
     BOOST_REQUIRE(!HaveBodies(pindexB));
     BOOST_REQUIRE_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), hashRealTip.ToString());
 
+    // FindMostWorkChain already excluded B from setBlockIndexCandidates
+    // during the ProcessNewBlock call above, so calling ActivateBestChain
+    // again here would trivially find nothing to do -- not what a real
+    // restart faces. LoadBlockIndex (validation.cpp) re-inserts every
+    // BLOCK_VALID_TRANSACTIONS block with HaveTxsDownloaded() as a
+    // candidate regardless of bodies (a commitment-only block satisfies
+    // both), so at actual startup B genuinely IS a candidate again and
+    // FindMostWorkChain's filter is what has to exclude it a second time.
+    // Reproduce that real precondition directly (Fable review, 2026-09-20).
+    chainstate.setBlockIndexCandidates.insert(pindexB);
+
     // The exact call shape init.cpp:1190-1208 makes at startup -- one loop,
     // used for both -reindex and -reindex-chainstate, no special-casing.
     CValidationState state;
