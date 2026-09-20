@@ -200,6 +200,11 @@ extern bool g_parallel_script_checks;
 extern std::set<uint256> g_perf_withhold_hashes;
 extern std::set<int> g_perf_withhold_heights;
 
+/** 1.3.6 (F-111): caps how many attempts g_perf_withhold_* above actually
+ *  withhold before letting a matching block through -- -perfwithholdcount=<n>,
+ *  -1 (default) withholds forever. See PerfWithholdBodies in validation.cpp. */
+extern std::atomic<int> g_perf_withhold_count;
+
 /** 1.2 (D-18, F-88): gates the committed-count sigop budget (COMMITMENT_BUDGET_SIGOPS)
  *  in place of the byte-indexed legacy cap, and switches ATMP/ConnectBlock to
  *  GetAccurateSigOpCount. Test-only until 4.6 has a real deployment bit --

@@ -116,6 +116,14 @@ bool g_parallel_script_checks{false};
 std::set<uint256> g_perf_withhold_hashes;
 std::set<int> g_perf_withhold_heights;
 
+/** 1.3.6 (F-111): caps how many times PerfWithholdBodies actually withholds a
+ *  matching block before letting it through -- unset (-1, the default)
+ *  withholds forever, matching the original behaviour. Lets a live session
+ *  prove a retry eventually converges, rather than only across a restart.
+ *  Shared across every matching block, not per-hash -- proportionate for a
+ *  harness that targets one block/height at a time; see validation.h. */
+std::atomic<int> g_perf_withhold_count{-1};
+
 /** 1.2 (D-18, F-88); see validation.h. */
 std::atomic<bool> g_commitmentBudgetActive{false};
 
@@ -123,13 +131,47 @@ bool HaveBodies(const CBlockIndex *pindex) {
     return pindex != nullptr && (pindex->nStatus & BLOCK_HAVE_BODIES);
 }
 
-/** PERF: should this block be accepted without its bodies? Harness only. */
-static bool PerfWithholdBodies(const CBlockIndex *pindex) {
+static bool PerfWithholdMatches(const CBlockIndex *pindex) {
     if (g_perf_withhold_hashes.empty() && g_perf_withhold_heights.empty()) {
         return false;
     }
     return g_perf_withhold_hashes.count(pindex->GetBlockHash()) ||
            g_perf_withhold_heights.count(pindex->nHeight);
+}
+
+/** 1.3.6 (F-111): non-decrementing peek at whether a matching block is
+ *  STILL withheld right now, for every consumer other than AcceptBlock's own
+ *  accept-an-attempt decision below -- ReadBlockFromDisk in particular, which
+ *  has no attempt of its own to count and must simply agree with whatever
+ *  AcceptBlock has already decided. Unset count (-1) withholds forever,
+ *  matching the original, count-less behaviour exactly. */
+static bool PerfWithholdStillActive(const CBlockIndex *pindex) {
+    if (!PerfWithholdMatches(pindex)) {
+        return false;
+    }
+    return g_perf_withhold_count < 0 || g_perf_withhold_count.load() > 0;
+}
+
+/** PERF: should this block be accepted without its bodies? Harness only.
+ *  Counts one attempt -- call at most once per AcceptBlock invocation, and
+ *  reuse the result, or a single delivery burns through the count faster
+ *  than once per attempt. */
+static bool PerfWithholdBodies(const CBlockIndex *pindex) {
+    if (!PerfWithholdMatches(pindex)) {
+        return false;
+    }
+    if (g_perf_withhold_count < 0) {
+        return true;
+    }
+    // Clamped at 0, never decremented past it: an unclamped fetch_sub would
+    // walk a configured, exhausted count on down through -1, -2, ... --
+    // indistinguishable from the -1 sentinel that means "never configured,
+    // withhold forever" (PerfWithholdStillActive, and the "< 0" check just
+    // above, both read a negative value that way). Clamping keeps 0 meaning
+    // exactly one thing: this configured count is exhausted, permanently.
+    int old = g_perf_withhold_count.load();
+    while (old > 0 && !g_perf_withhold_count.compare_exchange_weak(old, old - 1)) {}
+    return old > 0;
 }
 
 /** The script-check thread pool. Declared here rather than beside
@@ -1115,12 +1157,20 @@ bool ReadBlockFromDisk(CBlock &block, const CBlockIndex *pindex, const Consensus
     // acceptance-layer probe measures. Nineteen call sites reach here,
     // including ConnectTip, ProcessGetBlockData, GETBLOCKTXN, the compact-block
     // announce, VerifyDB, RollbackBlock, ZMQ and the smartnode list diff.
-    if (!g_perf_withhold_hashes.empty() || !g_perf_withhold_heights.empty()) {
-        if (g_perf_withhold_hashes.count(pindex->GetBlockHash()) ||
-            g_perf_withhold_heights.count(pindex->nHeight)) {
-            return error("%s: PERF: body withheld for %s (height %d)", __func__,
-                         pindex->GetBlockHash().ToString(), pindex->nHeight);
-        }
+    //
+    // 1.3.6 (F-111): a non-decrementing PEEK, not another counted attempt --
+    // this function has no attempt of its own to count, it just has to agree
+    // with whatever AcceptBlock's own (count-aware) decision already was.
+    // Without this, once that count is exhausted and BLOCK_HAVE_BODIES is
+    // set for real, every one of these nineteen call sites would still see
+    // the (never-decremented-by-them) withhold set and refuse a read the
+    // real bytes on disk (the commitment block is always written, withheld
+    // or not) could satisfy -- ConnectTip in particular would abort the node
+    // over a "read failure" it has no way to distinguish from disk
+    // corruption.
+    if (PerfWithholdStillActive(pindex)) {
+        return error("%s: PERF: body withheld for %s (height %d)", __func__,
+                     pindex->GetBlockHash().ToString(), pindex->nHeight);
     }
 
     FlatFilePos blockPos;
@@ -4761,12 +4811,18 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock> &pblock, CVali
 
     // Write block to history file
     if (fNewBlock) *fNewBlock = true;
-    if (pindex->nStatus & BLOCK_HAVE_DATA && PerfWithholdBodies(pindex)) {
+    // 1.3.6 (F-111): evaluated exactly once per AcceptBlock call and reused
+    // below -- PerfWithholdBodies decrements a shared, attempt-counted global
+    // when -perfwithholdcount is set, so calling it more than once per accept
+    // would silently burn through the count faster than once per delivery,
+    // as three separate call sites here originally did.
+    bool fWithholdBodies = PerfWithholdBodies(pindex);
+    if (pindex->nStatus & BLOCK_HAVE_DATA && fWithholdBodies) {
         // Already stored, still withheld: nothing to do. Falling through would write
         // a second copy and re-stamp nSequenceId for this block and its descendants.
         return true;
     }
-    if (PerfWithholdBodies(pindex)) {
+    if (fWithholdBodies) {
         LogPrintf("AcceptBlock: accepting %s (height %d) as commitments; bodies not held\n",
                   pindex->GetBlockHash().ToString(), pindex->nHeight);
     } else if (pindex->nStatus & BLOCK_HAVE_DATA) {
@@ -4782,7 +4838,7 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock> &pblock, CVali
             state.Error(strprintf("%s: Failed to find position to write new block to disk", __func__));
             return false;
         }
-        ReceivedBlockTransactions(block, state, pindex, blockPos, !PerfWithholdBodies(pindex));
+        ReceivedBlockTransactions(block, state, pindex, blockPos, !fWithholdBodies);
     } catch (const std::runtime_error &e) {
         return AbortNode(state, std::string("System error: ") + e.what());
     }
