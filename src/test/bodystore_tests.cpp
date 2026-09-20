@@ -7,13 +7,16 @@
 // step). See bodystore.h for the design.
 
 #include <bodystore.h>
+#include <chain.h>
 #include <primitives/transaction.h>
 #include <script/script.h>
 #include <serialize.h>
+#include <streams.h>
 #include <test/test_raptoreum.h>
 #include <tinyformat.h>
 #include <txdb.h>
 #include <uint256.h>
+#include <util/strencodings.h>
 #include <util/system.h>
 
 #include <boost/test/unit_test.hpp>
@@ -389,6 +392,106 @@ BOOST_AUTO_TEST_CASE(flush_body_file_info_is_a_no_op_when_nothing_is_dirty) {
     TestOnlyResetBodyFileState();
     BOOST_REQUIRE(LoadBodyFileInfo());
     BOOST_REQUIRE(FlushBodyFileInfo());
+}
+
+// 2.1.3: CBlockIndex/CDiskBlockIndex's own nBodyFile/nBodyPos + BLOCK_HAVE_BODY_RECORD.
+// No migration needed (see the bit's own comment in chain.h) -- these tests exist to
+// prove that claim, not just assert it: an entry with the bit unset must round-trip
+// identically to one that has never heard of the new fields at all.
+
+BOOST_AUTO_TEST_CASE(get_body_pos_is_null_until_the_bit_is_set) {
+    CBlockIndex index;
+    BOOST_CHECK(index.GetBodyPos().IsNull());
+
+    index.nBodyFile = 3;
+    index.nBodyPos = 12345;
+    // Fields alone, bit still unset -- GetBlockPos()/GetUndoPos() use exactly
+    // this same convention, so GetBodyPos() must too.
+    BOOST_CHECK(index.GetBodyPos().IsNull());
+
+    index.nStatus |= BLOCK_HAVE_BODY_RECORD;
+    BOOST_CHECK(!index.GetBodyPos().IsNull());
+    BOOST_CHECK_EQUAL(index.GetBodyPos().nFile, 3);
+    BOOST_CHECK_EQUAL(index.GetBodyPos().nPos, 12345U);
+}
+
+static CBlockIndex MakeBlockIndexForDiskTest() {
+    CBlockIndex index;
+    index.nHeight = 100;
+    index.nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_TRANSACTIONS;
+    index.nTx = 5;
+    index.nFile = 7;
+    index.nDataPos = 999;
+    index.nVersion = 4;
+    index.hashMerkleRoot = uint256S("0xabc123");
+    index.nTime = 1700000000;
+    index.nBits = 0x207fffff;
+    index.nNonce = 42;
+    return index;
+}
+
+BOOST_AUTO_TEST_CASE(body_record_position_round_trips_through_disk_index_serialization) {
+    CBlockIndex index = MakeBlockIndexForDiskTest();
+    index.nStatus |= BLOCK_HAVE_BODY_RECORD;
+    index.nBodyFile = 2;
+    index.nBodyPos = 54321;
+
+    CDiskBlockIndex diskIndex(&index);
+    CDataStream ss(SER_DISK, CLIENT_VERSION);
+    ss << diskIndex;
+
+    CDiskBlockIndex diskIndexOut;
+    ss >> diskIndexOut;
+
+    BOOST_CHECK(diskIndexOut.nStatus & BLOCK_HAVE_BODY_RECORD);
+    BOOST_CHECK_EQUAL(diskIndexOut.nBodyFile, 2);
+    BOOST_CHECK_EQUAL(diskIndexOut.nBodyPos, 54321U);
+    // The rest of the entry must survive unaffected -- proves the new fields'
+    // bytes didn't shift anything that comes after them.
+    BOOST_CHECK_EQUAL(diskIndexOut.nHeight, index.nHeight);
+    BOOST_CHECK_EQUAL(diskIndexOut.nTx, index.nTx);
+    BOOST_CHECK_EQUAL(diskIndexOut.nFile, index.nFile);
+    BOOST_CHECK_EQUAL(diskIndexOut.nDataPos, index.nDataPos);
+    BOOST_CHECK_EQUAL(diskIndexOut.nVersion, index.nVersion);
+    BOOST_CHECK(diskIndexOut.hashMerkleRoot == index.hashMerkleRoot);
+    BOOST_CHECK_EQUAL(diskIndexOut.nTime, index.nTime);
+    BOOST_CHECK_EQUAL(diskIndexOut.nBits, index.nBits);
+    BOOST_CHECK_EQUAL(diskIndexOut.nNonce, index.nNonce);
+}
+
+// The actual "no migration needed" claim: every entry on disk today has this
+// bit unset, so it must decode exactly as if the new fields didn't exist --
+// zero-byte cost, and no misalignment of whatever comes after them.
+BOOST_AUTO_TEST_CASE(body_record_position_is_absent_when_the_bit_is_unset) {
+    CBlockIndex indexWithout = MakeBlockIndexForDiskTest();
+    // Bit deliberately left unset, even though the fields hold garbage --
+    // exactly what an upgraded binary sees for a real historical entry: the
+    // in-memory default (0) after SetNull(), never touched because nothing
+    // before 2.1.4 ever sets this bit.
+    indexWithout.nBodyFile = 999;
+    indexWithout.nBodyPos = 999;
+
+    CBlockIndex indexBaseline = MakeBlockIndexForDiskTest();
+
+    CDataStream ssWithout(SER_DISK, CLIENT_VERSION);
+    ssWithout << CDiskBlockIndex(&indexWithout);
+    CDataStream ssBaseline(SER_DISK, CLIENT_VERSION);
+    ssBaseline << CDiskBlockIndex(&indexBaseline);
+
+    // Byte-identical: the garbage in nBodyFile/nBodyPos never reaches the wire
+    // when the bit is unset, so two otherwise-identical entries serialize the
+    // same regardless of what those fields happen to hold in memory.
+    BOOST_CHECK_EQUAL(HexStr(std::vector<unsigned char>(ssWithout.begin(), ssWithout.end())),
+                     HexStr(std::vector<unsigned char>(ssBaseline.begin(), ssBaseline.end())));
+
+    CDiskBlockIndex diskIndexOut;
+    ssWithout >> diskIndexOut;
+    BOOST_CHECK(!(diskIndexOut.nStatus & BLOCK_HAVE_BODY_RECORD));
+    BOOST_CHECK(diskIndexOut.GetBodyPos().IsNull());
+    BOOST_CHECK_EQUAL(diskIndexOut.nHeight, indexWithout.nHeight);
+    BOOST_CHECK_EQUAL(diskIndexOut.nFile, indexWithout.nFile);
+    BOOST_CHECK_EQUAL(diskIndexOut.nDataPos, indexWithout.nDataPos);
+    BOOST_CHECK(diskIndexOut.hashMerkleRoot == indexWithout.hashMerkleRoot);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

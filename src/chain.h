@@ -152,6 +152,26 @@ enum BlockStatus : uint32_t {
      * runs those 3 rules at all.
      */
     BLOCK_HAVE_BODIES = 256,
+
+    /**
+     * 2.1.3 (bodystore.h): a body-store record exists for this block at
+     * nBodyFile/nBodyPos.
+     *
+     * Deliberately a separate bit from BLOCK_HAVE_BODIES, not reusing it --
+     * BLOCK_HAVE_BODIES has meant "we consider this block's bodies held" since
+     * 1.3.1, true for essentially all of history under Phase 1's storage
+     * format (F-110: a block's full bytes are written unconditionally
+     * regardless of this bit). If nBodyFile/nBodyPos's serialization were
+     * gated on BLOCK_HAVE_BODIES, every pre-2.1.3 on-disk entry -- which
+     * already has that bit set -- would need the new fields present too, and
+     * they are not: no pre-2.1.4 entry has ever had a real body-store record
+     * written. A bit that is false for every entry until 2.1.4 genuinely
+     * writes one needs no migration at all (unlike BLOCK_HAVE_BODIES's own
+     * 1.3.1 migration): an unset bit decodes correctly from old bytes by
+     * construction, the same way any never-before-used bit in an existing
+     * VARINT-encoded field already does.
+     */
+    BLOCK_HAVE_BODY_RECORD = 512,
 };
 
 /** The block chain is a tree shaped structure starting with the
@@ -181,6 +201,14 @@ public:
 
     //! Byte offset within rev?????.dat where this block's undo data is stored
     unsigned int nUndoPos;
+
+    //! 2.1.3: which # file this block's body-store record is in (bdy?????.dat),
+    //! valid only when nStatus & BLOCK_HAVE_BODY_RECORD.
+    int nBodyFile;
+
+    //! 2.1.3: byte offset within bdy?????.dat where this block's body-store
+    //! record starts, valid only when nStatus & BLOCK_HAVE_BODY_RECORD.
+    unsigned int nBodyPos;
 
     //! (memory only) Total amount of work (expected number of hashes) in the chain up to and including this block
     arith_uint256 nChainWork;
@@ -218,6 +246,8 @@ public:
         nFile = 0;
         nDataPos = 0;
         nUndoPos = 0;
+        nBodyFile = 0;
+        nBodyPos = 0;
         nChainWork = arith_uint256();
         nTx = 0;
         nChainTx = 0;
@@ -260,6 +290,18 @@ public:
         if (nStatus & BLOCK_HAVE_UNDO) {
             ret.nFile = nFile;
             ret.nPos = nUndoPos;
+        }
+        return ret;
+    }
+
+    //! 2.1.3: null (FlatFilePos::IsNull()) until BLOCK_HAVE_BODY_RECORD is set,
+    //! same convention as GetBlockPos()/GetUndoPos() above -- and, unlike
+    //! those, in the body store's OWN file series (bodystore.h), not blk/rev's.
+    FlatFilePos GetBodyPos() const {
+        FlatFilePos ret;
+        if (nStatus & BLOCK_HAVE_BODY_RECORD) {
+            ret.nFile = nBodyFile;
+            ret.nPos = nBodyPos;
         }
         return ret;
     }
@@ -390,6 +432,16 @@ public:
             READWRITE(VARINT(obj.nFile, VarIntMode::NONNEGATIVE_SIGNED));
         if (obj.nStatus & BLOCK_HAVE_DATA) READWRITE(VARINT(obj.nDataPos));
         if (obj.nStatus & BLOCK_HAVE_UNDO) READWRITE(VARINT(obj.nUndoPos));
+        // 2.1.3: same conditional-on-a-status-bit pattern as the three fields
+        // above, needing no migration for exactly the reason BLOCK_HAVE_BODY_RECORD's
+        // own comment gives -- the bit is unset for every entry that predates it,
+        // so these bytes are simply absent from every existing on-disk entry, the
+        // same as nFile/nDataPos/nUndoPos already are for an entry with neither
+        // BLOCK_HAVE_DATA nor BLOCK_HAVE_UNDO set.
+        if (obj.nStatus & BLOCK_HAVE_BODY_RECORD) {
+            READWRITE(VARINT(obj.nBodyFile, VarIntMode::NONNEGATIVE_SIGNED));
+            READWRITE(VARINT(obj.nBodyPos));
+        }
 
         // block hash
         READWRITE(obj.hash);
