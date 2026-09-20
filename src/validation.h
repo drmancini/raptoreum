@@ -210,9 +210,13 @@ extern std::atomic<bool> g_commitmentBudgetActive;
  *
  *  The acceptance layer the decoupling design needs (see docs, §2) splits one
  *  fact -- "we have this block" -- into two: commitments held, and bodies held.
- *  This is that second fact, and under the probe it is driven by the withhold
- *  flags rather than by a status bit, so the state machine can be exercised
- *  without committing to a storage format.
+ *  This is that second fact, read from the real per-block BLOCK_HAVE_BODIES
+ *  status bit since 1.3.1 (F-101) -- no longer probe-era withhold-flag-only
+ *  state. The withhold flags above remain the test-only way to make a chosen
+ *  block's bodies genuinely unreadable (ReadBlockFromDisk's CBlockIndex
+ *  overload refuses it), which is what actually exercises the paths this bit
+ *  gates; clearing the bit alone, without withholding, only changes bookkeeping
+ *  -- the bytes are still on disk and still readable (1.3.5, F-110).
  *
  *  Every path that may materialise a block consults this before reading, which
  *  is the rule that closes the whole remote-crash class: today a missing body

@@ -18,9 +18,12 @@
 #include <node/context.h>
 #include <primitives/block.h>
 #include <pubkey.h>
+#include <fs.h>
 #include <script/script.h>
 #include <script/standard.h>
+#include <streams.h>
 #include <txmempool.h>
+#include <util/system.h>
 #include <validation.h>
 #include <test/test_raptoreum.h>
 
@@ -464,6 +467,156 @@ BOOST_AUTO_TEST_CASE(commitment_only_ancestor_parks_a_fully_bodied_descendant) {
     BOOST_CHECK(HaveBodies(pindexParent));
     BOOST_CHECK_EQUAL(active.Tip()->GetBlockHash().ToString(), child.GetHash().ToString());
     BOOST_CHECK_EQUAL(active.Height(), pindexRealTip->nHeight + 2);
+}
+
+// 1.3.5 (F-110, Mike, 2026-09-20): VerifyDB/reindex/startup re-pointing at the
+// real bit. Investigation (Fable adversarial review) found most of the
+// original plan already built and correct, but the mechanism is not what the
+// plan assumed: ConnectTip's own !HaveBodies(pindexNew) guard (the "PERF"
+// comment near SetBodiesMissing) and init.cpp:1193's BodiesMissing() handling
+// are BOTH dead code today -- FindMostWorkChain's own fMissingData ancestor
+// walk (F-109's mechanism) already excludes any bodies-missing candidate
+// BEFORE ConnectTip is ever called on it, so ConnectTip's guard never fires
+// in practice. This test pins that fact directly, so if FindMostWorkChain's
+// filter is ever weakened, this assertion (not a crash) is the tripwire that
+// says the OTHER guard has become load-bearing.
+BOOST_AUTO_TEST_CASE(startup_activation_is_non_fatal_past_a_commitment_only_best_block) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    CChainState &chainstate = ::ChainstateActive();
+    const CChainParams &chainparams = Params();
+
+    CBlockIndex *pindexRealTip = ::ChainActive().Tip();
+    BOOST_REQUIRE(pindexRealTip != nullptr);
+    uint256 hashRealTip = pindexRealTip->GetBlockHash();
+
+    CBlock blockB = CreateBlock({}, coinbaseKey);
+    uint256 hashB = blockB.GetHash();
+    std::shared_ptr<const CBlock> shared_pblockB = std::make_shared<const CBlock>(blockB);
+
+    {
+        PerfWithholdGuard guard(hashB);
+        BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblockB, /*fForceProcessing=*/true, nullptr));
+    }
+    CBlockIndex *pindexB = LookupBlockIndex(hashB);
+    BOOST_REQUIRE(pindexB != nullptr);
+    BOOST_REQUIRE(!HaveBodies(pindexB));
+    BOOST_REQUIRE_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), hashRealTip.ToString());
+
+    // The exact call shape init.cpp:1190-1208 makes at startup -- one loop,
+    // used for both -reindex and -reindex-chainstate, no special-casing.
+    CValidationState state;
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state, chainparams, nullptr));
+    BOOST_CHECK(state.IsValid());
+    BOOST_CHECK(!state.BodiesMissing());
+    BOOST_CHECK_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), hashRealTip.ToString());
+    BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(pindexB), 0U);
+}
+
+// The bodies-gap guard in VerifyDB (validation.cpp, "Same shape as the
+// pruning case") is only load-bearing when the block's bytes are genuinely
+// unreadable -- under today's storage format (F-110) a block's full bytes are
+// always written to disk regardless of BLOCK_HAVE_BODIES, so clearing the bit
+// alone leaves ReadBlockFromDisk succeeding and the guard proves nothing.
+// g_perf_withhold_hashes is what actually makes ReadBlockFromDisk's
+// CBlockIndex overload refuse the read (precedent: commitmentblock_tests.cpp's
+// materialising-read test) -- combining both is what reproduces "commitments
+// held, bodies missing" the way F-25's original bug needed to be caught.
+BOOST_AUTO_TEST_CASE(verifydb_stops_at_a_bodies_gap_instead_of_reporting_corruption) {
+    CChainState &chainstate = ::ChainstateActive();
+    const CChainParams &chainparams = Params();
+
+    CBlockIndex *pindexTip = ::ChainActive().Tip();
+    BOOST_REQUIRE(pindexTip != nullptr);
+    CBlockIndex *pindexG = pindexTip->GetAncestor(pindexTip->nHeight - 2);
+    BOOST_REQUIRE(pindexG != nullptr);
+    BOOST_REQUIRE(HaveBodies(pindexG));
+
+    PerfWithholdGuard guard(pindexG->GetBlockHash());
+    CBlock unreadable;
+    BOOST_REQUIRE(!ReadBlockFromDisk(unreadable, pindexG, chainparams.GetConsensus()));  // sanity: withhold really blocks the read
+
+    pindexG->nStatus &= ~BLOCK_HAVE_BODIES;
+    BOOST_REQUIRE(!HaveBodies(pindexG));
+
+    // The guard (validation.cpp's !HaveBodies check, ahead of the doomed
+    // read) stops the walk gracefully at both check level 3 (the default
+    // path) and level 4 (the "try reconnecting" path) -- level 4 never
+    // revisits G itself, only bodied blocks above it (F-110), but prove it
+    // rather than assume it.
+    BOOST_CHECK(CVerifyDB().VerifyDB(chainparams, &chainstate.CoinsTip(), /*nCheckLevel=*/3, /*nCheckDepth=*/10));
+    BOOST_CHECK(CVerifyDB().VerifyDB(chainparams, &chainstate.CoinsTip(), /*nCheckLevel=*/4, /*nCheckDepth=*/10));
+
+    // Control: restore the bit while the bytes are STILL unreadable -- this
+    // is F-25's original bug shape (the index claims bodies are held; they
+    // are not). Without the guard catching it earlier, VerifyDB attempts the
+    // read, it fails, and the caller (init.cpp) reports "Corrupted block
+    // database detected" -- exactly the false diagnosis 1.3.5 exists to
+    // prevent for a genuine gap, reproduced here to prove the guard (not the
+    // bytes) is what saves the true case above.
+    pindexG->nStatus |= BLOCK_HAVE_BODIES;
+    BOOST_CHECK(!CVerifyDB().VerifyDB(chainparams, &chainstate.CoinsTip(), /*nCheckLevel=*/3, /*nCheckDepth=*/10));
+
+    // Restore real state before the withhold guard lifts.
+    BOOST_REQUIRE(HaveBodies(pindexG));
+}
+
+// The -reindex/-loadblock limb: LoadExternalBlockFile's M-2 fix
+// ((pindex->nStatus & BLOCK_HAVE_DATA) == 0 || !HaveBodies(pindex), instead of
+// HAVE_DATA alone) has zero test coverage despite being named in 1.3.5's own
+// title. Under today's storage format a blk*.dat entry is always a complete
+// block (F-110) -- offering one for an index entry that is merely
+// commitment-only is exactly how -reindex heals it back to fully-bodied,
+// which is what this proves.
+BOOST_AUTO_TEST_CASE(loadblock_fills_a_commitment_only_block_and_startup_connects_it) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    const CChainParams &chainparams = Params();
+
+    CBlockIndex *pindexRealTip = ::ChainActive().Tip();
+    BOOST_REQUIRE(pindexRealTip != nullptr);
+    uint256 hashRealTip = pindexRealTip->GetBlockHash();
+
+    CBlock blockB = CreateBlock({}, coinbaseKey);
+    uint256 hashB = blockB.GetHash();
+    std::shared_ptr<const CBlock> shared_pblockB = std::make_shared<const CBlock>(blockB);
+
+    {
+        PerfWithholdGuard guard(hashB);
+        BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblockB, /*fForceProcessing=*/true, nullptr));
+    }
+    CBlockIndex *pindexB = LookupBlockIndex(hashB);
+    BOOST_REQUIRE(pindexB != nullptr);
+    BOOST_REQUIRE(!HaveBodies(pindexB));
+    int nFileBefore = pindexB->nFile;
+    unsigned int nDataPosBefore = pindexB->nDataPos;
+
+    // Build a scratch blk*.dat-format file for B, the same framing
+    // WriteBlockToDisk uses (message-start bytes, serialized size, the block).
+    fs::path scratchPath = GetDataDir() / "scratch_blk_for_test.dat";
+    {
+        CAutoFile fileout(fsbridge::fopen(scratchPath, "wb+"), SER_DISK, CLIENT_VERSION);
+        BOOST_REQUIRE(!fileout.IsNull());
+        unsigned int nSize = GetSerializeSize(fileout, blockB);
+        fileout << chainparams.MessageStart() << nSize;
+        fileout << blockB;
+    }
+    FILE *fileIn = fsbridge::fopen(scratchPath, "rb");
+    BOOST_REQUIRE(fileIn != nullptr);
+    LoadExternalBlockFile(chainparams, fileIn);  // takes ownership, closes fileIn
+
+    BOOST_CHECK(HaveBodies(pindexB));
+    // No second copy written -- the existing commitment record's own file
+    // position is reused, not duplicated (same discipline as F-101's
+    // unrequested-arrival test).
+    BOOST_CHECK_EQUAL(pindexB->nFile, nFileBefore);
+    BOOST_CHECK_EQUAL(pindexB->nDataPos, nDataPosBefore);
+
+    // LoadExternalBlockFile only self-activates for genesis; B is not
+    // genesis, so the startup sequence's own separate ActivateBestChain call
+    // (init.cpp:1192) is what actually connects it.
+    CValidationState state;
+    BOOST_REQUIRE(::ChainstateActive().ActivateBestChain(state, chainparams, nullptr));
+    BOOST_CHECK_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), hashB.ToString());
+    BOOST_CHECK_EQUAL(::ChainActive().Height(), pindexRealTip->nHeight + 1);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
