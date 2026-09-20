@@ -84,7 +84,10 @@ BOOST_AUTO_TEST_CASE(round_trips_over_a_stream) {
     const CBlock block = MakeBlock(9);
     const CCommitmentBlock out = CommitmentsFromBlock(block);
 
-    CDataStream ss(SER_NETWORK | SER_COMMITMENTS, PROTOCOL_VERSION);
+    // F-119 (full-arc adversarial review): SER_COMMITMENTS was removed as dead
+    // code (A1) -- it was never load-bearing here, this is a plain round-trip
+    // of CCommitmentBlock's own serialize/deserialize over any stream flags.
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
     ss << out;
     CCommitmentBlock in;
     ss >> in;
