@@ -630,4 +630,245 @@ BOOST_AUTO_TEST_CASE(loadblock_fills_a_commitment_only_block_and_startup_connect
     BOOST_CHECK_EQUAL(::ChainActive().Height(), pindexRealTip->nHeight + 1);
 }
 
+// 1.3.7 (Mike, 2026-09-20): InvalidateBlock / MarkConflictingBlock /
+// EnforceBestChainLock -- audit, not full hardening (build-plan's own
+// framing: confirm safe under the new state, leave full graceful
+// degradation to 4.1). Scoped with a Fable review before writing anything,
+// given this reaches into the LLMQ ChainLocks subsystem this session
+// hadn't otherwise touched.
+//
+// Two findings from that review, both negative results worth recording
+// rather than fixing:
+//
+// (1) The "rebuild setBlockIndexCandidates" loop InvalidateBlock and
+// MarkConflictingBlock share checks HaveTxsDownloaded() but not
+// HaveBodies() (validation.cpp), so it CAN insert a commitment-only block
+// into the candidate set. This is not new risk -- ReceivedBlockTransactions
+// and LoadBlockIndex already insert commitment-only blocks as candidates
+// on arrival and at restart with the identical check (the
+// startup_activation_... test above already relies on that).
+// FindMostWorkChain (F-109) is the one, already-tested filter, and nothing
+// else reads the set unsafely: no RPC, no net_processing.cpp reference: no
+// consumer of setBlockIndexCandidates outside FindMostWorkChain,
+// PruneBlockIndexCandidates, ResetBlockFailureFlags and PreciousBlock, all
+// of which use the identical insertion check.
+//
+// (2) EnforceBestChainLock's (llmq/quorums_chainlocks.cpp) backward pprev
+// walk terminates safely at genesis (always on ChainActive, so the loop's
+// own !ChainActive().Contains(pindex) condition stops it before a null
+// pprev is ever dereferenced), and its only assert(false) path
+// (MarkConflictingBlock returning false) requires DisconnectTip to fail,
+// reachable only for a block that m_chain.Contains() -- which a
+// commitment-only block can never be (ConnectTip refuses to connect one,
+// F-109). The row's own named "ReadBlockFromDisk nullptr fallback reaching
+// an IS-conflict-detection caller" is TrySignChainTip's GetBlockTxs walk
+// (same file) -- rooted at ::ChainActive().Tip() and never walking more
+// than 5 blocks back, so by the same invariant (the active chain is never
+// commitment-only) it can never reach one either. Safe by construction;
+// this comment is that written conclusion, not a test, since there is
+// nothing reachable to construct a test around.
+//
+// What IS worth testing directly, below: that InvalidateBlock and
+// MarkConflictingBlock genuinely don't crash or corrupt CheckBlockIndex's
+// invariants with a commitment-only sibling in play, on either side of the
+// call -- and that marking a full sibling conflicting (MarkConflictingBlock's
+// own shape, the exact operation EnforceBestChainLock performs on a losing
+// sibling) doesn't prevent a commitment-only rival from later healing in.
+//
+// Shared shape: T is the real tip; A is a full child of T that connects and
+// becomes tip; B is an equal-work commitment-only child of T that never
+// connects (same construction as equal_work_tiebreak_survives_bodies_
+// arriving_second above). MarkConflictingBlock's own docs annotate
+// UpdateMempoolForReorg's requirement on ::mempool.cs, unlike
+// InvalidateBlock which takes it internally -- a pre-existing annotation
+// gap (MarkConflictingBlock never takes the lock itself) that costs
+// nothing to build around here, so every call below is under LOCK2.
+// CreateBlock is a TestChainSetup fixture member, unreachable from a free
+// function -- callers build blockA/blockB themselves (CreateBlock({},
+// coinbaseKey) and CreateBlock({}, an independent scriptPubKey) so they are
+// genuinely distinct, equal-work children of the real tip) and this helper
+// only drives the shared process-and-assert sequence.
+static void ProcessEqualWorkSiblingsAWinsBWithheld(ChainstateManager &chainman, const CChainParams &chainparams,
+                                                   const CBlock &blockA, const CBlock &blockB, uint256 &hashA,
+                                                   uint256 &hashB, std::shared_ptr<const CBlock> &shared_pblockB) {
+    BOOST_REQUIRE(blockA.GetHash() != blockB.GetHash());
+
+    shared_pblockB = std::make_shared<const CBlock>(blockB);
+    std::shared_ptr<const CBlock> shared_pblockA = std::make_shared<const CBlock>(blockA);
+    hashA = blockA.GetHash();
+    hashB = blockB.GetHash();
+
+    {
+        PerfWithholdGuard guard(hashB);
+        BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblockB, /*fForceProcessing=*/true, nullptr));
+    }
+    BOOST_REQUIRE(!HaveBodies(LookupBlockIndex(hashB)));
+
+    BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblockA, /*fForceProcessing=*/true, nullptr));
+    BOOST_REQUIRE_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), hashA.ToString());
+}
+
+static CBlock CreateSiblingBlock(TestChainSetup &fixture) {
+    CKey key;
+    key.MakeNewKey(true);
+    CScript scriptPubKey = CScript() << ToByteVector(key.GetPubKey()) << OP_CHECKSIG;
+    return fixture.CreateBlock({}, scriptPubKey);
+}
+
+BOOST_AUTO_TEST_CASE(invalidateblock_is_safe_with_a_commitment_only_sibling) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    CChainState &chainstate = ::ChainstateActive();
+    const CChainParams &chainparams = Params();
+
+    CBlockIndex *pindexRealTip = ::ChainActive().Tip();
+    uint256 hashRealTip = pindexRealTip->GetBlockHash();
+
+    uint256 hashA, hashB;
+    std::shared_ptr<const CBlock> shared_pblockB;
+    CBlock blockB = CreateSiblingBlock(*this);
+    CBlock blockA = CreateBlock({}, coinbaseKey);
+    ProcessEqualWorkSiblingsAWinsBWithheld(chainman, chainparams, blockA, blockB, hashA, hashB, shared_pblockB);
+    CBlockIndex *pindexB = LookupBlockIndex(hashB);
+
+    LOCK2(cs_main, m_node.mempool->cs);
+    CValidationState state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, chainparams, LookupBlockIndex(hashA)));
+    // The rebuild loop's own known gap (finding (1) above): B, still
+    // commitment-only, is reinstated as a candidate anyway. Recorded, not
+    // asserted against -- it is what the comment above says is harmless.
+    BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(pindexB), 1U);
+    BOOST_CHECK_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), hashRealTip.ToString());
+
+    // FindMostWorkChain must still refuse to select B despite it being a
+    // (wrongly, but harmlessly) reinstated candidate.
+    CValidationState state2;
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state2, chainparams, nullptr));
+    BOOST_CHECK(!state2.BodiesMissing());
+    BOOST_CHECK_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), hashRealTip.ToString());
+    BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(pindexB), 0U);
+}
+
+BOOST_AUTO_TEST_CASE(markconflictingblock_is_safe_with_a_commitment_only_sibling) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    CChainState &chainstate = ::ChainstateActive();
+    const CChainParams &chainparams = Params();
+
+    CBlockIndex *pindexRealTip = ::ChainActive().Tip();
+    uint256 hashRealTip = pindexRealTip->GetBlockHash();
+
+    uint256 hashA, hashB;
+    std::shared_ptr<const CBlock> shared_pblockB;
+    CBlock blockB = CreateSiblingBlock(*this);
+    CBlock blockA = CreateBlock({}, coinbaseKey);
+    ProcessEqualWorkSiblingsAWinsBWithheld(chainman, chainparams, blockA, blockB, hashA, hashB, shared_pblockB);
+    CBlockIndex *pindexA = LookupBlockIndex(hashA);
+    CBlockIndex *pindexB = LookupBlockIndex(hashB);
+
+    LOCK2(cs_main, m_node.mempool->cs);
+    CValidationState state;
+    BOOST_REQUIRE(chainstate.MarkConflictingBlock(state, chainparams, pindexA));
+    BOOST_CHECK(pindexA->nStatus & BLOCK_CONFLICT_CHAINLOCK);
+    BOOST_CHECK(!(pindexB->nStatus & BLOCK_CONFLICT_CHAINLOCK));
+    BOOST_CHECK_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), hashRealTip.ToString());
+
+    CValidationState state2;
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state2, chainparams, nullptr));
+    BOOST_CHECK_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), hashRealTip.ToString());
+    BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(pindexB), 0U);
+}
+
+// The build-plan row's own literal wording: these two functions invoked
+// directly ON a commitment-only block, off the active chain entirely --
+// the pure flag-setting path (pindex_was_in_chain stays false, so neither
+// function ever reaches DisconnectTip at all).
+BOOST_AUTO_TEST_CASE(invalidate_and_markconflicting_are_safe_called_directly_on_a_commitment_only_block) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    CChainState &chainstate = ::ChainstateActive();
+    const CChainParams &chainparams = Params();
+
+    uint256 hashA, hashB;
+    std::shared_ptr<const CBlock> shared_pblockB;
+    CBlock blockB = CreateSiblingBlock(*this);
+    CBlock blockA = CreateBlock({}, coinbaseKey);
+    ProcessEqualWorkSiblingsAWinsBWithheld(chainman, chainparams, blockA, blockB, hashA, hashB, shared_pblockB);
+    CBlockIndex *pindexB = LookupBlockIndex(hashB);
+    BOOST_REQUIRE(!::ChainActive().Contains(pindexB));
+
+    LOCK2(cs_main, m_node.mempool->cs);
+    CValidationState state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, chainparams, pindexB));
+    BOOST_CHECK(pindexB->nStatus & BLOCK_FAILED_VALID);
+    BOOST_CHECK_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), hashA.ToString());
+
+    // Reset and repeat for MarkConflictingBlock on a second, freshly-built
+    // commitment-only sibling C, so the two calls don't interfere.
+    ::ResetBlockFailureFlags(pindexB);
+
+    CKey keyC;
+    keyC.MakeNewKey(true);
+    CScript scriptPubKeyC = CScript() << ToByteVector(keyC.GetPubKey()) << OP_CHECKSIG;
+    CBlock blockC = CreateBlock({}, scriptPubKeyC);
+    std::shared_ptr<const CBlock> shared_pblockC = std::make_shared<const CBlock>(blockC);
+    uint256 hashC = blockC.GetHash();
+    BOOST_REQUIRE(hashC != hashA && hashC != hashB);
+    {
+        PerfWithholdGuard guard(hashC);
+        BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblockC, /*fForceProcessing=*/true, nullptr));
+    }
+    CBlockIndex *pindexC = LookupBlockIndex(hashC);
+    BOOST_REQUIRE(!HaveBodies(pindexC));
+
+    CValidationState state2;
+    BOOST_REQUIRE(chainstate.MarkConflictingBlock(state2, chainparams, pindexC));
+    BOOST_CHECK(pindexC->nStatus & BLOCK_CONFLICT_CHAINLOCK);
+    BOOST_CHECK_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), hashA.ToString());
+}
+
+// EnforceBestChainLock's own operation on a losing sibling, reproduced
+// directly (driving the real CChainLocksHandler needs an enabled spork, a
+// BLS quorum and a signed recovered signature -- disproportionate scaffolding
+// for what is, per the Fable review, entirely expressible through
+// MarkConflictingBlock's own behaviour: EnforceBestChainLock's loop calls
+// exactly this, on exactly a losing sibling of its chain-locked target).
+// The commitment-only side of the story: A (full, the loser here) gets
+// marked conflicting exactly as EnforceBestChainLock would when a ChainLock
+// commits to a DIFFERENT chain than the one A extends -- and B (commitment-
+// only) must still be able to heal in afterward once its real body arrives,
+// proving MarkConflictingBlock's bookkeeping doesn't leave B permanently
+// stranded alongside its now-conflicting rival.
+BOOST_AUTO_TEST_CASE(a_commitment_only_block_still_heals_after_its_sibling_is_marked_conflicting) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    CChainState &chainstate = ::ChainstateActive();
+    const CChainParams &chainparams = Params();
+
+    CBlockIndex *pindexRealTip = ::ChainActive().Tip();
+    uint256 hashRealTip = pindexRealTip->GetBlockHash();
+
+    uint256 hashA, hashB;
+    std::shared_ptr<const CBlock> shared_pblockB;
+    CBlock blockB = CreateSiblingBlock(*this);
+    CBlock blockA = CreateBlock({}, coinbaseKey);
+    ProcessEqualWorkSiblingsAWinsBWithheld(chainman, chainparams, blockA, blockB, hashA, hashB, shared_pblockB);
+    CBlockIndex *pindexA = LookupBlockIndex(hashA);
+    CBlockIndex *pindexB = LookupBlockIndex(hashB);
+
+    {
+        LOCK2(cs_main, m_node.mempool->cs);
+        CValidationState state;
+        BOOST_REQUIRE(chainstate.MarkConflictingBlock(state, chainparams, pindexA));
+    }
+    BOOST_CHECK_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), hashRealTip.ToString());
+    // Same known, harmless gap as invalidateblock_is_safe_...: the rebuild
+    // loop reinstates B (still commitment-only) regardless of bodies.
+    BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(pindexB), 1U);
+
+    // B's real body now arrives, unrequested -- must still heal in, not be
+    // stranded by its now-conflicting rival's bookkeeping.
+    BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblockB, /*fForceProcessing=*/false, nullptr));
+    BOOST_CHECK(HaveBodies(pindexB));
+    BOOST_CHECK_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), hashB.ToString());
+    // A must never come back, having been marked conflicting.
+    BOOST_CHECK(pindexA->nStatus & BLOCK_CONFLICT_CHAINLOCK);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
