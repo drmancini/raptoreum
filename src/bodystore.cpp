@@ -36,7 +36,7 @@ namespace {
     std::set<int> setDirtyBodyFileInfo GUARDED_BY(cs_LastBodyFile);
 
     // 4 bytes per offset, matching WriteBodyRecord's fixed-width encoding
-    // (2.1.1 review finding #1 -- CompactSize's 32 MiB ceiling made a
+    // (F-127 -- CompactSize's 32 MiB ceiling made a
     // full-budget record unreadable).
     const size_t BODY_OFFSET_WIDTH = 4;
 
@@ -63,7 +63,7 @@ bool FindBodyPos(FlatFilePos &pos, unsigned int nAddSize) {
     // A whole body record must land in one file -- WriteBodyRecord/ReadBodyRecord
     // open a single file and read or write it sequentially. A record this size
     // could never fit in a fresh file, so rolling over would loop forever
-    // (2.1.1 review finding #2) -- the static_assert in bodystore.h already
+    // (F-127) -- the static_assert in bodystore.h already
     // guarantees a real body record can't reach this, but a caller passing a
     // bad nAddSize (or a future budget change without updating the assert)
     // must fail loudly here instead.
@@ -146,7 +146,7 @@ namespace {
         try {
             uint64_t count = ReadCompactSize(filein);
             // A corrupt count byte must not drive an oversized allocation before
-            // a single real offset has been read (2.1.1 review finding #11) --
+            // a single real offset has been read (F-127) --
             // no legal record ever names more transactions than the input-count
             // budget allows (every non-coinbase tx needs >=1 input, F-115's own
             // reasoning).
@@ -225,7 +225,7 @@ bool ReadBodyAt(const FlatFilePos &pos, unsigned int index, CTransactionRef &txO
     }
 
     // Seek straight to body `index`'s bytes -- a real fseek, not a read-and-
-    // discard loop (2.1.1 review finding #3: CAutoFile::ignore() still reads
+    // discard loop (F-127: CAutoFile::ignore() still reads
     // every skipped byte from disk/page cache, which is not what "seek"
     // claimed and defeats the offset table's whole purpose for a large record).
     uint32_t skipBytes = (index == 0) ? 0 : offsets[index - 1];
@@ -286,4 +286,12 @@ void TestOnlyResetBodyFileState() {
     vinfoBodyFile.clear();
     nLastBodyFile = 0;
     setDirtyBodyFileInfo.clear();
+}
+
+unsigned int TestOnlyGetBodyFileSize(int nFile) {
+    LOCK(cs_LastBodyFile);
+    if (nFile < 0 || (size_t) nFile >= vinfoBodyFile.size()) {
+        return 0;
+    }
+    return vinfoBodyFile[nFile].nSize;
 }
