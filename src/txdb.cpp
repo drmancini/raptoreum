@@ -236,8 +236,14 @@ void CCoinsViewDBCursor::Next() {
 
 bool CBlockTreeDB::WriteBatchSync(const std::vector <std::pair<int, const CBlockFileInfo *>> &fileInfo, int nLastFile,
                                   const std::vector<const CBlockIndex *> &blockinfo,
-                                  const std::vector <std::pair<int, const CBodyFileInfo *>> &bodyFileInfo,
+                                  const std::vector <std::pair<int, CBodyFileInfo>> &bodyFileInfo,
                                   int nLastBodyFile) {
+    // F-133 (review of F-132): a negative sentinel paired with real entries to
+    // write would mean the caller has a bug -- data it wanted persisted but
+    // told this function, via the sentinel, not to bother. Caught here rather
+    // than silently dropped.
+    assert(nLastBodyFile >= 0 || bodyFileInfo.empty());
+
     CDBBatch batch(*this);
     for (std::vector<std::pair<int, const CBlockFileInfo *> >::const_iterator it = fileInfo.begin();
          it != fileInfo.end(); it++) {
@@ -256,7 +262,7 @@ bool CBlockTreeDB::WriteBatchSync(const std::vector <std::pair<int, const CBlock
     // already-persisted last-body-file value.
     if (nLastBodyFile >= 0) {
         for (const auto &entry : bodyFileInfo) {
-            batch.Write(std::make_pair(DB_BODY_FILES, entry.first), *entry.second);
+            batch.Write(std::make_pair(DB_BODY_FILES, entry.first), entry.second);
         }
         batch.Write(DB_LAST_BODY_FILE, nLastBodyFile);
     }

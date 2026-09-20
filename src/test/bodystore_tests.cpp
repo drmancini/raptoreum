@@ -393,7 +393,7 @@ BOOST_AUTO_TEST_CASE(find_body_pos_continues_after_a_simulated_restart) {
     // F-132: FlushBodyFileInfo's separate batch is gone -- this is
     // FlushStateToDisk's own real sequence now, gather then fold into
     // WriteBatchSync's atomic batch.
-    std::vector<std::pair<int, const CBodyFileInfo *>> vFilesToFlush;
+    std::vector<std::pair<int, CBodyFileInfo>> vFilesToFlush;
     int nLastFileToFlush = -1;
     GetDirtyBodyFileInfo(vFilesToFlush, nLastFileToFlush);
     BOOST_REQUIRE(pblocktree->WriteBatchSync({}, 0, {}, vFilesToFlush, nLastFileToFlush));
@@ -432,7 +432,7 @@ BOOST_AUTO_TEST_CASE(get_dirty_body_file_info_is_empty_when_nothing_is_dirty) {
     TestOnlyResetBodyFileState();
     BOOST_REQUIRE(LoadBodyFileInfo());
 
-    std::vector<std::pair<int, const CBodyFileInfo *>> vFiles;
+    std::vector<std::pair<int, CBodyFileInfo>> vFiles;
     int nLastFileOut = -1;
     GetDirtyBodyFileInfo(vFiles, nLastFileOut);
     BOOST_CHECK(vFiles.empty());
@@ -451,18 +451,18 @@ BOOST_AUTO_TEST_CASE(get_dirty_body_file_info_gathers_and_clears) {
     FlatFilePos pos;
     BOOST_REQUIRE(FindBodyPos(pos, 500));
 
-    std::vector<std::pair<int, const CBodyFileInfo *>> vFiles;
+    std::vector<std::pair<int, CBodyFileInfo>> vFiles;
     int nLastFileOut = -1;
     GetDirtyBodyFileInfo(vFiles, nLastFileOut);
     BOOST_REQUIRE_EQUAL(vFiles.size(), 1U);
     BOOST_CHECK_EQUAL(vFiles[0].first, 0);
-    BOOST_CHECK_EQUAL(vFiles[0].second->nSize, 500U);
+    BOOST_CHECK_EQUAL(vFiles[0].second.nSize, 500U);
     BOOST_CHECK_EQUAL(nLastFileOut, 0);
 
     // Nothing new touched since the gather above -- the dirty SET must come
     // back empty, though the last-body-file is still reported unconditionally
     // (it isn't itself a "dirty" concept, same as nLastBlockFile).
-    std::vector<std::pair<int, const CBodyFileInfo *>> vFilesAgain;
+    std::vector<std::pair<int, CBodyFileInfo>> vFilesAgain;
     int nLastFileOutAgain = -1;
     GetDirtyBodyFileInfo(vFilesAgain, nLastFileOutAgain);
     BOOST_CHECK(vFilesAgain.empty());
@@ -477,8 +477,8 @@ BOOST_AUTO_TEST_CASE(write_batch_sync_persists_body_file_info) {
     info0.nSize = 1234;
     CBodyFileInfo info1;
     info1.nSize = 5678;
-    std::vector<std::pair<int, const CBodyFileInfo *>> vFiles = {
-        std::make_pair(0, &info0), std::make_pair(1, &info1)};
+    std::vector<std::pair<int, CBodyFileInfo>> vFiles = {
+        std::make_pair(0, info0), std::make_pair(1, info1)};
 
     BOOST_REQUIRE(pblocktree->WriteBatchSync({}, 0, {}, vFiles, /*nLastBodyFile=*/1));
 
@@ -493,19 +493,61 @@ BOOST_AUTO_TEST_CASE(write_batch_sync_persists_body_file_info) {
     BOOST_CHECK_EQUAL(nLastFileOut, 1);
 }
 
+// F-133 (review of F-132): every other test's first real flush already left
+// file 0 (nLastBodyFile ends up >= 1 by the time WriteBatchSync is called),
+// so nothing proved the `nLastBodyFile >= 0` guard is INCLUSIVE at the file-0
+// boundary -- a `> 0` mutant passed every prior test silently, which in
+// production would mean a real node persists NO body-file info at all for
+// its entire first ~128 MiB of bodies (every flush before the first rollover
+// would silently skip both writes). This exercises the real
+// GetDirtyBodyFileInfo -> WriteBatchSync pipeline while file 0 is still
+// current, the way most of a node's actual runtime is spent.
+BOOST_AUTO_TEST_CASE(write_batch_sync_persists_body_file_info_while_file_zero_is_current) {
+    TestOnlyResetBodyFileState();
+    BOOST_REQUIRE(LoadBodyFileInfo());
+
+    FlatFilePos pos;
+    BOOST_REQUIRE(FindBodyPos(pos, 250));
+
+    std::vector<std::pair<int, CBodyFileInfo>> vFiles;
+    int nLastFileOut = -1;
+    GetDirtyBodyFileInfo(vFiles, nLastFileOut);
+    BOOST_REQUIRE_EQUAL(nLastFileOut, 0);
+    BOOST_REQUIRE(pblocktree->WriteBatchSync({}, 0, {}, vFiles, nLastFileOut));
+
+    int nLastFileRead = -1;
+    BOOST_REQUIRE(pblocktree->ReadLastBodyFile(nLastFileRead));
+    BOOST_CHECK_EQUAL(nLastFileRead, 0);
+    CBodyFileInfo readBack;
+    BOOST_REQUIRE(pblocktree->ReadBodyFileInfo(0, readBack));
+    BOOST_CHECK_EQUAL(readBack.nSize, 250U);
+}
+
 // The one call site F-132 deliberately left untouched (LoadBlockIndexDB's
 // pre-1.3 bodiesmigrated migration, validation.cpp) calls WriteBatchSync with
 // no body-file arguments at all. The sentinel default (nLastBodyFile = -1)
 // must make that a complete no-op for the body-file keys -- not silently
 // persist a fabricated last-body-file of 0 that would stomp a real,
 // already-persisted value the next time a real flush runs.
+//
+// F-133 (review of F-132): the original version of this test wrote nothing
+// real first, so ReadBodyFileInfo/ReadLastBodyFile failing proved nothing --
+// they fail on a fresh database regardless of what the 3-argument call does.
+// Seeds a REAL persisted value first so the assertions below only pass if
+// the 3-argument call genuinely left it untouched, not merely absent.
 BOOST_AUTO_TEST_CASE(write_batch_sync_without_body_args_touches_no_body_file_keys) {
+    CBodyFileInfo seeded;
+    seeded.nSize = 999;
+    BOOST_REQUIRE(pblocktree->WriteBatchSync({}, 0, {}, {std::make_pair(3, seeded)}, 3));
+
     BOOST_REQUIRE(pblocktree->WriteBatchSync({}, 0, {}));
 
-    CBodyFileInfo unused;
-    BOOST_CHECK(!pblocktree->ReadBodyFileInfo(0, unused));
-    int nLastFileOut;
-    BOOST_CHECK(!pblocktree->ReadLastBodyFile(nLastFileOut));
+    int nLastFileOut = -1;
+    BOOST_REQUIRE(pblocktree->ReadLastBodyFile(nLastFileOut));
+    BOOST_CHECK_EQUAL(nLastFileOut, 3);
+    CBodyFileInfo readBack;
+    BOOST_REQUIRE(pblocktree->ReadBodyFileInfo(3, readBack));
+    BOOST_CHECK_EQUAL(readBack.nSize, 999U);
 }
 
 // 2.1.3: CBlockIndex/CDiskBlockIndex's own nBodyFile/nBodyPos + BLOCK_HAVE_BODY_RECORD.

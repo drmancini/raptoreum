@@ -261,13 +261,13 @@ bool LoadBodyFileInfo() {
     return true;
 }
 
-void GetDirtyBodyFileInfo(std::vector<std::pair<int, const CBodyFileInfo *>> &vFilesOut, int &nLastFileOut) {
+void GetDirtyBodyFileInfo(std::vector<std::pair<int, CBodyFileInfo>> &vFilesOut, int &nLastFileOut) {
     LOCK(cs_LastBodyFile);
 
     vFilesOut.clear();
     vFilesOut.reserve(setDirtyBodyFileInfo.size());
     for (std::set<int>::iterator it = setDirtyBodyFileInfo.begin(); it != setDirtyBodyFileInfo.end();) {
-        vFilesOut.emplace_back(*it, &vinfoBodyFile[*it]);
+        vFilesOut.emplace_back(*it, vinfoBodyFile[*it]);
         setDirtyBodyFileInfo.erase(it++);
     }
     nLastFileOut = nLastBodyFile;

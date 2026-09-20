@@ -25,16 +25,30 @@
  *  and independently testable.
  *  2.1.2 scope: persisting the file bookkeeping via pblocktree (LoadBodyFileInfo
  *  below), on CBlockFileInfo's own pattern, so FindBodyPos can survive a
- *  restart -- callable and correct, but not yet auto-invoked at real
- *  startup/shutdown (that's wired in alongside 2.1.4, when AcceptBlock actually
- *  calls into this module and a real restart has something to lose).
- *  Body-file-info's write side was originally a separate WriteBodyFileInfoBatch
- *  call, independently timed from the block-index flush -- decided (owner,
- *  2026-09-20, F-132) to instead fold it into CBlockTreeDB::WriteBatchSync's
- *  own atomic batch, since 2.1.3 made the two genuinely coupled (an index
- *  entry can name a body position that isn't safe to trust durable unless the
- *  file-size bookkeeping protecting it is durable too). See GetDirtyBodyFileInfo
- *  below and WriteBatchSync's own doc (txdb.h).
+ *  restart. Body-file-info's write side was originally a separate
+ *  WriteBodyFileInfoBatch call, independently timed from the block-index
+ *  flush -- decided (owner, 2026-09-20, F-132) to instead fold it into
+ *  CBlockTreeDB::WriteBatchSync's own atomic batch, since 2.1.3 made the two
+ *  genuinely coupled (an index entry can name a body position that isn't safe
+ *  to trust durable unless the file-size bookkeeping protecting it is durable
+ *  too). See GetDirtyBodyFileInfo below and WriteBatchSync's own doc (txdb.h).
+ *  **The write side is now genuinely auto-invoked on every real flush**
+ *  (FlushStateToDisk calls GetDirtyBodyFileInfo unconditionally) -- but the
+ *  LOAD side (LoadBodyFileInfo) is still not called anywhere near real
+ *  startup, and this asymmetry is now load-bearing, not just incomplete
+ *  (F-133): whoever wires 2.1.4's real FindBodyPos caller MUST land
+ *  LoadBodyFileInfo() in LoadBlockIndexDB in the SAME change, never after --
+ *  otherwise the first flush after that change persists a fabricated
+ *  nLastBodyFile=0 (the unloaded in-memory default) over whatever was really
+ *  last written, reproducing F-130's own overwrite hazard by a different
+ *  route. F-133 also found FlushStateToDisk has no body-file equivalent of
+ *  FlushBlockFile() (validation.cpp) -- nothing flushes the CURRENT body
+ *  file's data to disk outside of FindBodyPos's own rollover-time finalize,
+ *  so a crash right after a flush batch goes durable can leave a durable
+ *  index entry naming a position whose bytes never made it out of the page
+ *  cache. 2.1.4 must add that call (guarded against vinfoBodyFile being empty
+ *  before anything has loaded or written) at the same point FlushBlockFile()
+ *  runs.
  *  2.1.3 scope: CBlockIndex nBodyFile/nBodyPos + BLOCK_HAVE_BODY_RECORD
  *  (chain.h) -- turned out to need NO migration (a fresh status bit, false for
  *  every existing entry, decodes correctly without one).
@@ -157,8 +171,21 @@ bool LoadBodyFileInfo();
  *  the result into CBlockTreeDB::WriteBatchSync's own body-file-info
  *  parameters so it lands in the SAME atomic batch as the block-index write
  *  (F-132) -- persisting it separately reopens the ordering hazard that
- *  decision closed. */
-void GetDirtyBodyFileInfo(std::vector<std::pair<int, const CBodyFileInfo *>> &vFilesOut, int &nLastFileOut);
+ *  decision closed.
+ *
+ *  Returns entries BY VALUE (not pointers into the internal vinfoBodyFile,
+ *  the way the block-file-info family does), deliberately, and this is not
+ *  parity with CBlockFileInfo for its own sake (F-133, review of F-132):
+ *  the block-file-info equivalent is safe only because FlushStateToDisk holds
+ *  cs_LastBlockFile across its entire gather-then-WriteBatchSync span, so
+ *  vinfoBlockFile can't be resized out from under the pointers it hands out.
+ *  This function's own lock (cs_LastBodyFile) is released on return, so a
+ *  pointer into vinfoBodyFile would depend on no concurrent FindBodyPos call
+ *  resizing it before the caller finishes reading through it -- true only by
+ *  accident today (nothing calls FindBodyPos in production yet) and CBodyFileInfo
+ *  is one unsigned int, cheap enough that copying it removes the hazard class
+ *  entirely instead of documenting an invariant every future caller must honour. */
+void GetDirtyBodyFileInfo(std::vector<std::pair<int, CBodyFileInfo>> &vFilesOut, int &nLastFileOut);
 
 /** Test-only: reset FindBodyPos's in-memory state to simulate a fresh process
  *  that must reload from pblocktree via LoadBodyFileInfo(). Never called from

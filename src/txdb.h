@@ -119,16 +119,24 @@ public:
     // separate batches can't guarantee that ordering across a crash. Decided
     // (owner, 2026-09-20, F-132): fold body-file info into THIS batch rather
     // than keep it separate and rely on caller-enforced ordering -- one flush,
-    // no ordering to get wrong. `bodyFileInfo`/`nLastBodyFile` are trailing and
+    // no ordering between the two DATABASE writes to get wrong. (This closes
+    // the database-vs-database race F-130 named; it does NOT by itself
+    // guarantee the body FILE's own bytes are on disk before this batch makes
+    // them durable to name -- see bodystore.h's file-level comment, F-133, for
+    // the still-missing FlushBodyFile-equivalent 2.1.4 must add alongside the
+    // real write path.) `bodyFileInfo`/`nLastBodyFile` are trailing and
     // defaulted so the one other call site (LoadBlockIndexDB's pre-1.3
     // bodiesmigrated migration, validation.cpp) needs no change: omitting them
     // (nLastBodyFile's default of -1) skips the body-file writes entirely,
-    // leaving that call's on-disk effect exactly as before this decision.
+    // leaving that call's on-disk effect exactly as before this decision --
+    // `nLastBodyFile < 0` and a non-empty `bodyFileInfo` together would mean
+    // the caller has a bug (data it wanted written but told us not to via the
+    // sentinel), asserted rather than silently ignored.
     // Bodystore.h's GetDirtyBodyFileInfo is what a real caller (FlushStateToDisk)
     // gathers these from.
     bool WriteBatchSync(const std::vector <std::pair<int, const CBlockFileInfo *>> &fileInfo, int nLastFile,
                         const std::vector<const CBlockIndex *> &blockinfo,
-                        const std::vector <std::pair<int, const CBodyFileInfo *>> &bodyFileInfo = {},
+                        const std::vector <std::pair<int, CBodyFileInfo>> &bodyFileInfo = {},
                         int nLastBodyFile = -1);
 
     bool ReadBlockFileInfo(int nFile, CBlockFileInfo &info);
