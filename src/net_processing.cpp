@@ -250,6 +250,28 @@ namespace {
     std::map <uint256, std::pair<NodeId, std::list<QueuedBlock>::iterator>> mapBlocksInFlight
     GUARDED_BY(cs_main);
 
+    /** 1.3.6 (H-2, Mike, 2026-09-20): per-block backoff for a body that keeps
+     *  getting delivered without ever resolving (a corrupt/rejected body once
+     *  Phase 2's real fetch protocol exists; today only reachable through the
+     *  -perfwithholdcount test harness). The existing per-peer stall/timeout
+     *  checks (BLOCK_STALLING_TIMEOUT, BLOCK_DOWNLOAD_TIMEOUT_*) only fire on
+     *  SILENCE -- MarkBlockAsReceived frees the in-flight slot on every
+     *  response regardless of outcome, so a peer that keeps answering but
+     *  never resolves the gap never triggers either timeout. Measured without
+     *  this: an unbounded, unpaced re-request loop (low thousands of
+     *  requests/second for a single block). Memory-only and self-cleaning
+     *  (erased the moment a block resolves, in FindNextBlocksToDownload
+     *  below) -- never persisted, never marks a block invalid, matching
+     *  build-plan row 1.3.6's own requirement. */
+    struct BodyRetryState {
+        int64_t nNextAttempt = 0;
+        unsigned int nAttempts = 0;
+    };
+    std::map <uint256, BodyRetryState> g_body_retry_state
+    GUARDED_BY(cs_main);
+    static const int64_t BODY_RETRY_BASE_MICROS = 1000000;    // 1s
+    static const int64_t BODY_RETRY_MAX_MICROS = 30000000;    // 30s cap
+
     /** Stack of nodes which we have set to announce using compact blocks */
     std::list <NodeId> lNodesAnnouncingHeaderAndIDs
     GUARDED_BY(cs_main);
@@ -825,6 +847,10 @@ namespace {
                                 ::ChainActive().Contains(pindex)) {
                                 if (!fBehindGap && pindex->HaveTxsDownloaded())
                                     state->pindexLastCommonBlock = pindex;
+                                // 1.3.6 (H-2): resolved -- forget any backoff state for it.
+                                if (!g_body_retry_state.empty()) {
+                                    g_body_retry_state.erase(pindex->GetBlockHash());
+                                }
                             } else if (mapBlocksInFlight.count(pindex->GetBlockHash()) == 0) {
                                 // The block is not already downloaded, and not yet in flight.
                                 fBehindGap = true;
@@ -836,6 +862,19 @@ namespace {
                                     }
                                     return;
                                 }
+                                // 1.3.6 (H-2): skip a block still cooling down from a
+                                // prior delivery that didn't resolve it -- see
+                                // g_body_retry_state's own comment above. A first-ever
+                                // request (nNextAttempt == 0) always goes through.
+                                int64_t nNowRetry = GetTimeMicros();
+                                BodyRetryState &retry = g_body_retry_state[pindex->GetBlockHash()];
+                                if (nNowRetry < retry.nNextAttempt) {
+                                    continue;
+                                }
+                                retry.nAttempts++;
+                                int64_t nBackoff = BODY_RETRY_BASE_MICROS
+                                                   << std::min(retry.nAttempts - 1, 5U);
+                                retry.nNextAttempt = nNowRetry + std::min(nBackoff, BODY_RETRY_MAX_MICROS);
                                 vBlocks.push_back(pindex);
                                 if (vBlocks.size() == count) {
                                     return;

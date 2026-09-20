@@ -871,4 +871,89 @@ BOOST_AUTO_TEST_CASE(a_commitment_only_block_still_heals_after_its_sibling_is_ma
     BOOST_CHECK(pindexA->nStatus & BLOCK_CONFLICT_CHAINLOCK);
 }
 
+// M-5 (full-arc adversarial review, F-118): the pre-1.3 BLOCK_HAVE_BODIES
+// migration in LoadBlockIndexDB (validation.cpp) had zero test coverage.
+// Reproduces the on-disk shape a pre-1.3 datadir actually has -- HAVE_DATA
+// set, HAVE_BODIES clear, exactly what every entry looked like before this
+// bit existed -- by clearing HAVE_BODIES directly on already-connected
+// entries (their bytes are genuinely on disk, matching a real pre-1.3 node)
+// rather than via g_perf_withhold_hashes (which also makes ReadBlockFromDisk
+// refuse the read -- the wrong shape here; a pre-1.3 block was never
+// withheld, it just predates the bit).
+BOOST_AUTO_TEST_CASE(bodiesmigrated_migration_restores_have_bodies_on_pre_1_3_entries) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    const CChainParams &chainparams = Params();
+
+    CBlockIndex *pindexTip = ::ChainActive().Tip();
+    BOOST_REQUIRE(pindexTip != nullptr);
+    CBlockIndex *pindex1 = pindexTip->GetAncestor(pindexTip->nHeight - 5);
+    CBlockIndex *pindex2 = pindexTip->GetAncestor(pindexTip->nHeight - 2);
+    BOOST_REQUIRE(pindex1 != nullptr);
+    BOOST_REQUIRE(pindex2 != nullptr);
+    BOOST_REQUIRE(pindex1->nStatus & BLOCK_HAVE_DATA);
+    BOOST_REQUIRE(pindex2->nStatus & BLOCK_HAVE_DATA);
+
+    {
+        LOCK(cs_main);
+        pindex1->nStatus &= ~BLOCK_HAVE_BODIES;
+        pindex2->nStatus &= ~BLOCK_HAVE_BODIES;
+        BOOST_REQUIRE(pblocktree->WriteFlag("bodiesmigrated", false));
+    }
+    BOOST_REQUIRE(!HaveBodies(pindex1));
+    BOOST_REQUIRE(!HaveBodies(pindex2));
+
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(LoadBlockIndexDB(chainman, chainparams));
+    }
+
+    BOOST_CHECK(HaveBodies(pindex1));
+    BOOST_CHECK(HaveBodies(pindex2));
+    bool fBodiesMigrated = false;
+    pblocktree->ReadFlag("bodiesmigrated", fBodiesMigrated);
+    BOOST_CHECK(fBodiesMigrated);
+}
+
+// The downgrade/upgrade corruption risk the migration's own comment names:
+// once "bodiesmigrated" is true, a GENUINE commitment-only entry (Phase 2)
+// must never be swept up by a later, redundant migration run. Simulated here
+// by clearing HAVE_BODIES on a fresh entry AFTER the flag is already set --
+// the shape a real commitment-only block has the moment Phase 2 exists.
+BOOST_AUTO_TEST_CASE(bodiesmigrated_migration_does_not_touch_a_later_genuine_commitment_only_entry) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    const CChainParams &chainparams = Params();
+
+    CBlockIndex *pindexTip = ::ChainActive().Tip();
+    BOOST_REQUIRE(pindexTip != nullptr);
+    CBlockIndex *pindexGenuine = pindexTip->GetAncestor(pindexTip->nHeight - 3);
+    BOOST_REQUIRE(pindexGenuine != nullptr);
+    BOOST_REQUIRE(pindexGenuine->nStatus & BLOCK_HAVE_DATA);
+
+    {
+        // First pass: an empty/true-fresh datadir migrates nothing (nothing
+        // is HAVE_DATA-without-HAVE_BODIES yet) but still sets the flag,
+        // matching what a real first boot after upgrading to this binary does.
+        LOCK(cs_main);
+        BOOST_REQUIRE(LoadBlockIndexDB(chainman, chainparams));
+    }
+    bool fBodiesMigrated = false;
+    pblocktree->ReadFlag("bodiesmigrated", fBodiesMigrated);
+    BOOST_REQUIRE(fBodiesMigrated);
+
+    {
+        LOCK(cs_main);
+        pindexGenuine->nStatus &= ~BLOCK_HAVE_BODIES;
+    }
+    BOOST_REQUIRE(!HaveBodies(pindexGenuine));
+
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(LoadBlockIndexDB(chainman, chainparams));
+    }
+
+    // Must still be genuinely bodies-missing -- the flag being set is what
+    // stops the second pass from wrongly re-stamping it.
+    BOOST_CHECK(!HaveBodies(pindexGenuine));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

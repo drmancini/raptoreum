@@ -223,10 +223,21 @@ extern std::atomic<bool> g_commitmentBudgetActive;
  *  gates; clearing the bit alone, without withholding, only changes bookkeeping
  *  -- the bytes are still on disk and still readable (1.3.5, F-110).
  *
- *  Every path that may materialise a block consults this before reading, which
- *  is the rule that closes the whole remote-crash class: today a missing body
- *  reaches an assert in the block-serving path, an AbortNode in ConnectTip, and
- *  a "corrupted block database" at startup. */
+ *  NOT every path that may materialise a block consults this -- ConnectTip, the
+ *  two net_processing serve sites and VerifyDB's first-block check do (closing
+ *  the assert/AbortNode/"corrupted block database" failure modes named above at
+ *  those sites specifically); DisconnectTip, VerifyDB's forward re-verify loop,
+ *  RollforwardBlock and the -loadblock/reindex recursive-child path do not, and
+ *  have not been individually audited (F-116).
+ *
+ *  Inert today regardless of that gap: FindMostWorkChain (F-109) already
+ *  refuses to select a commitment-only chain as best, so nothing un-audited
+ *  above ever runs against one -- and under Phase 1's storage format a block's
+ *  bytes are written to disk unconditionally on arrival (F-110), so outside the
+ *  test-only g_perf_withhold_* mechanism a "missing body" read failure cannot
+ *  occur in the first place. This bit, and the sites that check it, describe
+ *  the Phase 2 design target -- a real body store where bytes can be genuinely
+ *  absent -- not a closed audit of today's tree. */
 bool HaveBodies(const CBlockIndex *pindex);
 
 /** Test-only: run AcceptToMemoryPool's script checks on the script-check thread
@@ -1210,6 +1221,13 @@ public:
 /** DEPRECATED! Please use node.chainman instead. May only be used in validation.cpp internally */
 extern ChainstateManager g_chainman
 GUARDED_BY(::cs_main);
+
+/** M-5 (F-118): the bodiesmigrated migration this runs, exposed so a test can
+ *  drive it directly against a fixture's already-loaded index -- see
+ *  acceptancebit_tests.cpp. Not part of node startup's own call surface
+ *  beyond ChainstateManager::LoadBlockIndex, which calls this. */
+bool LoadBlockIndexDB(ChainstateManager &chainman, const CChainParams &chainparams)
+EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
 /** Please prefer the identicat ChainstateManager::ActiveChainstate */
 CChainState &ChainstateActive();

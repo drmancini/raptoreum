@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <consensus/consensus.h>
 #include <consensus/merkle.h>
 #include <consensus/validation.h>
 #include <evo/evodb.h>
@@ -581,6 +582,73 @@ BOOST_AUTO_TEST_CASE(checkcommitmentblock_rejects_duplicate_ids_the_merkle_check
     // chain includes this header would re-request an unfillable block
     // forever.
     BOOST_CHECK(!state.CorruptionPossible());
+}
+
+// H-1 (a full-arc adversarial review, 2026-09-20): the rung had no bound on
+// how many identifiers a commitment block may name -- the one resource
+// question a bare identifier list CAN answer, and the only one it was
+// missing. Reuses D-19's COMMITMENT_BUDGET_MAX_INPUTS: every non-coinbase
+// transaction needs at least one input, so the identifier count can never
+// legally exceed the total input count that constant already bounds.
+// Distinct identifiers, not N copies of one value -- CheckCommitmentBlock's
+// own malleation detection (HasDuplicateIdentifiers/ComputeMerkleRoot's
+// "mutated" flag) fires constantly on a large run of identical leaves,
+// which would test that check instead of this one.
+static std::vector <uint256> DistinctIdentifiers(size_t n) {
+    std::vector <uint256> ids;
+    ids.reserve(n);
+    for (size_t i = 0; i < n; i++) {
+        ids.push_back(uint256S(strprintf("%064x", i)));
+    }
+    return ids;
+}
+
+BOOST_AUTO_TEST_CASE(checkcommitmentblock_input_count_boundary_is_exact) {
+    CommitmentBudgetGuard guard;
+    g_commitmentBudgetActive = true;
+
+    int height;
+    CCommitmentBlock atLimit = RealCommitmentBlock(&height);
+    atLimit.vCommitments = DistinctIdentifiers(COMMITMENT_BUDGET_MAX_INPUTS);
+    bool mutated = false;
+    atLimit.hashMerkleRoot = atLimit.ComputeMerkleRoot(&mutated);
+    BOOST_REQUIRE(!mutated);
+
+    CValidationState stateAtLimit;
+    BOOST_CHECK(CheckCommitmentBlock(atLimit, stateAtLimit, Params().GetConsensus(), height,
+                                     /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true));
+    BOOST_CHECK_EQUAL(stateAtLimit.GetRejectReason(), "");
+
+    CCommitmentBlock overLimit = RealCommitmentBlock(&height);
+    overLimit.vCommitments = DistinctIdentifiers(COMMITMENT_BUDGET_MAX_INPUTS + 1);
+    overLimit.hashMerkleRoot = overLimit.ComputeMerkleRoot(&mutated);
+    BOOST_REQUIRE(!mutated);
+
+    CValidationState stateOverLimit;
+    BOOST_CHECK(!CheckCommitmentBlock(overLimit, stateOverLimit, Params().GetConsensus(), height,
+                                      /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true));
+    BOOST_CHECK_EQUAL(stateOverLimit.GetRejectReason(), "bad-cmt-toomanyids");
+    // Same reasoning as bad-cmt-duplicate-ids just above: a directly
+    // observable fact about this field, not something corruption in transit
+    // could explain -- corruption=true would leave the header permanently
+    // unfillable and re-requested forever.
+    BOOST_CHECK(!stateOverLimit.CorruptionPossible());
+}
+
+// Control: the same over-limit block passes when the flag is off, matching
+// every other D-19/1.2 budget check's own flag-gating precedent.
+BOOST_AUTO_TEST_CASE(checkcommitmentblock_does_not_enforce_the_identifier_count_when_flag_is_off) {
+    int height;
+    CCommitmentBlock c = RealCommitmentBlock(&height);
+    c.vCommitments = DistinctIdentifiers(COMMITMENT_BUDGET_MAX_INPUTS + 1);
+    bool mutated = false;
+    c.hashMerkleRoot = c.ComputeMerkleRoot(&mutated);
+    BOOST_REQUIRE(!mutated);
+
+    CValidationState state;
+    BOOST_CHECK(CheckCommitmentBlock(c, state, Params().GetConsensus(), height,
+                                     /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "");
 }
 
 // M-1 (Fable review, 2026-09-19): ContextualCheckCommitmentBlock also calls

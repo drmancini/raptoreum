@@ -140,11 +140,16 @@ enum BlockStatus : uint32_t {
      * block-index format change with a migration for every entry on disk.
      *
      * A bit avoids all of it, because the split is not ordinal in the first place. Of what
-     * BLOCK_VALID_TRANSACTIONS certifies above, a commitment block proves the structural half by
-     * itself -- coinbase present and well formed, no duplicate identifiers, merkle root, size --
-     * and leaves exactly two body properties, "transactions valid" and "sigops", which ConnectBlock
-     * re-checks anyway. So the rung stays where it is and the bit says whether the bodies behind it
-     * are in hand.
+     * BLOCK_VALID_TRANSACTIONS certifies above, a commitment block proves everything
+     * CheckCommitmentBlock/ContextualCheckCommitmentBlock can from the identifier list alone --
+     * coinbase present and well formed, no duplicate identifiers, merkle root, identifier count
+     * (F-115). Three rules have no such home (absolute nLockTime finality, transaction
+     * type/version, bad-txns-oversize -- F-44/D-16) and are NOT "re-checked by ConnectBlock
+     * anyway": they were deliberately RELOCATED there (ConnectBlock's own per-tx loop,
+     * validation.cpp, F-105), because granting BLOCK_VALID_TRANSACTIONS at the rung means
+     * ContextualCheckBlock is never re-invoked to catch them. Do not delete that relocation on
+     * the assumption it duplicates something upstream of it -- it is the only place left that
+     * runs those 3 rules at all.
      */
     BLOCK_HAVE_BODIES = 256,
 };
