@@ -138,47 +138,14 @@ static CMutableTransaction MakeBigLowInputTx(unsigned int txIndex) {
     return tx;
 }
 
-// F1's own lesson applied here without waiting for a second review to find
-// it: prove CheckBlock actually enforces the aggregate input-count cap, not
-// just that GetBlockInputCount itself counts correctly in isolation.
-// Reproduces at a reduced scale (7,001 transactions x 100 inputs = 700,100,
-// just over COMMITMENT_BUDGET_MAX_INPUTS) rather than the real ~1,500 tx/s
-// planning shape, to keep the test fast; K-3's ~100 kB per-tx ceiling is
-// nowhere near touched at 100 inputs/tx (~4.1 kB each).
-BOOST_AUTO_TEST_CASE(checkblock_rejects_aggregate_input_count_over_the_budget) {
-    CBlock block = MakeBudgetTestBlockHeader();
-
-    const unsigned int kTxCount = 7001;      // x 100 inputs = 700,100 > 700,000
-    const unsigned int kInputsPerTx = 100;
-    for (unsigned int t = 0; t < kTxCount; t++) {
-        CMutableTransaction tx;
-        tx.vin.resize(kInputsPerTx);
-        for (unsigned int i = 0; i < kInputsPerTx; i++) {
-            tx.vin[i].prevout = COutPoint(uint256S(strprintf("%08x%056x", t, i + 1)), 0);
-        }
-        tx.vout.resize(1);
-        tx.vout[0].nValue = 1000;
-        tx.vout[0].scriptPubKey << OP_TRUE;
-        block.vtx.push_back(MakeTransactionRef(tx));
-    }
-
-    BOOST_REQUIRE_EQUAL(GetBlockInputCount(block), kTxCount * kInputsPerTx);
-    BOOST_REQUIRE_GT(GetBlockInputCount(block), COMMITMENT_BUDGET_MAX_INPUTS);
-    // This block is ~28.8 MB -- comfortably under COMMITMENT_BUDGET_BODY_BYTES
-    // (110 MB), so a rejection below can only be the input-count check, not
-    // an incidental byte-length failure.
-    BOOST_REQUIRE_LT(::GetSerializeSize(block, SER_NETWORK, PROTOCOL_VERSION), COMMITMENT_BUDGET_BODY_BYTES);
-
-    CommitmentBudgetGuard guard;
-    g_commitmentBudgetActive = true;
-    CValidationState state;
-    bool accepted = CheckBlock(block, state, Params().GetConsensus(), /*nHeight=*/1,
-                               /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/false);
-
-    BOOST_CHECK(!accepted);
-    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-blk-inputs");
-}
-
+// B6 (F-121, full-arc adversarial review): a well-over-budget case used to sit
+// here (checkblock_rejects_aggregate_input_count_over_the_budget, 7,001 x
+// 100-input transactions), proving CheckBlock enforces the aggregate cap, not
+// just that GetBlockInputCount counts correctly in isolation. Removed as
+// redundant: the boundary test below proves the identical rejection at
+// exactly +1 over the cap, which (a strict '>' comparison) implies rejection
+// at any larger overshoot -- strictly more informative, not merely equivalent.
+//
 // The boundary itself: enforcement is a strict '>' (validation.cpp), so
 // exactly COMMITMENT_BUDGET_MAX_INPUTS must be legal and one more must not.
 // An off-by-one ('>=' instead of '>', or vice versa) on a consensus limit is

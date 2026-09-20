@@ -954,16 +954,18 @@ private:
 
     CBlockIndex *FindMostWorkChain();
 
-    /** Record what a received block tells us.
-     *
-     * `pos` is where the block's transaction bodies were stored, or nullptr if
-     * we hold the block's commitments but not its bodies. The transaction
-     * count, the cumulative count and the block's eligibility to be a chain
-     * candidate are all commitment-level facts and are recorded either way;
-     * the file position and BLOCK_HAVE_DATA are body-level and are not. */
     /** Bodies arrived for a block whose commitments we already held. */
     void ReceivedBlockBodies(CBlockIndex *pindexNew);
 
+    /** Record what a received block tells us.
+     *
+     * D1 (Fable review, F-121, 2026-09-19): corrected -- `pos` is always a valid
+     * FlatFilePos (the commitment block's bytes are always written, F-110), never
+     * a nullable sentinel for "commitments only". `bodies_held` is the explicit
+     * signal for that instead. The transaction count, the cumulative count and
+     * the block's eligibility to be a chain candidate are all commitment-level
+     * facts and are recorded either way; BLOCK_HAVE_BODIES (via `bodies_held`)
+     * is body-level and is not. */
     void ReceivedBlockTransactions(const CBlock &block, CValidationState &state, CBlockIndex *pindexNew,
                                    const FlatFilePos &pos, bool bodies_held);
 

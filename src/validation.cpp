@@ -802,9 +802,18 @@ static bool AcceptToMemoryPoolWorker(const CChainParams &chainparams, CTxMemPool
         if (fRequireStandard && !AreInputsStandard(tx, view))
             return state.Invalid(false, REJECT_NONSTANDARD, "bad-txns-nonstandard-inputs");
         // 1.2 (D-18, F-89): under the commitment budget, the miner's block-assembly
-        // sigop accounting reads straight from this stored entry (miner.cpp:315), so
-        // the accurate count has to be set here or it never reaches the path that
-        // matters, regardless of what ConnectBlock enforces.
+        // sigop accounting reads straight from this stored entry
+        // (BlockAssembler::TestPackage's packageSigOps check, miner.cpp -- named by
+        // symbol, not line, since C3's own review found this citation had already
+        // drifted once), so the accurate count has to be set here or it never
+        // reaches the path that matters, regardless of what ConnectBlock enforces.
+        //
+        // B3 (F-120, Fable review, 2026-09-19): GetAccurateSigOpCount's precondition --
+        // every txin.prevout must already resolve in `view`, or AccessCoin's
+        // missing-coin sentinel silently contributes zero sigops for that input
+        // rather than erroring. Holds here by construction: CheckTxInputs above
+        // already failed and returned if any input were unresolvable, so every
+        // prevout this walk touches is guaranteed present.
         unsigned int nSigOps = g_commitmentBudgetActive
                                ? GetAccurateSigOpCount(tx, view)
                                : GetTransactionSigOpCount(tx, view, STANDARD_SCRIPT_VERIFY_FLAGS);
@@ -833,6 +842,15 @@ static bool AcceptToMemoryPoolWorker(const CChainParams &chainparams, CTxMemPool
         // itself can contain sigops MAX_STANDARD_TX_SIGOPS is less than
         // MAX_BLOCK_SIGOPS; we still consider this an invalid rather than
         // merely non-standard transaction.
+        //
+        // B4 (F-120, Fable review, 2026-09-19): `nSigOps` here is the same
+        // g_commitmentBudgetActive-switched value computed above -- under the
+        // budget this per-TRANSACTION standardness gate also runs on the
+        // accurate count, not just the block-level budget check D-18/F-88/F-89
+        // were about. A real, disclosed policy change: legacy and accurate
+        // disagree in both directions (tx_verify.h's own GetAccurateOwnSigOpCount
+        // doc), so some transactions standard under legacy become non-standard
+        // here under the budget, and vice versa.
         if ((nSigOps > MAX_STANDARD_TX_SIGOPS) || (nBytesPerSigOp && nSigOps > nSize / nBytesPerSigOp))
             return state.DoS(0, false, REJECT_NONSTANDARD, "bad-txns-too-many-sigops", false,
                              strprintf("%d", nSigOps));
@@ -1151,23 +1169,12 @@ bool ReadBlockFromDisk(CBlock &block, const FlatFilePos &pos, const Consensus::P
 }
 
 bool ReadBlockFromDisk(CBlock &block, const CBlockIndex *pindex, const Consensus::Params &consensusParams) {
-    // Test-only: pretend this block's bodies are not held. Returning the same
-    // failure a genuine read error returns is the point -- it drives every
-    // caller down the path a body-incomplete block would, which is what the
-    // acceptance-layer probe measures. Nineteen call sites reach here,
-    // including ConnectTip, ProcessGetBlockData, GETBLOCKTXN, the compact-block
-    // announce, VerifyDB, RollbackBlock, ZMQ and the smartnode list diff.
-    //
-    // 1.3.6 (F-111): a non-decrementing PEEK, not another counted attempt --
-    // this function has no attempt of its own to count, it just has to agree
-    // with whatever AcceptBlock's own (count-aware) decision already was.
-    // Without this, once that count is exhausted and BLOCK_HAVE_BODIES is
-    // set for real, every one of these nineteen call sites would still see
-    // the (never-decremented-by-them) withhold set and refuse a read the
-    // real bytes on disk (the commitment block is always written, withheld
-    // or not) could satisfy -- ConnectTip in particular would abort the node
-    // over a "read failure" it has no way to distinguish from disk
-    // corruption.
+    // Test-only: simulate "bodies not held" for every real reader (ConnectTip,
+    // block-serving, VerifyDB and others) by failing the read the same way a
+    // genuine disk error would. A non-decrementing PEEK, not a counted attempt
+    // of its own (F-111): it only has to agree with AcceptBlock's own count-aware
+    // decision, never override it once that count is exhausted and the real
+    // bytes (always on disk regardless of withhold, F-110) become readable again.
     if (PerfWithholdStillActive(pindex)) {
         return error("%s: PERF: body withheld for %s (height %d)", __func__,
                      pindex->GetBlockHash().ToString(), pindex->nHeight);
@@ -2538,7 +2545,9 @@ bool CChainState::ConnectBlock(const CBlock &block, CValidationState &state, CBl
         // * legacy (always)
         // * p2sh (when P2SH enabled in flags and excludes coinbase)
         // 1.2 (D-18, F-86, F-88): under the commitment budget this switches to the
-        // accurate counter and the committed-count threshold instead.
+        // accurate counter and the committed-count threshold instead. B3's
+        // missing-coin precondition (AcceptToMemoryPool's own call site, above)
+        // holds here too: this loop's own Consensus::CheckTxInputs already ran.
         nSigOps += g_commitmentBudgetActive
                    ? GetAccurateSigOpCount(tx, view)
                    : GetTransactionSigOpCount(tx, view, flags);
@@ -4166,7 +4175,7 @@ bool CheckBlock(const CBlock &block, CValidationState &state, const Consensus::P
     for (const auto &tx: block.vtx) {
         // No view here, so under the commitment budget this can only ever be the
         // view-independent HALF of the accurate count -- but it must be that, not
-        // legacy: legacy is not a uniform undercount (1.2 review, F1) and can
+        // legacy: legacy is not a uniform undercount (1.2 review, F-95) and can
         // overcount a small created multisig output enough to make CheckBlock
         // reject a block the miner correctly built within the accurate budget.
         // The real, complete accurate-count enforcement is at ConnectBlock, where
@@ -4421,7 +4430,7 @@ static bool ContextualCheckBlock(const CBlock &block, CValidationState &state, c
         }
         // See the identical comment in CheckBlock: legacy overcounts a small
         // created multisig output badly enough to false-reject a block the
-        // miner built within the accurate budget (1.2 review, F1).
+        // miner built within the accurate budget (1.2 review, F-95).
         nSigOps += g_commitmentBudgetActive ? GetAccurateOwnSigOpCount(*tx) : GetLegacySigOpCount(*tx);
     }
 
@@ -4481,7 +4490,7 @@ bool ContextualCheckCommitmentBlock(const CCommitmentBlock &block, CValidationSt
     if (!IsFinalTx(*block.coinbase, nHeight, nLockTimeCutoff))
         return state.DoS(10, false, REJECT_INVALID, "bad-txns-nonfinal", false, "non-final coinbase");
 
-    // M-1 (Fable review, 2026-09-19): ContextualCheckBlock's per-tx loop also
+    // M-1 (F-104, Fable review, 2026-09-19): ContextualCheckBlock's per-tx loop also
     // runs ContextualCheckTransaction on vtx[0] -- dropped here in the first
     // pass, a real gap against the "every commitment-checkable row" claim.
     // ContextualCheckTransaction takes one tx plus pindexPrev, so it is fully
@@ -4933,7 +4942,7 @@ bool ChainstateManager::ProcessNewBlock(const CChainParams &chainparams, const s
         // time. Looking up the real parent needs cs_main for a consistent
         // read, which is also why this moved inside the lock rather than
         // gaining a second, redundant height computation.
-        // L-2 (Fable review, 2026-09-19): an unknown parent (pindexPrev ==
+        // L-2 (F-106, Fable review, 2026-09-19): an unknown parent (pindexPrev ==
         // nullptr) has no real height to guess from -- AcceptBlockHeader
         // rejects such a block anyway (prev-blk-not-found), so skip this
         // belt-and-suspenders check rather than run it at a fabricated
@@ -5857,7 +5866,7 @@ void LoadExternalBlockFile(const CChainParams &chainparams, FILE *fileIn, FlatFi
                     }
 
                     // process in case the block isn't known yet
-                    // M-2 (Fable review, 2026-09-19): HAVE_DATA alone is no
+                    // M-2 (F-104, Fable review, 2026-09-19): HAVE_DATA alone is no
                     // longer "already have it" -- a commitment-only entry has
                     // it set too, and a -loadblock file offering that block's
                     // real bodies would be skipped as redundant. Same

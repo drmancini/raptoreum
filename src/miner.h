@@ -148,7 +148,7 @@ private:
     // GetBlockInputCount's own unit. TestPackage's own-count-only pre-check
     // is cheap but can under-count a package's unconfirmed ancestors;
     // addPackageTxs() re-checks the exact ancestor-set aggregate against this
-    // before committing to a package (F1, Fable review, 2026-09-19) -- an
+    // before committing to a package (F-99, Fable review, 2026-09-19) -- an
     // under-count reaching CreateNewBlock's TestBlockValidity call would
     // otherwise throw and repeat on every getblocktemplate/generateBlocks
     // retry, a deterministic stall rather than one wasted block.

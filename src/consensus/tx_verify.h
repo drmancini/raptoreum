@@ -69,7 +69,7 @@ unsigned int GetTransactionSigOpCount(const CTransaction &tx, const CCoinsViewCa
  * commitment budget -- NOT GetLegacySigOpCount.
  *
  * That matters because legacy is not a uniform undercount relative to the
- * accurate count (1.2 review, F1, 2026-09-19): GetSigOpCount(false) charges
+ * accurate count (1.2 review, F-95, 2026-09-19): GetSigOpCount(false) charges
  * MAX_PUBKEYS_PER_MULTISIG (20) for every CHECKMULTISIG regardless of the real
  * key count, so a transaction that only CREATES a small bare multisig output
  * (say 1-of-3, standard, 3 real sigops) is charged 20 by legacy -- a massive
@@ -98,6 +98,14 @@ unsigned int GetAccurateOwnSigOpCount(const CTransaction &tx);
  * A new path. Does NOT alter GetLegacySigOpCount, GetP2SHSigOpCount or
  * GetTransactionSigOpCount, which pre-fork validation still depends on and
  * must not change retroactively for history already on chain.
+ *
+ * Precondition (B3, F-120, Fable review, 2026-09-19): every txin.prevout must already
+ * resolve in `inputs`. AccessCoin's missing-coin sentinel is a default (empty)
+ * CTxOut, whose script contributes zero sigops rather than raising an error --
+ * an unresolvable input silently UNDERcounts instead of failing loudly. Both
+ * call sites (AcceptToMemoryPool, ConnectBlock) run this only after their own
+ * Consensus::CheckTxInputs already required every input to resolve, so the
+ * precondition holds there; a new call site must establish it too.
  *
  * @param[in] tx     Transaction for which we are counting sigops
  * @param[in] inputs Map of previous transactions that have outputs we're spending

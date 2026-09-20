@@ -177,11 +177,20 @@ BOOST_AUTO_TEST_CASE(genuinely_pruned_arrival_is_still_discarded) {
 // not changed when a body merely catches up to already-held commitments.
 // This proves it: a block (B) whose COMMITMENTS arrive first, but whose BODY
 // arrives second (after an equal-work rival (A) has arrived whole and become
-// tip), must still WIN the tie once its body fills in -- exactly what B
-// would have won had it arrived whole first, matching unmodified Bitcoin's
-// own first-seen tie-break (CBlockIndexWorkComparator, lower nSequenceId
-// wins). F-35's bug was the opposite: re-stamping on body arrival would move
-// B's sequence id LATER than A's, making B lose a tie it should have won.
+// tip), must still WIN the tie once its body fills in.
+//
+// L-1 (F-107 correction, Fable adversarial review, 2026-09-19): this does
+// NOT match unmodified Bitcoin's tie-break -- it's a genuine, disclosed
+// behaviour change (see F-42). Unmodified Bitcoin only assigns nSequenceId
+// once a block's FULL data arrives, so with this exact arrival order (B's
+// commitments, then A whole, then B's body) A keeps the tip upstream; only a
+// first-seen-whole-and-connectable block can ever win a tie there. This test
+// proves the opposite side of F-42's open question: a commitment-first,
+// body-second block CAN displace an already-connected equal-work rival,
+// something F-42 explicitly says unmodified code never does. F-35's bug was
+// the reverse of what decoupling now deliberately does: re-stamping on body
+// arrival would have moved B's sequence id LATER than A's, making B lose a
+// tie this design means for it to win.
 BOOST_AUTO_TEST_CASE(equal_work_tiebreak_survives_bodies_arriving_second) {
     ChainstateManager &chainman = EnsureChainman(m_node);
     const CChainParams &chainparams = Params();

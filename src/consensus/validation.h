@@ -90,19 +90,14 @@ public:
 
     /** Set when a block could not be connected because its transaction bodies
      *  are not held -- the decoupling design's third outcome, beside "valid"
-     *  and "invalid".
-     *
-     *  It exists because the two existing outcomes are both wrong for it.
-     *  Marking the block invalid would permanently reject a chain other nodes
-     *  accept. Treating it as a run-time error makes it fatal: ThreadImport
-     *  shuts the node down on any failed ActivateBestChain, which is measured
-     *  behaviour -- the probe's node logged "holding it incomplete" and then
-     *  "Failed to connect best block ( (code 0))" and exited, because an empty
-     *  state is indistinguishable from a disk failure.
-     *
-     *  So the signal is carried rather than inferred, on the same pattern
-     *  corruptionPossible already uses: a non-consensus reason travelling with
-     *  the state so callers can tell one kind of "no" from another. */
+     *  and "invalid" (F-25c). Neither existing outcome fits: marking it invalid
+     *  permanently rejects a chain other nodes accept, and treating it as a
+     *  run-time error is fatal (ThreadImport shuts down on any failed
+     *  ActivateBestChain, unable to tell this apart from a real disk failure).
+     *  Carried on the same pattern corruptionPossible already uses. As of 1.3.5
+     *  (F-110), FindMostWorkChain excludes a bodies-missing chain before
+     *  ConnectTip ever runs, so no call site sets this today -- kept as
+     *  defence-in-depth for the day that filter is ever weakened. */
     void SetBodiesMissing() {
         bodiesMissing = true;
     }

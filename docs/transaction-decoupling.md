@@ -1979,11 +1979,18 @@ only at the upper stage.
 
 ### C. Block format and serialization
 
-- Second serialization of `CBlock`: coinbase in full, the rest as bare identifiers.
-- Stream flag, **not** a header bit (§1), with service-bit or protocol-version negotiation.
+- **Corrected (E2, Fable review, 2026-09-19): this list still described the §1 selector
+  this doc itself retracted.** Built: a distinct `CCommitmentBlock` type (coinbase in full,
+  the rest as bare identifiers) with `CommitmentsFromBlock`/`MaterialiseBlock` converting
+  to and from a real `CBlock` — not a second serialization of `CBlock` and not a stream
+  flag. Negotiated by a capability service bit (`NODE_COMMITMENTS`) plus an explicit
+  `SENDCOMMITMENTS` handshake (§1's own corrected answer), not "service-bit or
+  protocol-version negotiation" as a stream-flag selector would need.
 - A raw-commitment read API distinct from a materialising read, so §11's cheaper
-  `GetBlockTxs` is actually reachable.
-- Materialisation must produce a fresh object (the `fChecked` trap, §2.2).
+  `GetBlockTxs` is actually reachable. Built as a real API boundary (`ReadCommitmentBlockFromDisk`);
+  a genuinely body-less read is still phase 2's job (R-30).
+- Materialisation must produce a fresh object (the `fChecked` trap, §2.2). Built
+  (`MaterialiseBlock`).
 
 ### D. The acceptance layer — *the risk*
 
