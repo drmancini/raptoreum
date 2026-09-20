@@ -2956,7 +2956,15 @@ bool CChainState::FlushStateToDisk(const CChainParams &chainparams, CValidationS
                         vBlocks.push_back(*it);
                         setDirtyBlockIndex.erase(it++);
                     }
-                    if (!pblocktree->WriteBatchSync(vFiles, nLastBlockFile, vBlocks)) {
+                    // F-132: body-file info folded into this same atomic batch --
+                    // a CDiskBlockIndex above can already name a body position
+                    // (nBodyFile/nBodyPos, 2.1.3), so the file-size bookkeeping
+                    // that protects that position from reuse must never become
+                    // durable in a separate, independently-timed write.
+                    std::vector<std::pair<int, const CBodyFileInfo *>> vBodyFiles;
+                    int nLastBodyFileOut;
+                    GetDirtyBodyFileInfo(vBodyFiles, nLastBodyFileOut);
+                    if (!pblocktree->WriteBatchSync(vFiles, nLastBlockFile, vBlocks, vBodyFiles, nLastBodyFileOut)) {
                         return AbortNode(state, "Failed to write to block index database");
                     }
                 }
