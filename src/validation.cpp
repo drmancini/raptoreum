@@ -2961,8 +2961,8 @@ bool CChainState::FlushStateToDisk(const CChainParams &chainparams, CValidationS
                     // (nBodyFile/nBodyPos, 2.1.3), so the file-size bookkeeping
                     // that protects that position from reuse must never become
                     // durable in a separate, independently-timed write.
-                    std::vector<std::pair<int, const CBodyFileInfo *>> vBodyFiles;
-                    int nLastBodyFileOut;
+                    std::vector<std::pair<int, CBodyFileInfo>> vBodyFiles;
+                    int nLastBodyFileOut = -1;
                     GetDirtyBodyFileInfo(vBodyFiles, nLastBodyFileOut);
                     if (!pblocktree->WriteBatchSync(vFiles, nLastBlockFile, vBlocks, vBodyFiles, nLastBodyFileOut)) {
                         return AbortNode(state, "Failed to write to block index database");
