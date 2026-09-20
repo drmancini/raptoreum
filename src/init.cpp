@@ -783,6 +783,12 @@ void SetupServerArgs() {
                  "Test-only: as -perfwithholdbody, by height rather than hash, which is what "
                  "a script can name before the block exists.",
                  ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    gArgs.AddArg("-perfwithholdcount=<n>",
+                 "Test-only: withhold a -perfwithholdbody/-perfwithholdheight match for only "
+                 "the first n attempts, then let it through -- lets a live session (not just a "
+                 "restart) prove a retry eventually converges. Shared across every matching "
+                 "block. Unset withholds forever, matching the original behaviour.",
+                 ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     gArgs.AddArg("-perfalwaystrysend",
                  "Test-only: attempt socket writes even when the epoll send-readiness flag is "
                  "false, to test whether that flag latching wedges a connection. (default: 0)",
@@ -1656,9 +1662,20 @@ bool AppInitParameterInteraction() {
         }
         g_perf_withhold_heights.insert((int) height);
     }
+    if (gArgs.IsArgSet("-perfwithholdcount")) {
+        int64_t count;
+        if (!ParseInt64(gArgs.GetArg("-perfwithholdcount", ""), &count) || count < 0) {
+            return InitError(strprintf("-perfwithholdcount=%s is not a count",
+                                       gArgs.GetArg("-perfwithholdcount", "")));
+        }
+        g_perf_withhold_count = (int) count;
+    }
     if (!g_perf_withhold_hashes.empty() || !g_perf_withhold_heights.empty()) {
-        LogPrintf("PERF: withholding bodies for %d block(s) by hash and %d by height\n",
-                  (int) g_perf_withhold_hashes.size(), (int) g_perf_withhold_heights.size());
+        LogPrintf("PERF: withholding bodies for %d block(s) by hash and %d by height%s\n",
+                  (int) g_perf_withhold_hashes.size(), (int) g_perf_withhold_heights.size(),
+                  g_perf_withhold_count >= 0
+                  ? strprintf(", for %d attempt(s) each", (int) g_perf_withhold_count)
+                  : "");
     }
     g_perf_always_try_send = gArgs.GetBoolArg("-perfalwaystrysend", false);
     g_perf_inv_nosort = gArgs.GetBoolArg("-perfinvnosort", false);

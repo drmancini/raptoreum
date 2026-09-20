@@ -784,6 +784,21 @@ namespace {
                     int nWindowEnd = state->pindexLastCommonBlock->nHeight + BLOCK_DOWNLOAD_WINDOW;
                     int nMaxHeight = std::min<int>(state->pindexBestKnownBlock->nHeight, nWindowEnd + 1);
                     NodeId waitingfor = -1;
+                    // 1.3.6 (F-25e2, Mike, 2026-09-20): a body-missing block never
+                    // reaches the pindexLastCommonBlock branch below (its own
+                    // HAVE_DATA && HaveBodies() check fails it into "needs
+                    // fetching" instead), but a FULLY BODIED descendant sitting
+                    // above it does -- ReceivedBlockTransactions counts a
+                    // commitment-only ancestor's commitments as "downloaded" for
+                    // nChainTx (decoupling's whole point: the chain can extend on
+                    // commitments alone), so the descendant's own
+                    // HaveTxsDownloaded() reads true and the old code advanced
+                    // the cursor straight past the still-missing gap. Once past,
+                    // nothing in a later call ever walks back to it. Latch the
+                    // gap for the rest of this call, the same way the window-end
+                    // and in-flight branches already refuse to advance past an
+                    // unfetched or in-flight block.
+                    bool fBehindGap = false;
                     while (pindexWalk->nHeight < nMaxHeight) {
                         // Read up to 128 (or more, if more blocks than that are needed) successors of pindexWalk (towards
                         // pindexBestKnownBlock) into vToFetch. We fetch 128, because CBlockIndex::GetAncestor may be as expensive
@@ -808,10 +823,11 @@ namespace {
                             }
                             if ((pindex->nStatus & BLOCK_HAVE_DATA && HaveBodies(pindex)) ||
                                 ::ChainActive().Contains(pindex)) {
-                                if (pindex->HaveTxsDownloaded())
+                                if (!fBehindGap && pindex->HaveTxsDownloaded())
                                     state->pindexLastCommonBlock = pindex;
                             } else if (mapBlocksInFlight.count(pindex->GetBlockHash()) == 0) {
                                 // The block is not already downloaded, and not yet in flight.
+                                fBehindGap = true;
                                 if (pindex->nHeight > nWindowEnd) {
                                     // We reached the end of the window.
                                     if (vBlocks.size() == 0 && waitingfor != nodeid) {
@@ -824,9 +840,12 @@ namespace {
                                 if (vBlocks.size() == count) {
                                     return;
                                 }
-                            } else if (waitingfor == -1) {
-                                // This is the first already-in-flight block.
-                                waitingfor = mapBlocksInFlight[pindex->GetBlockHash()].first;
+                            } else {
+                                fBehindGap = true;
+                                if (waitingfor == -1) {
+                                    // This is the first already-in-flight block.
+                                    waitingfor = mapBlocksInFlight[pindex->GetBlockHash()].first;
+                                }
                             }
                         }
                     }
