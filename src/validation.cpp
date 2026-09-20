@@ -2342,9 +2342,18 @@ bool CChainState::ConnectBlock(const CBlock &block, CValidationState &state, CBl
     // nLockTimeFlags/LOCKTIME_VERIFY_SEQUENCE just above, which governs BIP68
     // relative locktimes and already has its own connect-time enforcement
     // (the SequenceLocks call in the loop below). Gated by
-    // g_commitmentBudgetActive, matching D-14's "one fork" activation for
-    // every other 1.x rule -- test-only until 4.6 has a real bit, so this is
-    // provably inert on any real chain today.
+    // g_commitmentBudgetActive -- test-only, provably inert on any real
+    // chain today, but this is NOT the height gate F-100/this row's own plan
+    // required (a full mainnet -reindex-chainstate as the acceptance test,
+    // never run -- M-4, a full-arc adversarial review, 2026-09-20). A plain
+    // boolean is not a substitute: 4.6 wiring a real deployment bit to this
+    // SAME flag would newly enforce these 3 rules against all of mainnet
+    // history on every future -reindex-chainstate (which skips
+    // ContextualCheckBlock today, see that function's own comment on why),
+    // exactly the risk height-gating exists to avoid. TODO(4.6): add
+    // `&& pindex->nHeight >= <activation height>` here and at F-83's own
+    // g_commitmentBudgetActive gate in AcceptBlock below, not just a global
+    // flag flip.
     int nLockTimeFlagsAbsolute = 0;
     if (chainparams.GetConsensus().BIPCSVEnabled) {
         nLockTimeFlagsAbsolute |= LOCKTIME_MEDIAN_TIME_PAST;
@@ -4275,11 +4284,31 @@ bool CheckCommitmentBlock(const CCommitmentBlock &block, CValidationState &state
                              strprintf("Transaction check failed (tx hash %s) %s",
                                        block.coinbase->GetHash().ToString(), state.GetDebugMessage()));
 
+    // 1.3.7+ (H-1, a full-arc adversarial review, 2026-09-20): the one
+    // resource question a bare identifier list CAN answer, and the only one
+    // this rung was missing. Without it, a miner names more identifiers than
+    // any legal body could ever fill -- the merkle root binds the header to
+    // that count, so it costs one block of real work -- and nothing catches
+    // it until every peer has already spent the fetch bandwidth trying.
+    // Reuses D-19's own COMMITMENT_BUDGET_MAX_INPUTS rather than a new
+    // constant: every non-coinbase transaction needs at least one input (a
+    // 0-input tx fails CheckTransaction), so the identifier count can never
+    // legally exceed the total input count D-19 already bounds. corruption=
+    // false for the same reason as bad-cmt-duplicate-ids just above: the
+    // count is a directly observable fact about this vCommitments field,
+    // independent of whether fCheckMerkleRoot ran.
+    if (g_commitmentBudgetActive && block.vCommitments.size() > COMMITMENT_BUDGET_MAX_INPUTS)
+        return state.DoS(100, false, REJECT_INVALID, "bad-cmt-toomanyids", false,
+                         "more committed identifiers than any legal body could fill");
+
     // Deliberately NOT checked here: block size / sigop / input-count budgets
-    // (1.2, D-19). Those are stated over the MATERIALISED block's serialized
-    // size and per-transaction input counts -- a bare identifier list cannot
-    // answer either. CheckBlock/ContextualCheckBlock enforce them once a real
-    // CBlock exists, which by construction is only once bodies are held.
+    // (1.2, D-19) THEMSELVES -- those are stated over the MATERIALISED
+    // block's serialized size and per-transaction input counts, which a bare
+    // identifier list cannot answer directly (only the count-based bound
+    // above, which is necessary but not sufficient: it does not stop a body
+    // that is legal by input count from still exceeding the byte cap).
+    // CheckBlock/ContextualCheckBlock enforce the real budgets once bodies
+    // are held.
 
     return true;
 }
@@ -4806,7 +4835,14 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock> &pblock, CVali
 
     // Header is valid/has work, merkle tree is good...RELAY NOW
     // (but if it does not build on our best tip, let the SendMessages loop relay it)
-    if (!IsInitialBlockDownload() && m_chain.Tip() == pindex->pprev)
+    //
+    // HaveBodies(pindex) guard (full-arc adversarial review, F-117): compact-block
+    // announcement promises peers a GETBLOCKTXN follow-up will succeed. Inert today
+    // -- pblock here is always the full, real block (Phase 2's commitment-only
+    // fetch protocol doesn't exist yet, F-105) -- but once it does, announcing a
+    // commitment-only accept would advertise bodies this node cannot yet serve
+    // once most_recent_block's single-entry cache is evicted by the next block.
+    if (!IsInitialBlockDownload() && m_chain.Tip() == pindex->pprev && HaveBodies(pindex))
         GetMainSignals().NewPoWValidBlock(pindex, pblock);
 
     // Write block to history file
@@ -4828,6 +4864,18 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock> &pblock, CVali
     } else if (pindex->nStatus & BLOCK_HAVE_DATA) {
         LogPrintf("AcceptBlock: bodies arrived for %s (height %d)\n",
                   pindex->GetBlockHash().ToString(), pindex->nHeight);
+        // M-6 (full-arc adversarial review, F-118): investigated as "this early
+        // return skips the flush below" -- it does, but that flush is
+        // FlushStateMode::NONE, which performs no write outside
+        // PERIODIC/IF_NEEDED/ALWAYS/prune conditions (FlushStateToDisk's own doc
+        // comment: "won't do anything besides checking if we need to prune").
+        // Calling it here would be a no-op, same as it already is on the shared
+        // tail below for the ordinary ReceivedBlockTransactions path -- ANY
+        // nStatus mutation in AcceptBlock (HAVE_DATA included, not just this
+        // branch's HAVE_BODIES) is equally exposed to being lost on a crash
+        // before the next PERIODIC flush (an hour) or clean shutdown. Not a
+        // regression this branch introduced; not fixed, since there is nothing
+        // to fix without changing that batching policy for every caller.
         ReceivedBlockBodies(pindex);
         CheckBlockIndex(chainparams.GetConsensus());
         return true;
@@ -5232,7 +5280,11 @@ void BlockManager::Unload() {
     m_prev_block_index.clear();
 }
 
-bool static LoadBlockIndexDB(ChainstateManager &chainman, const CChainParams &chainparams)
+// M-5 (full-arc adversarial review, F-118): no longer static -- declared in
+// validation.h so a test can drive the bodiesmigrated migration directly,
+// without re-entering the rest of node startup (ChainstateManager::LoadBlockIndex's
+// needs_init branch, genesis creation, etc).
+bool LoadBlockIndexDB(ChainstateManager &chainman, const CChainParams &chainparams)
 
 EXCLUSIVE_LOCKS_REQUIRED(cs_main)
         {
