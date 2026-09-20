@@ -7,22 +7,33 @@
 #include <clientversion.h>
 #include <streams.h>
 #include <sync.h>
+#include <txdb.h>
 #include <util/system.h>
 
 #include <cstdio>
+#include <memory>
+#include <set>
+#include <tinyformat.h>
 #include <vector>
+
+// validation.h's own declaration -- redeclared here rather than including all
+// of validation.h (and its own large dependency graph) for one pointer.
+extern std::unique_ptr<CBlockTreeDB> pblocktree;
+
+std::string CBodyFileInfo::ToString() const {
+    return strprintf("CBodyFileInfo(size=%u)", nSize);
+}
 
 namespace {
 
     RecursiveMutex cs_LastBodyFile;
 
-    struct CBodyFileInfo {
-        unsigned int nSize = 0; //!< number of used bytes of this body file
-    };
-
-    // 2.1.1 (in-memory only -- see bodystore.h's file-level comment).
+    // 2.1.1: in-memory. 2.1.2: persisted via pblocktree (LoadBodyFileInfo/
+    // FlushBodyFileInfo below) -- see bodystore.h's file-level comment for what
+    // "persisted" does and doesn't mean yet.
     std::vector<CBodyFileInfo> vinfoBodyFile GUARDED_BY(cs_LastBodyFile);
     int nLastBodyFile GUARDED_BY(cs_LastBodyFile) = 0;
+    std::set<int> setDirtyBodyFileInfo GUARDED_BY(cs_LastBodyFile);
 
     // 4 bytes per offset, matching WriteBodyRecord's fixed-width encoding
     // (2.1.1 review finding #1 -- CompactSize's 32 MiB ceiling made a
@@ -91,6 +102,7 @@ bool FindBodyPos(FlatFilePos &pos, unsigned int nAddSize) {
     }
     nLastBodyFile = (int) nFile;
     vinfoBodyFile[nFile].nSize += nAddSize;
+    setDirtyBodyFileInfo.insert((int) nFile);
 
     bool out_of_space = false;
     BodyFileSeq().Allocate(pos, nAddSize, out_of_space);
@@ -227,4 +239,51 @@ bool ReadBodyAt(const FlatFilePos &pos, unsigned int index, CTransactionRef &txO
     }
 
     return true;
+}
+
+bool LoadBodyFileInfo() {
+    LOCK(cs_LastBodyFile);
+
+    int nFile = 0;
+    // ReadLastBodyFile failing means an empty/pre-2.1.2 database -- leave the
+    // all-zero default rather than treating it as an error, exactly how
+    // LoadBlockIndexDB's own block-file-info load (validation.cpp) starts a
+    // fresh datadir at file 0.
+    pblocktree->ReadLastBodyFile(nFile);
+    nLastBodyFile = nFile;
+
+    vinfoBodyFile.assign(nFile + 1, CBodyFileInfo());
+    for (int i = 0; i <= nFile; i++) {
+        pblocktree->ReadBodyFileInfo(i, vinfoBodyFile[i]);
+    }
+    setDirtyBodyFileInfo.clear();
+
+    return true;
+}
+
+bool FlushBodyFileInfo() {
+    LOCK(cs_LastBodyFile);
+
+    if (setDirtyBodyFileInfo.empty()) {
+        return true;
+    }
+
+    std::vector<std::pair<int, const CBodyFileInfo *>> vFiles;
+    vFiles.reserve(setDirtyBodyFileInfo.size());
+    for (int nFile : setDirtyBodyFileInfo) {
+        vFiles.emplace_back(nFile, &vinfoBodyFile[nFile]);
+    }
+    if (!pblocktree->WriteBodyFileInfoBatch(vFiles, nLastBodyFile)) {
+        return error("FlushBodyFileInfo: WriteBodyFileInfoBatch failed");
+    }
+    setDirtyBodyFileInfo.clear();
+
+    return true;
+}
+
+void TestOnlyResetBodyFileState() {
+    LOCK(cs_LastBodyFile);
+    vinfoBodyFile.clear();
+    nLastBodyFile = 0;
+    setDirtyBodyFileInfo.clear();
 }

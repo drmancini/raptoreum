@@ -12,10 +12,15 @@
 #include <serialize.h>
 #include <test/test_raptoreum.h>
 #include <tinyformat.h>
+#include <txdb.h>
 #include <uint256.h>
 #include <util/system.h>
 
 #include <boost/test/unit_test.hpp>
+
+// validation.h's own declaration; redeclared here rather than including all
+// of validation.h for one pointer (matches bodystore.cpp's own approach).
+extern std::unique_ptr<CBlockTreeDB> pblocktree;
 
 // BasicTestingSetup alone never points -datadir at its own temp root or
 // clears GetBlocksDir()'s path cache (only TestingSetup does, alongside a lot
@@ -28,10 +33,15 @@
 // writes into it (2.1.1 review finding #7 -- confirmed: an earlier run of
 // this exact file, before this fixture existed, wrote real bdy*.dat files
 // into a live node's own blocks/ directory).
+//
+// 2.1.2 also needs a real pblocktree -- an in-memory CBlockTreeDB, the same
+// one TestingSetup constructs for its own much heavier chain-init, taken here
+// on its own rather than pulling in all of TestingSetup.
 struct BodyStoreTestingSetup : public BasicTestingSetup {
     BodyStoreTestingSetup() {
         SetDataDir("tempdir");
         ClearDatadirCache();
+        pblocktree.reset(new CBlockTreeDB(1 << 20, /*fMemory=*/true));
     }
 };
 
@@ -328,6 +338,57 @@ BOOST_AUTO_TEST_CASE(find_body_pos_rejects_a_write_that_could_never_fit_in_one_f
     FlatFilePos pos;
     BOOST_CHECK(!FindBodyPos(pos, MAX_BODYFILE_SIZE));
     BOOST_CHECK(!FindBodyPos(pos, MAX_BODYFILE_SIZE + 1));
+}
+
+// 2.1.2: LoadBodyFileInfo must not crash or misbehave on a database that has
+// never had anything flushed to it -- a fresh datadir's first boot.
+BOOST_AUTO_TEST_CASE(load_body_file_info_is_safe_on_an_empty_database) {
+    TestOnlyResetBodyFileState();
+    BOOST_REQUIRE(LoadBodyFileInfo());
+
+    FlatFilePos pos;
+    BOOST_REQUIRE(FindBodyPos(pos, 100));
+    BOOST_CHECK_EQUAL(pos.nFile, 0);
+    BOOST_CHECK_EQUAL(pos.nPos, 0U);
+}
+
+// The point of 2.1.2: FindBodyPos must continue from where a previous run
+// left off, not silently restart at file 0 / position 0 and overwrite real
+// data already there.
+BOOST_AUTO_TEST_CASE(find_body_pos_continues_after_a_simulated_restart) {
+    TestOnlyResetBodyFileState();
+    BOOST_REQUIRE(LoadBodyFileInfo());
+
+    std::vector<CTransactionRef> bodies = MakeBodies(4);
+    FlatFilePos posBefore = WriteBodies(bodies);
+    BOOST_REQUIRE(FlushBodyFileInfo());
+
+    // Simulate a restart: the in-memory bookkeeping is gone, only what was
+    // flushed to pblocktree survives.
+    TestOnlyResetBodyFileState();
+    BOOST_REQUIRE(LoadBodyFileInfo());
+
+    FlatFilePos posAfter;
+    BOOST_REQUIRE(FindBodyPos(posAfter, 1));
+    BOOST_CHECK_EQUAL(posAfter.nFile, posBefore.nFile);
+    BOOST_CHECK_EQUAL(posAfter.nPos, posBefore.nPos + GetBodyRecordSerializedSize(bodies));
+
+    // And the record written before the "restart" is still there and correct
+    // -- the reset/reload only affects in-memory bookkeeping, never the bytes
+    // already on disk.
+    std::vector<CTransactionRef> bodiesOut;
+    BOOST_REQUIRE(ReadBodyRecord(posBefore, bodiesOut));
+    BOOST_REQUIRE_EQUAL(bodiesOut.size(), bodies.size());
+    for (size_t i = 0; i < bodies.size(); i++) {
+        BOOST_CHECK_EQUAL(bodiesOut[i]->GetHash().ToString(), bodies[i]->GetHash().ToString());
+    }
+}
+
+// FlushBodyFileInfo with nothing dirty must be a harmless no-op, not an error.
+BOOST_AUTO_TEST_CASE(flush_body_file_info_is_a_no_op_when_nothing_is_dirty) {
+    TestOnlyResetBodyFileState();
+    BOOST_REQUIRE(LoadBodyFileInfo());
+    BOOST_REQUIRE(FlushBodyFileInfo());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -8,7 +8,9 @@
 #include <consensus/consensus.h>
 #include <flatfile.h>
 #include <primitives/transaction.h>
+#include <serialize.h>
 
+#include <string>
 #include <vector>
 
 /** 2.1 (transaction-decoupling.md §5/§5.1): a fourth flat-file series beside
@@ -20,10 +22,30 @@
  *  stored here.
  *
  *  2.1.1 scope: the record format and the file series, fully self-contained
- *  and independently testable. FindBodyPos below is in-memory only -- it does
- *  not yet survive a restart (that needs the LevelDB bookkeeping FindBlockPos
- *  itself gets from vinfoBlockFile/pblocktree, a later 2.1 step), and nothing
- *  here is wired into AcceptBlock yet. */
+ *  and independently testable.
+ *  2.1.2 scope: persisting the file bookkeeping via pblocktree (LoadBodyFileInfo/
+ *  FlushBodyFileInfo below), on CBlockFileInfo's own pattern, so FindBodyPos can
+ *  survive a restart -- callable and correct, but not yet auto-invoked at real
+ *  startup/shutdown (that's wired in alongside 2.1.4, when AcceptBlock actually
+ *  calls into this module and a real restart has something to lose).
+ *  Still ahead: 2.1.3 (CBlockIndex nBodyFile/nBodyPos + a migration), 2.1.4
+ *  (wire the write into AcceptBlock). */
+
+/** Persistent per-body-file bookkeeping -- the FindBodyPos analogue of
+ *  CBlockFileInfo (chain.h), persisted the same way via pblocktree. Simpler
+ *  than CBlockFileInfo: no undo/height/time tracking, since nothing here is a
+ *  pruning or reindex decision yet (2.1's own "can delete later, but won't at
+ *  first" scope, §8.4). */
+class CBodyFileInfo {
+public:
+    unsigned int nSize = 0; //!< number of used bytes of this body file
+
+    SERIALIZE_METHODS(CBodyFileInfo, obj) {
+        READWRITE(VARINT(obj.nSize));
+    }
+
+    std::string ToString() const;
+};
 
 /** Chunk size for the body-file series. Bodies are the bulk of a block's real
  *  bytes under decoupling -- the commitment block itself is small, coinbase
@@ -102,5 +124,22 @@ bool ReadBodyRecordCount(const FlatFilePos &pos, unsigned int &countOut);
  *  straight to its bytes -- no earlier transaction in the record is read or
  *  deserialized. */
 bool ReadBodyAt(const FlatFilePos &pos, unsigned int index, CTransactionRef &txOut);
+
+/** Load the per-file bookkeeping from pblocktree, so FindBodyPos continues
+ *  from where a previous run left off instead of restarting at file 0 (and
+ *  silently overwriting real data there). Safe to call against a fresh/empty
+ *  database -- leaves the in-memory state at its all-zero default. Requires
+ *  pblocktree to already exist; mirrors LoadBlockIndexDB's own block-file-info
+ *  load (validation.cpp). */
+bool LoadBodyFileInfo();
+
+/** Write every body-file entry FindBodyPos has touched since the last flush to
+ *  pblocktree. No-op (returns true) if nothing is dirty. */
+bool FlushBodyFileInfo();
+
+/** Test-only: reset FindBodyPos's in-memory state to simulate a fresh process
+ *  that must reload from pblocktree via LoadBodyFileInfo(). Never called from
+ *  production code. */
+void TestOnlyResetBodyFileState();
 
 #endif // BITCOIN_BODYSTORE_H
