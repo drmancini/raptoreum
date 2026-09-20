@@ -23,13 +23,18 @@
  *
  *  2.1.1 scope: the record format and the file series, fully self-contained
  *  and independently testable.
- *  2.1.2 scope: persisting the file bookkeeping via pblocktree (LoadBodyFileInfo/
- *  FlushBodyFileInfo below), on CBlockFileInfo's own pattern, so FindBodyPos can
- *  survive a restart -- callable and correct, but not yet auto-invoked at real
+ *  2.1.2 scope: persisting the file bookkeeping via pblocktree (LoadBodyFileInfo
+ *  below), on CBlockFileInfo's own pattern, so FindBodyPos can survive a
+ *  restart -- callable and correct, but not yet auto-invoked at real
  *  startup/shutdown (that's wired in alongside 2.1.4, when AcceptBlock actually
- *  calls into this module and a real restart has something to lose). See
- *  WriteBodyFileInfoBatch's own doc (txdb.h) for a real ordering hazard 2.1.4
- *  must resolve before writing anything for real.
+ *  calls into this module and a real restart has something to lose).
+ *  Body-file-info's write side was originally a separate WriteBodyFileInfoBatch
+ *  call, independently timed from the block-index flush -- decided (owner,
+ *  2026-09-20, F-132) to instead fold it into CBlockTreeDB::WriteBatchSync's
+ *  own atomic batch, since 2.1.3 made the two genuinely coupled (an index
+ *  entry can name a body position that isn't safe to trust durable unless the
+ *  file-size bookkeeping protecting it is durable too). See GetDirtyBodyFileInfo
+ *  below and WriteBatchSync's own doc (txdb.h).
  *  2.1.3 scope: CBlockIndex nBodyFile/nBodyPos + BLOCK_HAVE_BODY_RECORD
  *  (chain.h) -- turned out to need NO migration (a fresh status bit, false for
  *  every existing entry, decodes correctly without one).
@@ -101,7 +106,7 @@ uint64_t GetBodyRecordSerializedSize(const std::vector<CTransactionRef> &bodies)
  *  file (FindBlockPos's own FlushBlockFile(finalize=true) call), so a rolled
  *  file doesn't keep its full chunk-sized preallocation forever. Returns false
  *  without allocating anything if nAddSize alone could never fit in one file.
- *  Bookkeeping persists via LoadBodyFileInfo/FlushBodyFileInfo below (2.1.2)
+ *  Bookkeeping persists via LoadBodyFileInfo/GetDirtyBodyFileInfo below (2.1.2)
  *  once a caller invokes them -- see the file-level comment above for what's
  *  still not wired to a real startup/shutdown. */
 bool FindBodyPos(FlatFilePos &pos, unsigned int nAddSize);
@@ -139,9 +144,21 @@ bool ReadBodyAt(const FlatFilePos &pos, unsigned int index, CTransactionRef &txO
  *  load (validation.cpp). */
 bool LoadBodyFileInfo();
 
-/** Write every body-file entry FindBodyPos has touched since the last flush to
- *  pblocktree. No-op (returns true) if nothing is dirty. */
-bool FlushBodyFileInfo();
+/** Gather every body-file entry FindBodyPos has touched since the last call
+ *  (`vFilesOut`) and the current last-body-file number (`nLastFileOut`),
+ *  clearing the dirty set as it goes -- mirroring how validation.cpp's own
+ *  FlushStateToDisk drains setDirtyFileInfo for block-file info, on the same
+ *  attempt regardless of whether the caller's write actually succeeds. Always
+ *  reports the current last-body-file, dirty or not, exactly as
+ *  FlushStateToDisk always passes nLastBlockFile to WriteBatchSync whether or
+ *  not any block file is dirty.
+ *
+ *  Deliberately a getter, not a flush: the caller (FlushStateToDisk) must pass
+ *  the result into CBlockTreeDB::WriteBatchSync's own body-file-info
+ *  parameters so it lands in the SAME atomic batch as the block-index write
+ *  (F-132) -- persisting it separately reopens the ordering hazard that
+ *  decision closed. */
+void GetDirtyBodyFileInfo(std::vector<std::pair<int, const CBodyFileInfo *>> &vFilesOut, int &nLastFileOut);
 
 /** Test-only: reset FindBodyPos's in-memory state to simulate a fresh process
  *  that must reload from pblocktree via LoadBodyFileInfo(). Never called from

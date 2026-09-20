@@ -178,16 +178,6 @@ bool CBlockTreeDB::ReadLastBlockFile(int &nFile) {
     return Read(DB_LAST_BLOCK, nFile);
 }
 
-bool CBlockTreeDB::WriteBodyFileInfoBatch(const std::vector <std::pair<int, const CBodyFileInfo *>> &fileInfo,
-                                          int nLastFile) {
-    CDBBatch batch(*this);
-    for (const auto &entry : fileInfo) {
-        batch.Write(std::make_pair(DB_BODY_FILES, entry.first), *entry.second);
-    }
-    batch.Write(DB_LAST_BODY_FILE, nLastFile);
-    return WriteBatch(batch, true);
-}
-
 bool CBlockTreeDB::ReadBodyFileInfo(int nFile, CBodyFileInfo &info) {
     return Read(std::make_pair(DB_BODY_FILES, nFile), info);
 }
@@ -245,7 +235,9 @@ void CCoinsViewDBCursor::Next() {
 }
 
 bool CBlockTreeDB::WriteBatchSync(const std::vector <std::pair<int, const CBlockFileInfo *>> &fileInfo, int nLastFile,
-                                  const std::vector<const CBlockIndex *> &blockinfo) {
+                                  const std::vector<const CBlockIndex *> &blockinfo,
+                                  const std::vector <std::pair<int, const CBodyFileInfo *>> &bodyFileInfo,
+                                  int nLastBodyFile) {
     CDBBatch batch(*this);
     for (std::vector<std::pair<int, const CBlockFileInfo *> >::const_iterator it = fileInfo.begin();
          it != fileInfo.end(); it++) {
@@ -254,6 +246,19 @@ bool CBlockTreeDB::WriteBatchSync(const std::vector <std::pair<int, const CBlock
     batch.Write(DB_LAST_BLOCK, nLastFile);
     for (std::vector<const CBlockIndex *>::const_iterator it = blockinfo.begin(); it != blockinfo.end(); it++) {
         batch.Write(std::make_pair(DB_BLOCK_INDEX, (*it)->GetBlockHash()), CDiskBlockIndex(*it));
+    }
+    // F-132: folded into this same atomic batch rather than a separate,
+    // independently-timed one -- see this function's own declaration (txdb.h)
+    // for why. nLastBodyFile's sentinel default (-1) means "the caller has no
+    // real body-file state to report" (the one untouched call site, the
+    // pre-1.3 bodiesmigrated migration in validation.cpp) -- skip both writes
+    // entirely rather than persist a fabricated 0 that would stomp a real,
+    // already-persisted last-body-file value.
+    if (nLastBodyFile >= 0) {
+        for (const auto &entry : bodyFileInfo) {
+            batch.Write(std::make_pair(DB_BODY_FILES, entry.first), *entry.second);
+        }
+        batch.Write(DB_LAST_BODY_FILE, nLastBodyFile);
     }
     return WriteBatch(batch, true);
 }

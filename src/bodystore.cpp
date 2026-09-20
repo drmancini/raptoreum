@@ -29,8 +29,8 @@ namespace {
     RecursiveMutex cs_LastBodyFile;
 
     // 2.1.1: in-memory. 2.1.2: persisted via pblocktree (LoadBodyFileInfo/
-    // FlushBodyFileInfo below) -- see bodystore.h's file-level comment for what
-    // "persisted" does and doesn't mean yet.
+    // GetDirtyBodyFileInfo below) -- see bodystore.h's file-level comment for
+    // what "persisted" does and doesn't mean yet.
     std::vector<CBodyFileInfo> vinfoBodyFile GUARDED_BY(cs_LastBodyFile);
     int nLastBodyFile GUARDED_BY(cs_LastBodyFile) = 0;
     std::set<int> setDirtyBodyFileInfo GUARDED_BY(cs_LastBodyFile);
@@ -261,24 +261,16 @@ bool LoadBodyFileInfo() {
     return true;
 }
 
-bool FlushBodyFileInfo() {
+void GetDirtyBodyFileInfo(std::vector<std::pair<int, const CBodyFileInfo *>> &vFilesOut, int &nLastFileOut) {
     LOCK(cs_LastBodyFile);
 
-    if (setDirtyBodyFileInfo.empty()) {
-        return true;
+    vFilesOut.clear();
+    vFilesOut.reserve(setDirtyBodyFileInfo.size());
+    for (std::set<int>::iterator it = setDirtyBodyFileInfo.begin(); it != setDirtyBodyFileInfo.end();) {
+        vFilesOut.emplace_back(*it, &vinfoBodyFile[*it]);
+        setDirtyBodyFileInfo.erase(it++);
     }
-
-    std::vector<std::pair<int, const CBodyFileInfo *>> vFiles;
-    vFiles.reserve(setDirtyBodyFileInfo.size());
-    for (int nFile : setDirtyBodyFileInfo) {
-        vFiles.emplace_back(nFile, &vinfoBodyFile[nFile]);
-    }
-    if (!pblocktree->WriteBodyFileInfoBatch(vFiles, nLastBodyFile)) {
-        return error("FlushBodyFileInfo: WriteBodyFileInfoBatch failed");
-    }
-    setDirtyBodyFileInfo.clear();
-
-    return true;
+    nLastFileOut = nLastBodyFile;
 }
 
 void TestOnlyResetBodyFileState() {
