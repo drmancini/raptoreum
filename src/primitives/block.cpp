@@ -138,6 +138,9 @@ bool MaterialiseBlock(const CCommitmentBlock &commitments,
         }
         blockOut.vtx.push_back(bodies[i]);
     }
-    assert(!blockOut.fChecked);
+    // C4 (Fable review, F-121, 2026-09-19): the assert this replaced
+    // (!blockOut.fChecked) was tautological -- blockOut is a freshly
+    // constructed CBlock() a few lines above, whose constructor already sets
+    // fChecked = false, and nothing between there and here touches it.
     return true;
 }

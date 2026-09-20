@@ -103,9 +103,11 @@ BOOST_CHECK_EQUAL(nDoS,
 // to GetLegacySigOpCount and GetP2SHSigOpCount alike -- the real CHECKMULTISIG
 // lives in the prevout's own scriptPubKey. GetAccurateSigOpCount closes that
 // (src/consensus/tx_verify.cpp), but the miner reads its block-assembly sigop
-// budget from the MEMPOOL ENTRY's stored count (miner.cpp:315), set once at
-// ATMP time -- so wiring has to happen exactly here, or the accurate counter
-// exists but never reaches the path that matters. g_commitmentBudgetActive
+// budget from the MEMPOOL ENTRY's stored count (BlockAssembler::TestPackage's
+// packageSigOps check, miner.cpp -- C3, named by symbol since this line-number
+// citation had already drifted once), set once at ATMP time -- so wiring has
+// to happen exactly here, or the accurate counter exists but never reaches
+// the path that matters. g_commitmentBudgetActive
 // (test-only until 4.6 has a real activation bit) switches which counter ATMP
 // stores; this proves the switch actually reaches a real mempool entry.
 BOOST_FIXTURE_TEST_CASE(mempool_entry_uses_accurate_sigops_when_budget_active, TestChain100Setup) {

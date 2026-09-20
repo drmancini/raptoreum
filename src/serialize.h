@@ -181,11 +181,6 @@ enum {
     SER_NETWORK = (1 << 0),
     SER_DISK = (1 << 1),
     SER_GETHASH = (1 << 2),
-    /** Transaction decoupling: a block is carried as its coinbase in full plus one
-     *  32-byte identifier per remaining transaction. A stream flag and not a header
-     *  bit, because whether a peer can read this form is a property of the
-     *  connection (negotiated by service bit), not of the block. */
-    SER_COMMITMENTS = (1 << 3),
 };
 
 //! Convert the reference base type to X, without changing constness or reference type.

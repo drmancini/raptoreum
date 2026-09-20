@@ -319,9 +319,12 @@ enum ServiceFlags : uint64_t {
     //
     // Like every service bit this is an UNAUTHENTICATED advertisement. A peer may
     // claim it and send nonsense, so nothing may be trusted on the strength of the
-    // bit alone -- it decides only which serialization we offer, never whether what
-    // comes back is believed. Every identifier is checked against the body that
-    // arrives for it (see MaterialiseBlock).
+    // bit alone -- it decides only whether we may OFFER a peer the commitment form
+    // (CanReceiveCommitments) and the SENDCOMMITMENTS handshake (C3, corrected:
+    // not "which serialization", a retracted stream-flag-selector framing this bit
+    // never actually implemented), never whether what comes back is believed.
+    // Every identifier is checked against the body that arrives for it (see
+    // MaterialiseBlock).
     NODE_COMMITMENTS = (1 << 24),
 
     // Bits 24-31 are reserved for temporary experiments. Just pick a bit that
@@ -392,11 +395,6 @@ static inline bool HasAllDesirableServiceFlags(ServiceFlags services) {
  */
 static inline bool CanReceiveCommitments(ServiceFlags services) {
     return (services & NODE_COMMITMENTS);
-}
-
-/** The stream flags to serialize a block with, for a given peer. */
-static inline int BlockSerFlagsFor(ServiceFlags services) {
-    return CanReceiveCommitments(services) ? (SER_NETWORK | SER_COMMITMENTS) : SER_NETWORK;
 }
 
 /**

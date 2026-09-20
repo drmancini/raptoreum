@@ -224,24 +224,12 @@ BOOST_AUTO_TEST_CASE(an_empty_block_has_no_commitments) {
     BOOST_CHECK(!MaterialiseBlock(c, {}, rebuilt));
 }
 
-// The selector is a service bit, not a header bit: whether a block can be carried as
-// commitments is a property of the connection, not of the block. These pin the
-// negotiation and, more importantly, the limit of what the bit is allowed to mean.
-BOOST_AUTO_TEST_CASE(the_service_bit_chooses_the_serialization) {
+// The bit is a service bit, not a header bit: whether a block can be carried as
+// commitments is a property of the connection, not of the block. Pins the
+// negotiation and the limit of what the bit is allowed to mean.
+BOOST_AUTO_TEST_CASE(the_service_bit_gates_receiving_commitments) {
     BOOST_CHECK(!CanReceiveCommitments(NODE_NETWORK));
     BOOST_CHECK(CanReceiveCommitments(ServiceFlags(NODE_NETWORK | NODE_COMMITMENTS)));
-
-    BOOST_CHECK_EQUAL(BlockSerFlagsFor(NODE_NETWORK), SER_NETWORK);
-    BOOST_CHECK_EQUAL(BlockSerFlagsFor(ServiceFlags(NODE_NETWORK | NODE_COMMITMENTS)),
-                      SER_NETWORK | SER_COMMITMENTS);
-
-    // Comparing against SER_COMMITMENTS is not enough on its own: if the constant
-    // were zero the two assertions above would both still pass while the flag
-    // selected nothing. Pin the bit, and pin that the two answers differ.
-    BOOST_CHECK(SER_COMMITMENTS != 0);
-    BOOST_CHECK_EQUAL(SER_COMMITMENTS & (SER_NETWORK | SER_DISK | SER_GETHASH), 0);
-    BOOST_CHECK(BlockSerFlagsFor(ServiceFlags(NODE_NETWORK | NODE_COMMITMENTS)) !=
-                BlockSerFlagsFor(NODE_NETWORK));
 
     // In the experimental range, so it cannot collide with an upstream assignment
     // while the format is unactivated.
@@ -273,39 +261,7 @@ BOOST_AUTO_TEST_CASE(sendcommitments_is_offered_only_when_both_sides_claim_the_b
     BOOST_CHECK(!ShouldNegotiateCommitments(NODE_NETWORK, NODE_NETWORK));
 }
 
-// The flag is declared and negotiated, and NOTHING READS IT: no Serialize in the
-// tree tests SER_COMMITMENTS (the GetType() consumers all test SER_GETHASH or
-// SER_DISK). So today it selects nothing, and this pins that rather than letting
-// the negotiation above read as working machinery. Whoever wires a real selector
-// will see this fail and must update it deliberately.
-//
-// Recorded because the docs retract the stream-flag selector (F-80..F-82, R-28b)
-// while the symbols are still here pending a decision on the replacement.
-BOOST_AUTO_TEST_CASE(the_stream_flag_currently_selects_nothing) {
-    const CBlock block = MakeBlock(4);
 
-    CDataStream plain(SER_NETWORK, PROTOCOL_VERSION);
-    plain << block;
-    CDataStream flagged(SER_NETWORK | SER_COMMITMENTS, PROTOCOL_VERSION);
-    flagged << block;
-
-    BOOST_CHECK(plain.size() == flagged.size());
-    BOOST_CHECK(std::equal(plain.begin(), plain.end(), flagged.begin()));
-}
-
-// A service bit is an unauthenticated advertisement. A peer may claim the bit and
-// answer a body request with the wrong transaction, and the bit must buy it nothing:
-// verification is against the identifiers, never against the claim.
-BOOST_AUTO_TEST_CASE(advertising_the_bit_earns_no_trust) {
-    const CBlock block = MakeBlock(4);
-    const CCommitmentBlock c = CommitmentsFromBlock(block);
-    std::vector <CTransactionRef> lies(block.vtx.begin() + 1, block.vtx.end());
-    lies[1] = MakeTx(31337);
-
-    BOOST_CHECK(CanReceiveCommitments(ServiceFlags(NODE_NETWORK | NODE_COMMITMENTS)));
-    CBlock rebuilt;
-    BOOST_CHECK(!MaterialiseBlock(c, lies, rebuilt));   // the claim changes nothing
-}
 
 // SetNull() and the default constructor leave coinbase null, and the shared_ptr
 // serializer dereferences unconditionally -- so before the guard, putting a

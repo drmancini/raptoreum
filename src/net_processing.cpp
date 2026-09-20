@@ -848,9 +848,9 @@ namespace {
                                 if (!fBehindGap && pindex->HaveTxsDownloaded())
                                     state->pindexLastCommonBlock = pindex;
                                 // 1.3.6 (H-2): resolved -- forget any backoff state for it.
-                                if (!g_body_retry_state.empty()) {
-                                    g_body_retry_state.erase(pindex->GetBlockHash());
-                                }
+                                // L-5 (F-119, full-arc adversarial review): erase() on a key the map
+                                // doesn't hold (map empty or otherwise) is already a safe no-op.
+                                g_body_retry_state.erase(pindex->GetBlockHash());
                             } else if (mapBlocksInFlight.count(pindex->GetBlockHash()) == 0) {
                                 // The block is not already downloaded, and not yet in flight.
                                 fBehindGap = true;

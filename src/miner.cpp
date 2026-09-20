@@ -95,10 +95,18 @@ BlockAssembler::BlockAssembler(const CTxMemPool &mempool, const CChainParams &pa
         : chainparams(params), m_mempool(mempool) {
     blockMinFeeRate = options.blockMinFeeRate;
     // Limit size to between 1K and MaxBlockSize()-1K for sanity. Under the
-    // commitment budget the consensus ceiling is the body-byte budget
-    // (1.2, Mike), not the byte-indexed legacy cap -- clamping against the
-    // old, much smaller ceiling here would silently stop the miner from
-    // filling toward the new one.
+    // commitment budget the CONSENSUS ceiling is the body-byte budget (1.2,
+    // Mike), not the byte-indexed legacy cap -- clamping against the old,
+    // much smaller ceiling here would silently stop the miner from filling
+    // toward the new one.
+    //
+    // B5 (F-120, Fable review, 2026-09-19): that raises what this clamp ALLOWS, not
+    // what a default node actually fills toward -- options.nBlockMaxSize
+    // (DefaultOptions(), below) is still DEFAULT_BLOCK_MAX_SIZE (2,000,000),
+    // the std::min's other operand, unless an operator explicitly raises
+    // -blockmaxsize. A default miner keeps building ~2 MB blocks with the
+    // budget active; it does not grow toward the 8 MB consensus ceiling on
+    // its own.
     nBlockMaxSize = std::max((unsigned int) 1000,
                              std::min((unsigned int) (MaxBlockSize(fDIP0001ActiveAtTip, g_commitmentBudgetActive) - 1000),
                                       (unsigned int) options.nBlockMaxSize));
@@ -305,7 +313,7 @@ bool BlockAssembler::TestPackage(uint64_t packageSize, unsigned int packageSigOp
     // This is ONLY a pre-filter: it can under-count a package whose
     // unconfirmed ancestors carry more inputs than the candidate alone, so
     // addPackageTxs() re-checks the exact aggregate over the whole resolved
-    // ancestor set before actually committing to it (F1, Fable review,
+    // ancestor set before actually committing to it (F-99, Fable review,
     // 2026-09-19) -- an under-count surviving to that point would otherwise
     // make CreateNewBlock's TestBlockValidity call throw, and every caller
     // (getblocktemplate, generateBlocks) rebuilds from the same mempool and
@@ -511,7 +519,7 @@ void BlockAssembler::addPackageTxs(int &nPackagesSelected, int &nDescendantsUpda
         onlyUnconfirmed(ancestors);
         ancestors.insert(iter);
 
-        // 1.2 (F1, Fable adversarial review, 2026-09-19): TestPackage's own-
+        // 1.2 (F-99, Fable adversarial review, 2026-09-19): TestPackage's own-
         // count-only pre-check can pass a candidate whose UNCONFIRMED
         // ANCESTORS push the whole package over the input budget once all of
         // them are added -- CreateNewBlock's TestBlockValidity call would

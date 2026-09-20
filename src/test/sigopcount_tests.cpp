@@ -252,32 +252,14 @@ BOOST_AUTO_TEST_CASE(checkdatasig_is_counted_by_the_accurate_counters) {
 
 // F1 (Fable review of R-33, 2026-09-19): the view-less CheckBlock/ContextualCheckBlock
 // pre-checks kept using GetLegacySigOpCount under the commitment budget, on the
-// assumption that legacy always UNDER-counts relative to GetAccurateSigOpCount --
-// true for a bare multisig SPEND (F-13's own hole), false for a bare multisig
-// OUTPUT the transaction creates: GetSigOpCount(false) charges MAX_PUBKEYS_PER_MULTISIG
-// (20) for every CHECKMULTISIG regardless of the real key count. A miner filling to
-// the accurate 250,000 budget can build a block CheckBlock's legacy pre-check then
-// rejects as over budget, at a much smaller true sigop count -- stalling block
-// production. GetAccurateOwnSigOpCount is the view-less fix: the same "own
-// scriptSig/created-output" term GetAccurateSigOpCount uses, computable without a
-// UTXO view, so the two view-less sites can be corrected without needing coins access.
-BOOST_AUTO_TEST_CASE(legacy_drastically_overcounts_a_small_created_multisig_output) {
-    std::vector<CPubKey> keys = MakeKeys(3);
-    CScript bareMultisig = GetScriptForMultisig(1, keys);   // 1-of-3: 3 real sigops
-
-    CMutableTransaction tx;
-    tx.vin.resize(1);
-    tx.vin[0].scriptSig << OP_TRUE;   // irrelevant to this check
-    tx.vout.resize(1);
-    tx.vout[0].scriptPubKey = bareMultisig;
-
-    const CTransaction ctx(tx);
-    BOOST_CHECK_EQUAL(GetLegacySigOpCount(ctx), 20U);        // the bug: MAX_PUBKEYS_PER_MULTISIG
-    BOOST_CHECK_EQUAL(GetAccurateOwnSigOpCount(ctx), 3U);    // the fix: the real count
-}
-
+// B6 (F-121, full-arc adversarial review): a standalone N=3 case used to sit
+// here (legacy_drastically_overcounts_a_small_created_multisig_output) -- the
+// exact bare-multisig-output sub-case the matrix test below already sweeps at
+// n=3, among every other N from 1 to 16. Removed as redundant; the matrix
+// below is strictly more thorough, not merely equivalent.
+//
 // Characterisation matrix (2026-09-19): a systematic sweep across multisig
-// size, not a handful of hand-picked points. F1 (legacy overcounting a small
+// size, not a handful of hand-picked points. F-95 (legacy overcounting a small
 // created multisig output) existed at EVERY N from 1 to 16 and none of the
 // tests above -- each written for one specific scenario -- happened to sweep
 // N far enough to notice. Every expected value below is derived by hand from
