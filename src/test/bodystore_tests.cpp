@@ -2,9 +2,10 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-// 2.1.1: the body-store record format and file series, in isolation --
-// nothing here touches CBlockIndex or AcceptBlock yet (that's a later 2.1
-// step). See bodystore.h for the design.
+// 2.1.1-2.1.3: the body-store record format and file series (2.1.1), its
+// persistence via pblocktree (2.1.2), and CBlockIndex's own body-record
+// position fields (2.1.3) -- nothing here touches AcceptBlock yet (that's
+// 2.1.4). See bodystore.h for the design.
 
 #include <bodystore.h>
 #include <chain.h>
@@ -33,7 +34,7 @@ extern std::unique_ptr<CBlockTreeDB> pblocktree;
 // left behind by whichever earlier test last set one, which by the time this
 // suite runs has already been deleted by that test's own teardown -- or,
 // worse, GetBlocksDir() falls back to the real default datadir and this suite
-// writes into it (2.1.1 review finding #7 -- confirmed: an earlier run of
+// writes into it (F-127 -- confirmed: an earlier run of
 // this exact file, before this fixture existed, wrote real bdy*.dat files
 // into a live node's own blocks/ directory).
 //
@@ -46,11 +47,16 @@ struct BodyStoreTestingSetup : public BasicTestingSetup {
         ClearDatadirCache();
         pblocktree.reset(new CBlockTreeDB(1 << 20, /*fMemory=*/true));
     }
+
+    // Symmetry with TestingSetup::~TestingSetup (test_raptoreum.cpp), which
+    // also resets pblocktree on teardown -- without this, this fixture's own
+    // in-memory CBlockTreeDB outlives it until some other fixture replaces it.
+    ~BodyStoreTestingSetup() { pblocktree.reset(); }
 };
 
 BOOST_FIXTURE_TEST_SUITE(bodystore_tests, BodyStoreTestingSetup)
 
-// 2.1.1 review finding #6: every transaction the same length lets a
+// F-127: every transaction the same length lets a
 // write-side mutant (e.g. an offset table computed from the wrong body's
 // size) pass every test, since any plausible wrong table equals the right
 // one when all bodies are equal-sized. Padding scriptPubKey by `nonce` bytes
@@ -133,7 +139,7 @@ BOOST_AUTO_TEST_CASE(read_body_at_returns_the_correct_transaction_for_every_inde
     }
 }
 
-// 2.1.1 review finding #3/#10: proves ReadBodyAt genuinely seeks past earlier
+// F-127: proves ReadBodyAt genuinely seeks past earlier
 // bodies rather than deserializing (and so depending on) them -- corrupt body
 // 0's on-disk bytes after writing, then read body 2 and confirm it is still
 // exactly right. A sequential-decode implementation would throw or return
@@ -170,7 +176,7 @@ BOOST_AUTO_TEST_CASE(read_body_at_rejects_an_out_of_range_index) {
     BOOST_CHECK(!ReadBodyAt(pos, 100, txOut));
 }
 
-// 2.1.1 review finding #5: GetBodyRecordSerializedSize must produce exactly
+// F-127: GetBodyRecordSerializedSize must produce exactly
 // what WriteBodyRecord writes, or a caller relying on it to size FindBodyPos
 // (every test in this file, and eventually 2.1.4) silently overlaps the next
 // record.
@@ -193,7 +199,7 @@ BOOST_AUTO_TEST_CASE(serialized_size_matches_what_write_actually_writes) {
 
 // Two records back to back must not collide -- the self-delimiting property
 // every design doc / commit message claims and nothing previously exercised
-// (2.1.1 review finding #5).
+// (F-127).
 BOOST_AUTO_TEST_CASE(adjacent_records_do_not_overlap) {
     std::vector<CTransactionRef> bodiesA = MakeBodies(4);
     std::vector<CTransactionRef> bodiesB = MakeBodies(6);
@@ -214,7 +220,7 @@ BOOST_AUTO_TEST_CASE(adjacent_records_do_not_overlap) {
         BOOST_CHECK_EQUAL(outB[i]->GetHash().ToString(), bodiesB[i]->GetHash().ToString());
 }
 
-// 2.1.1 review finding #1: offsets used to be CompactSize, which
+// F-127: offsets used to be CompactSize, which
 // ReadCompactSize refuses above 32 MiB (serialize.h's MAX_SIZE) -- well under
 // COMMITMENT_BUDGET_BODY_BYTES (110 MB), so every record over 32 MiB of
 // bodies was unreadable. One small transaction plus one large one crosses
@@ -272,7 +278,7 @@ BOOST_AUTO_TEST_CASE(find_body_pos_is_contiguous_within_one_file) {
 // a write that would reach MAX_BODYFILE_SIZE starts a fresh file at position 0
 // rather than splitting a record across two files. Pinned exactly (not just
 // "some later file, position 0") so a `>` mutant of the `>=` rollover
-// condition cannot survive (2.1.1 review finding #8).
+// condition cannot survive (F-127).
 BOOST_AUTO_TEST_CASE(find_body_pos_rolls_over_to_a_new_file_once_the_current_one_would_reach_the_limit) {
     // FindBodyPos's bookkeeping is process-global (bodystore.cpp's anonymous
     // namespace), shared across every test case in this suite in file order --
@@ -298,7 +304,7 @@ BOOST_AUTO_TEST_CASE(find_body_pos_rolls_over_to_a_new_file_once_the_current_one
     BOOST_CHECK_EQUAL(c.nFile, a.nFile + 1);
     BOOST_CHECK_EQUAL(c.nPos, 0U);
 
-    // 2.1.1 review finding #4: the file just left behind (a.nFile) must be
+    // F-127: the file just left behind (a.nFile) must be
     // truncated to its actual used size, not left at its full chunk-sized
     // preallocation forever -- FindBlockPos's own FlushBlockFile(finalize=true)
     // does this for blk*.dat, and the leaked bdy*.dat files this same review
@@ -313,7 +319,7 @@ BOOST_AUTO_TEST_CASE(find_body_pos_rolls_over_to_a_new_file_once_the_current_one
     BOOST_CHECK_EQUAL((uint64_t) finishedFileSize, (uint64_t) (MAX_BODYFILE_SIZE - 100 + 99));
 }
 
-// 2.1.1 review finding #11: a corrupt or adversarial count must not drive an
+// F-127: a corrupt or adversarial count must not drive an
 // oversized allocation before a single real offset is read.
 BOOST_AUTO_TEST_CASE(read_body_record_header_rejects_an_implausible_count) {
     FlatFilePos pos;
@@ -335,7 +341,7 @@ BOOST_AUTO_TEST_CASE(read_body_record_header_rejects_an_implausible_count) {
     BOOST_CHECK(!ReadBodyAt(pos, 0, txOut));
 }
 
-// 2.1.1 review finding #2: an nAddSize that could never fit in one file must
+// F-127: an nAddSize that could never fit in one file must
 // fail loudly rather than looping forever trying to roll over.
 BOOST_AUTO_TEST_CASE(find_body_pos_rejects_a_write_that_could_never_fit_in_one_file) {
     FlatFilePos pos;
@@ -358,12 +364,32 @@ BOOST_AUTO_TEST_CASE(load_body_file_info_is_safe_on_an_empty_database) {
 // The point of 2.1.2: FindBodyPos must continue from where a previous run
 // left off, not silently restart at file 0 / position 0 and overwrite real
 // data already there.
+// 2.1.2/2.1.3 review: the original version of this test never left file 0, so
+// it couldn't tell a correctly-persisted nLastBodyFile from one hardcoded to
+// 0 -- multiple real mutants of LoadBodyFileInfo/FlushBodyFileInfo (dropping
+// the ReadLastBodyFile call, persisting a constant instead of the real last
+// file, or only reloading the LAST file's own size) all still passed it. This
+// version forces a genuine rollover to file 1 first -- the actual steady
+// state of a real node, once the first ~128 MiB fills -- so "continues from
+// the persisted position" is only true if every piece of 2.1.2's persistence
+// actually worked, not merely if file 0 happens to still be current.
 BOOST_AUTO_TEST_CASE(find_body_pos_continues_after_a_simulated_restart) {
     TestOnlyResetBodyFileState();
     BOOST_REQUIRE(LoadBodyFileInfo());
 
+    // Fill file 0 to 1 byte short of the limit, then write a real record that
+    // can only fit by rolling into a fresh file 1.
+    FlatFilePos fillPos;
+    BOOST_REQUIRE(FindBodyPos(fillPos, MAX_BODYFILE_SIZE - 1));
+    BOOST_REQUIRE_EQUAL(fillPos.nFile, 0);
+
     std::vector<CTransactionRef> bodies = MakeBodies(4);
-    FlatFilePos posBefore = WriteBodies(bodies);
+    uint64_t recordSize = GetBodyRecordSerializedSize(bodies);
+    FlatFilePos posBefore;
+    BOOST_REQUIRE(FindBodyPos(posBefore, (unsigned int) recordSize));
+    BOOST_REQUIRE_EQUAL(posBefore.nFile, 1);
+    BOOST_REQUIRE_EQUAL(posBefore.nPos, 0U);
+    BOOST_REQUIRE(WriteBodyRecord(posBefore, bodies));
     BOOST_REQUIRE(FlushBodyFileInfo());
 
     // Simulate a restart: the in-memory bookkeeping is gone, only what was
@@ -371,10 +397,17 @@ BOOST_AUTO_TEST_CASE(find_body_pos_continues_after_a_simulated_restart) {
     TestOnlyResetBodyFileState();
     BOOST_REQUIRE(LoadBodyFileInfo());
 
+    // File 0's own size must have survived too, not just the last file's --
+    // LoadBodyFileInfo reads every file 0..nLastBodyFile, and this is the
+    // only way that's observable (FindBodyPos itself never looks at a file
+    // it isn't currently writing into).
+    BOOST_CHECK_EQUAL(TestOnlyGetBodyFileSize(0), MAX_BODYFILE_SIZE - 1);
+    BOOST_CHECK_EQUAL(TestOnlyGetBodyFileSize(1), (unsigned int) recordSize);
+
     FlatFilePos posAfter;
     BOOST_REQUIRE(FindBodyPos(posAfter, 1));
     BOOST_CHECK_EQUAL(posAfter.nFile, posBefore.nFile);
-    BOOST_CHECK_EQUAL(posAfter.nPos, posBefore.nPos + GetBodyRecordSerializedSize(bodies));
+    BOOST_CHECK_EQUAL(posAfter.nPos, posBefore.nPos + recordSize);
 
     // And the record written before the "restart" is still there and correct
     // -- the reset/reload only affects in-memory bookkeeping, never the bytes

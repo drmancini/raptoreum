@@ -27,9 +27,13 @@
  *  FlushBodyFileInfo below), on CBlockFileInfo's own pattern, so FindBodyPos can
  *  survive a restart -- callable and correct, but not yet auto-invoked at real
  *  startup/shutdown (that's wired in alongside 2.1.4, when AcceptBlock actually
- *  calls into this module and a real restart has something to lose).
- *  Still ahead: 2.1.3 (CBlockIndex nBodyFile/nBodyPos + a migration), 2.1.4
- *  (wire the write into AcceptBlock). */
+ *  calls into this module and a real restart has something to lose). See
+ *  WriteBodyFileInfoBatch's own doc (txdb.h) for a real ordering hazard 2.1.4
+ *  must resolve before writing anything for real.
+ *  2.1.3 scope: CBlockIndex nBodyFile/nBodyPos + BLOCK_HAVE_BODY_RECORD
+ *  (chain.h) -- turned out to need NO migration (a fresh status bit, false for
+ *  every existing entry, decodes correctly without one).
+ *  Still ahead: 2.1.4 (wire the write into AcceptBlock). */
 
 /** Persistent per-body-file bookkeeping -- the FindBodyPos analogue of
  *  CBlockFileInfo (chain.h), persisted the same way via pblocktree. Simpler
@@ -68,7 +72,7 @@ static const unsigned int MAX_BODYFILE_SIZE = 0x8000000; // 128 MiB
 // smallest legal transaction), that's ~4.6 MB of offsets on top of
 // COMMITMENT_BUDGET_BODY_BYTES -- comfortably under MAX_BODYFILE_SIZE, but
 // checked at compile time so a future budget raise fails loudly instead of
-// making FindBodyPos loop forever (2.1.1 review finding #2).
+// making FindBodyPos loop forever (F-127).
 static_assert((uint64_t) COMMITMENT_BUDGET_BODY_BYTES +
               (uint64_t) COMMITMENT_BUDGET_MAX_INPUTS * 4 + 16 < MAX_BODYFILE_SIZE,
               "a full body record must fit in one body file with room to spare");
@@ -97,7 +101,9 @@ uint64_t GetBodyRecordSerializedSize(const std::vector<CTransactionRef> &bodies)
  *  file (FindBlockPos's own FlushBlockFile(finalize=true) call), so a rolled
  *  file doesn't keep its full chunk-sized preallocation forever. Returns false
  *  without allocating anything if nAddSize alone could never fit in one file.
- *  In-memory only for now (2.1.1) -- see the file-level comment above. */
+ *  Bookkeeping persists via LoadBodyFileInfo/FlushBodyFileInfo below (2.1.2)
+ *  once a caller invokes them -- see the file-level comment above for what's
+ *  still not wired to a real startup/shutdown. */
 bool FindBodyPos(FlatFilePos &pos, unsigned int nAddSize);
 
 /** Write one block's worth of bodies as a self-delimiting record at `pos`:
@@ -105,7 +111,7 @@ bool FindBodyPos(FlatFilePos &pos, unsigned int nAddSize);
  *  bytes...]. Offsets are fixed-width, not CompactSize -- serialize.h's
  *  ReadCompactSize refuses anything over MAX_SIZE (32 MiB), well under
  *  COMMITMENT_BUDGET_BODY_BYTES (110 MB), which made every record over 32 MiB
- *  of bodies unreadable (2.1.1 review finding #1). The offset table is what
+ *  of bodies unreadable (F-127). The offset table is what
  *  makes ReadBodyAt (below) a direct seek instead of a sequential decode from
  *  the start -- transaction-decoupling.md §5.2's (height, index) addressing
  *  needs exactly this. `pos` must come from FindBodyPos with nAddSize equal to
@@ -141,5 +147,13 @@ bool FlushBodyFileInfo();
  *  that must reload from pblocktree via LoadBodyFileInfo(). Never called from
  *  production code. */
 void TestOnlyResetBodyFileState();
+
+/** Test-only: the in-memory size LoadBodyFileInfo/FindBodyPos currently hold
+ *  for body file `nFile`, or 0 if it's never been touched. LoadBodyFileInfo
+ *  itself reads every file 0..nLastBodyFile from pblocktree, not just the
+ *  last one -- this is what makes that actually observable in a test, since
+ *  FindBodyPos alone only ever consults the LAST file to decide where to
+ *  write next. */
+unsigned int TestOnlyGetBodyFileSize(int nFile);
 
 #endif // BITCOIN_BODYSTORE_H

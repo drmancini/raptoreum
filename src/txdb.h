@@ -118,9 +118,30 @@ public:
 
     bool ReadLastBlockFile(int &nFile);
 
-    // 2.1.2: the body-file series' own analogue of the pair above, persisted
-    // independently since body-file bookkeeping has nothing to do with a
-    // block-index flush's own atomicity requirements.
+    // 2.1.2: the body-file series' own analogue of the pair above.
+    //
+    // CORRECTED (2.1.2/2.1.3 review): this was first justified as "body-file
+    // bookkeeping has nothing to do with a block-index flush's own atomicity
+    // requirements" -- true only while nothing referenced a body position from
+    // the block index. Since 2.1.3, CDiskBlockIndex persists nBodyFile/nBodyPos,
+    // which is exactly the coupling WriteBatchSync exists for: FlushStateToDisk
+    // (validation.cpp) calls FlushBlockFile() then writes block-file-info,
+    // last-file and every dirty CBlockIndex in ONE atomic batch, so an index
+    // entry can never be durable while the file-size bookkeeping that protects
+    // its bytes from being overwritten is not. A separate, independently-timed
+    // batch for body-file info reopens that exact hazard: if an index entry
+    // naming (f, p) becomes durable before FlushBodyFileInfo persists that
+    // vinfoBodyFile[f].nSize covers p, a crash in between leaves LoadBodyFileInfo
+    // reloading a STALE (smaller) nSize on restart -- the next FindBodyPos call
+    // then hands out position p again and WriteBodyRecord silently overwrites
+    // the very record the surviving index entry points at.
+    //
+    // NOT YET A BUG: nothing writes a real body-store record before 2.1.4.
+    // Whoever wires 2.1.4 must resolve this before any real write path exists --
+    // either fold body-file info into WriteBatchSync's own batch (one flush, no
+    // ordering to get wrong), or keep this separate call but enforce the order
+    // FlushBodyFile(current) -> FlushBodyFileInfo() -> WriteBatchSync(index) and
+    // never the reverse. Recorded, not decided, here.
     bool WriteBodyFileInfoBatch(const std::vector <std::pair<int, const CBodyFileInfo *>> &fileInfo, int nLastFile);
 
     bool ReadBodyFileInfo(int nFile, CBodyFileInfo &info);
