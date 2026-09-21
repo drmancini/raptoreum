@@ -261,6 +261,21 @@ bool LoadBodyFileInfo() {
     return true;
 }
 
+bool FlushBodyFile(bool fFinalize) {
+    LOCK(cs_LastBodyFile);
+
+    // F-133: before LoadBodyFileInfo has ever run (or on a freshly reset
+    // test fixture), vinfoBodyFile is empty and there is no current file to
+    // flush -- indexing vinfoBodyFile[nLastBodyFile] here would be UB, not a
+    // caught error, since operator[] does not bounds-check.
+    if (vinfoBodyFile.empty()) {
+        return true;
+    }
+
+    FlatFilePos pos((int) nLastBodyFile, vinfoBodyFile[nLastBodyFile].nSize);
+    return BodyFileSeq().Flush(pos, fFinalize);
+}
+
 void GetDirtyBodyFileInfo(std::vector<std::pair<int, CBodyFileInfo>> &vFilesOut, int &nLastFileOut) {
     LOCK(cs_LastBodyFile);
 
@@ -275,7 +290,15 @@ void GetDirtyBodyFileInfo(std::vector<std::pair<int, CBodyFileInfo>> &vFilesOut,
 
 void TestOnlyResetBodyFileState() {
     LOCK(cs_LastBodyFile);
-    vinfoBodyFile.clear();
+    // F-133 review: vector::clear() drops elements but keeps capacity, so in
+    // this shared-process test binary a "reset" vinfoBodyFile can still have
+    // real (if logically removed) CBodyFileInfo objects sitting in its old
+    // buffer from an earlier test case -- indexing past size() then reads
+    // stale-but-plausible data instead of reliably faulting, which is not
+    // what "simulate a fresh process" is supposed to mean. Assignment from a
+    // temporary gives a true zero-capacity vector, matching a genuinely
+    // fresh process's own default-constructed global.
+    vinfoBodyFile = std::vector<CBodyFileInfo>();
     nLastBodyFile = 0;
     setDirtyBodyFileInfo.clear();
 }

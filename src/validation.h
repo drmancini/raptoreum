@@ -965,9 +965,16 @@ private:
      * signal for that instead. The transaction count, the cumulative count and
      * the block's eligibility to be a chain candidate are all commitment-level
      * facts and are recorded either way; BLOCK_HAVE_BODIES (via `bodies_held`)
-     * is body-level and is not. */
+     * is body-level and is not.
+     *
+     * 2.1.4: `bodyPos` is likewise always a valid FlatFilePos -- SaveBodyToDisk
+     * writes the body-store record unconditionally, mirroring SaveBlockToDisk's
+     * own unconditional write of the commitment block (F-131's -reindex
+     * decision: the write path must not special-case withheld/reindexed
+     * accepts). `bodies_held` alone gates whether BLOCK_HAVE_BODY_RECORD is
+     * set, exactly paralleling BLOCK_HAVE_BODIES. */
     void ReceivedBlockTransactions(const CBlock &block, CValidationState &state, CBlockIndex *pindexNew,
-                                   const FlatFilePos &pos, bool bodies_held);
+                                   const FlatFilePos &pos, const FlatFilePos &bodyPos, bool bodies_held);
 
     bool RollforwardBlock(const CBlockIndex *pindex, CCoinsViewCache &inputs, const CChainParams &params,
                           CAssetsCache *assetsCache);

@@ -2941,6 +2941,15 @@ bool CChainState::FlushStateToDisk(const CChainParams &chainparams, CValidationS
                 }
                 // First make sure all block and undo data is flushed to disk.
                 FlushBlockFile();
+                // F-133: the body-store's own equivalent -- must happen before
+                // the body-file-info batch below goes durable, exactly the
+                // same ordering requirement FlushBlockFile satisfies for
+                // blk*.dat/rev*.dat, or a crash right after that batch is
+                // durable can leave an index entry naming body bytes that
+                // never left the page cache.
+                if (!FlushBodyFile()) {
+                    return AbortNode(state, "Flushing body file to disk failed. This is likely the result of an I/O error.");
+                }
                 // Then update all block file information (which may refer to block and undo files).
                 {
                     std::vector <std::pair<int, const CBlockFileInfo *>> vFiles;
@@ -3953,6 +3962,10 @@ CBlockIndex *BlockManager::AddToBlockIndex(const CBlockHeader &block, enum Block
 /** Mark a block as having its data received and checked (up to BLOCK_VALID_TRANSACTIONS). */
 void CChainState::ReceivedBlockBodies(CBlockIndex *pindexNew) {
     pindexNew->nStatus |= BLOCK_HAVE_BODIES;
+    // 2.1.4: nBodyFile/nBodyPos were already populated on the original accept
+    // (SaveBodyToDisk writes unconditionally, withheld or not) -- only the
+    // status claim was deferred, exactly mirroring BLOCK_HAVE_BODIES above.
+    pindexNew->nStatus |= BLOCK_HAVE_BODY_RECORD;
     setDirtyBlockIndex.insert(pindexNew);
 
     // Chain selection dropped this block and parked its descendants in
@@ -3985,7 +3998,7 @@ void CChainState::ReceivedBlockBodies(CBlockIndex *pindexNew) {
 }
 
 void CChainState::ReceivedBlockTransactions(const CBlock &block, CValidationState &state, CBlockIndex *pindexNew,
-                                            const FlatFilePos &pos, bool bodies_held) {
+                                            const FlatFilePos &pos, const FlatFilePos &bodyPos, bool bodies_held) {
     // The commitment block itself is always stored, so everything the index says
     // about HAVING a block stays true and every invariant tying nTx to
     // BLOCK_HAVE_DATA holds untouched. What decoupling adds is one further fact.
@@ -3995,7 +4008,15 @@ void CChainState::ReceivedBlockTransactions(const CBlock &block, CValidationStat
     pindexNew->nDataPos = pos.nPos;
     pindexNew->nUndoPos = 0;
     pindexNew->nStatus |= BLOCK_HAVE_DATA;
-    if (bodies_held) pindexNew->nStatus |= BLOCK_HAVE_BODIES;
+    // 2.1.4: bodyPos is always valid (SaveBodyToDisk writes unconditionally,
+    // matching pos above) -- only the status claim is gated on bodies_held,
+    // exactly the BLOCK_HAVE_BODIES pattern one line below.
+    pindexNew->nBodyFile = bodyPos.nFile;
+    pindexNew->nBodyPos = bodyPos.nPos;
+    if (bodies_held) {
+        pindexNew->nStatus |= BLOCK_HAVE_BODIES;
+        pindexNew->nStatus |= BLOCK_HAVE_BODY_RECORD;
+    }
     pindexNew->RaiseValidity(BLOCK_VALID_TRANSACTIONS);
     setDirtyBlockIndex.insert(pindexNew);
 
@@ -4746,6 +4767,28 @@ SaveBlockToDisk(const CBlock &block, int nHeight, const CChainParams &chainparam
     return blockPos;
 }
 
+/** 2.1.4: store a block's non-coinbase bodies in the body store, mirroring
+ *  SaveBlockToDisk's own shape. Called unconditionally alongside it (F-131's
+ *  -reindex decision: the write path must not special-case a withheld or
+ *  reindexed accept) -- only BLOCK_HAVE_BODY_RECORD, set by the caller,
+ *  tracks whether the index currently claims to hold what's written here,
+ *  exactly the way BLOCK_HAVE_DATA/BLOCK_HAVE_BODIES already split that
+ *  claim for the commitment block itself. */
+static FlatFilePos SaveBodyToDisk(const CBlock &block) {
+    std::vector<CTransactionRef> bodies(block.vtx.begin() + 1, block.vtx.end());
+    uint64_t nBodySize = GetBodyRecordSerializedSize(bodies);
+    FlatFilePos bodyPos;
+    if (!FindBodyPos(bodyPos, (unsigned int) nBodySize)) {
+        error("%s: FindBodyPos failed", __func__);
+        return FlatFilePos();
+    }
+    if (!WriteBodyRecord(bodyPos, bodies)) {
+        AbortNode("Failed to write body record");
+        return FlatFilePos();
+    }
+    return bodyPos;
+}
+
 /** Store block on disk. If dbp is non-nullptr, the file is known to already reside on disk */
 bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock> &pblock, CValidationState &state,
                               const CChainParams &chainparams, CBlockIndex **ppindex, bool fRequested,
@@ -4903,7 +4946,12 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock> &pblock, CVali
             state.Error(strprintf("%s: Failed to find position to write new block to disk", __func__));
             return false;
         }
-        ReceivedBlockTransactions(block, state, pindex, blockPos, !fWithholdBodies);
+        FlatFilePos bodyPos = SaveBodyToDisk(block);
+        if (bodyPos.IsNull()) {
+            state.Error(strprintf("%s: Failed to find position to write new block's bodies to disk", __func__));
+            return false;
+        }
+        ReceivedBlockTransactions(block, state, pindex, blockPos, bodyPos, !fWithholdBodies);
     } catch (const std::runtime_error &e) {
         return AbortNode(state, std::string("System error: ") + e.what());
     }
@@ -5313,6 +5361,14 @@ EXCLUSIVE_LOCKS_REQUIRED(cs_main)
                 pblocktree->ReadLastBlockFile(nLastBlockFile);
                 vinfoBlockFile.resize(nLastBlockFile + 1);
                 LogPrintf("%s: last block file = %i\n", __func__, nLastBlockFile);
+
+                // 2.1.4 (F-133): must land in the SAME change as the real
+                // FindBodyPos/AcceptBlock write wiring below, never after --
+                // an unloaded in-memory default (nLastBodyFile=0) would
+                // otherwise get persisted over a real value by the very next
+                // flush, reproducing F-130's overwrite hazard by a new route.
+                // Safe on a fresh/empty database (bodystore.h's own doc).
+                LoadBodyFileInfo();
                 for (int nFile = 0; nFile <= nLastBlockFile; nFile++) {
                     pblocktree->ReadBlockFileInfo(nFile, vinfoBlockFile[nFile]);
                 }
@@ -5772,8 +5828,15 @@ bool CChainState::AddGenesisBlock(const CChainParams &chainparams, const CBlock 
     FlatFilePos blockPos = SaveBlockToDisk(block, 0, chainparams, nullptr);
     if (blockPos.IsNull())
         return error("%s: writing genesis block to disk failed (%s)", __func__, FormatStateMessage(state));
+    // 2.1.4: genesis has no AcceptBlock path of its own, but it still needs a
+    // body-store record -- an empty one, since genesis carries no non-coinbase
+    // transactions -- so its CBlockIndex entry is shaped the same as every
+    // other block's rather than a permanent special case.
+    FlatFilePos bodyPos = SaveBodyToDisk(block);
+    if (bodyPos.IsNull())
+        return error("%s: writing genesis block's bodies to disk failed (%s)", __func__, FormatStateMessage(state));
     CBlockIndex *pindex = m_blockman.AddToBlockIndex(block);
-    ReceivedBlockTransactions(block, state, pindex, blockPos, true);
+    ReceivedBlockTransactions(block, state, pindex, blockPos, bodyPos, true);
     return true;
 }
 
