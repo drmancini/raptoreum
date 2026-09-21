@@ -1475,62 +1475,72 @@ BOOST_AUTO_TEST_CASE(connecttip_never_records_a_null_body_position_for_a_pre_2_1
     BOOST_CHECK(!LookupBodyPositionAtHeight(height, posOut, hashOut));
 }
 
-// F-141 (Fable review of F-140, MEDIUM/test-coverage): every prior
-// integration test used a strictly linear chain, so BlockIndex() (every
-// known block) and m_chain[0..Height()] (active chain only) always named
-// exactly the same set -- a mutant feeding the height loop from BlockIndex()
-// instead of m_chain (or vice versa) would still pass every one of them.
-// This builds a genuine equal-work sibling pair (equal_work_tiebreak_
-// survives_bodies_arriving_second's own construction): A wins the tiebreak
-// and connects, B is genuinely ACCEPTED -- its own body record IS written,
-// ReceivedBlockTransactions runs for it -- but never connects at all. B is
-// exactly the side-chain case the hash half exists for and the height half
-// must never see, at the SAME height A occupies.
+// F-141 (Fable review of F-140, MEDIUM/test-coverage; corrected by a SECOND
+// review of F-141's own fix): every prior integration test used a strictly
+// linear chain, so BlockIndex() (every known block) and m_chain[0..Height()]
+// (active chain only) always named exactly the same set -- a mutant feeding
+// the height loop from BlockIndex() instead of m_chain would still pass
+// every one of them.
+//
+// The first version of this test tried to prove that with a same-height
+// EQUAL-WORK SIBLING pair (A connects, B doesn't) -- but BlockMap is keyed by
+// BlockHasher's raw GetCheapHash() of each block's own (unsalted, unordered)
+// hash, and both blocks' hashes are effectively random per run (fresh
+// coinbase keys / PoW). Under the loop-source-swap mutant, whichever of A/B
+// the map happened to visit LAST would win the height entry -- a coin flip
+// independent of which block the mutant is supposed to get wrong. Simulated:
+// A landed last (silently "passing" under the mutant) in ~60% of runs. A
+// same-height competitor can never fix this: whoever is genuinely correct
+// might also be the mutant's own accidental last-write.
+//
+// Fixed by removing the competition entirely: C is a genuine, fully valid
+// child of the CURRENT tip whose body is WITHHELD (PerfWithholdGuard) --
+// F-135's own "BLOCK_HAVE_BODY_RECORD is set unconditionally the moment
+// ReceivedBlockTransactions runs, independent of bodies_held" means C is
+// still genuinely indexed by hash, but ConnectTip's HaveBodies() gate
+// (F-101/F-104/F-117) means C can NEVER connect -- no other block will ever
+// occupy heightC in this test. Under the loop-source-swap mutant, ANY write
+// to heightC is wrong, regardless of iteration order -- there is no
+// competing legitimate entry for an unlucky mutant to coincidentally produce.
 BOOST_AUTO_TEST_CASE(body_index_hash_half_covers_a_side_chain_block_the_height_half_never_does) {
     ChainstateManager &chainman = EnsureChainman(m_node);
     const CChainParams &chainparams = Params();
     CChainState &chainstate = ::ChainstateActive();
 
-    CKey keyB;
-    keyB.MakeNewKey(true);
-    CScript scriptPubKeyB = CScript() << ToByteVector(keyB.GetPubKey()) << OP_CHECKSIG;
-    CBlock blockB = CreateBlock({}, scriptPubKeyB);
-    CBlock blockA = CreateBlock({}, coinbaseKey);
-    BOOST_REQUIRE(blockA.GetHash() != blockB.GetHash());
+    const CBlockIndex *tipBefore = chainstate.m_chain.Tip();
+    BOOST_REQUIRE(tipBefore != nullptr);
+    int heightC = tipBefore->nHeight + 1;
 
-    std::shared_ptr<const CBlock> shared_pblockA = std::make_shared<const CBlock>(blockA);
-    std::shared_ptr<const CBlock> shared_pblockB = std::make_shared<const CBlock>(blockB);
-    uint256 hashA = blockA.GetHash();
-    uint256 hashB = blockB.GetHash();
+    CBlock blockC = CreateBlock({}, coinbaseKey);
+    std::shared_ptr<const CBlock> shared_pblockC = std::make_shared<const CBlock>(blockC);
+    uint256 hashC = blockC.GetHash();
 
-    BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblockA, /*fForceProcessing=*/true, nullptr));
-    BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblockB, /*fForceProcessing=*/true, nullptr));
+    {
+        PerfWithholdGuard guard(hashC);
+        BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblockC, /*fForceProcessing=*/true, nullptr));
+    }
 
-    const CBlockIndex *pindexA = LookupBlockIndex(hashA);
-    const CBlockIndex *pindexB = LookupBlockIndex(hashB);
-    BOOST_REQUIRE(pindexA != nullptr);
-    BOOST_REQUIRE(pindexB != nullptr);
-    BOOST_REQUIRE(::ChainActive().Tip()->GetBlockHash() == hashA);
-    BOOST_REQUIRE(pindexB->nStatus & BLOCK_HAVE_BODY_RECORD);
-    BOOST_REQUIRE(pindexB != chainstate.m_chain.Tip());
-    int heightB = pindexB->nHeight;
+    const CBlockIndex *pindexC = LookupBlockIndex(hashC);
+    BOOST_REQUIRE(pindexC != nullptr);
+    BOOST_REQUIRE(pindexC->nStatus & BLOCK_HAVE_BODY_RECORD);
+    BOOST_REQUIRE_EQUAL(pindexC->nHeight, heightC);
+    BOOST_REQUIRE(chainstate.m_chain.Tip() == tipBefore);   // never connected
 
     FlatFilePos posOut;
     uint256 hashOut;
-    BOOST_REQUIRE(LookupBodyPositionByHash(hashB, posOut));
-    BOOST_CHECK_EQUAL(posOut.nFile, pindexB->GetBodyPos().nFile);
-    BOOST_CHECK_EQUAL(posOut.nPos, pindexB->GetBodyPos().nPos);
+    BOOST_REQUIRE(LookupBodyPositionByHash(hashC, posOut));
+    BOOST_CHECK_EQUAL(posOut.nFile, pindexC->GetBodyPos().nFile);
+    BOOST_CHECK_EQUAL(posOut.nPos, pindexC->GetBodyPos().nPos);
 
-    // This height belongs to A on the active chain, not B.
-    BOOST_REQUIRE(LookupBodyPositionAtHeight(heightB, posOut, hashOut));
-    BOOST_CHECK(hashOut == hashA);
+    // No active-chain block occupies heightC at all.
+    BOOST_CHECK(!LookupBodyPositionAtHeight(heightC, posOut, hashOut));
 
     // A real reload (LoadBlockIndexDB rebuilds the hash half from EVERY known
     // block, LoadChainTip rebuilds the height half from the active chain
-    // only) must preserve exactly this distinction.
+    // only) must preserve exactly this distinction, deterministically.
     ResetBodyIndex();
     chainstate.m_chain.SetTip(nullptr);
-    BOOST_REQUIRE(!LookupBodyPositionByHash(hashB, posOut));
+    BOOST_REQUIRE(!LookupBodyPositionByHash(hashC, posOut));
 
     {
         LOCK(cs_main);
@@ -1538,12 +1548,11 @@ BOOST_AUTO_TEST_CASE(body_index_hash_half_covers_a_side_chain_block_the_height_h
         BOOST_REQUIRE(chainstate.LoadChainTip(chainparams));
     }
 
-    BOOST_REQUIRE(LookupBodyPositionByHash(hashB, posOut));
-    BOOST_CHECK_EQUAL(posOut.nFile, pindexB->GetBodyPos().nFile);
-    BOOST_CHECK_EQUAL(posOut.nPos, pindexB->GetBodyPos().nPos);
+    BOOST_REQUIRE(LookupBodyPositionByHash(hashC, posOut));
+    BOOST_CHECK_EQUAL(posOut.nFile, pindexC->GetBodyPos().nFile);
+    BOOST_CHECK_EQUAL(posOut.nPos, pindexC->GetBodyPos().nPos);
 
-    BOOST_REQUIRE(LookupBodyPositionAtHeight(heightB, posOut, hashOut));
-    BOOST_CHECK(hashOut == hashA);
+    BOOST_CHECK(!LookupBodyPositionAtHeight(heightC, posOut, hashOut));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

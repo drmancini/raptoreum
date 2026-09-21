@@ -283,13 +283,17 @@ void EraseBodyPositionAtHeight(int nHeight);
  *  beyond the highest height ever recorded). */
 bool LookupBodyPositionAtHeight(int nHeight, FlatFilePos &posOut, uint256 &hashOut);
 
-/** Discard both halves of the index. Called once, at the start of a full
- *  rebuild (`CChainState::LoadChainTip`, validation.cpp -- no separate
- *  on-disk format for this index; it is rebuilt every boot from
- *  `CBlockIndex`'s own already-persisted `nBodyFile`/`nBodyPos`/
- *  `BLOCK_HAVE_BODY_RECORD`, the same "rebuilt every boot" convention
- *  `vinfoBlockFile`/`setBlockIndexCandidates` already use), and directly by
- *  tests that need to simulate a fresh process. */
+/** Discard both halves of the index. Called once at the top of every
+ *  (re)load attempt (the free `UnloadBlockIndex(CTxMemPool*)`,
+ *  validation.cpp -- F-141: NOT `CChainState::LoadChainTip`, which only
+ *  rebuilds the height half; the hash half rebuilds separately in
+ *  `LoadBlockIndexDB`, since `LoadChainTip` is skipped entirely on a
+ *  `-reindex-chainstate` boot) -- no separate on-disk format for this
+ *  index; it is rebuilt every boot from `CBlockIndex`'s own
+ *  already-persisted `nBodyFile`/`nBodyPos`/`BLOCK_HAVE_BODY_RECORD`, the
+ *  same "rebuilt every boot" convention `vinfoBlockFile`/
+ *  `setBlockIndexCandidates` already use. Also called directly by tests
+ *  that need to simulate a fresh process. */
 void ResetBodyIndex();
 
 #endif // BITCOIN_BODYSTORE_H

@@ -822,10 +822,12 @@ BOOST_AUTO_TEST_CASE(erase_body_position_at_height_is_a_no_op_when_nothing_was_r
     BOOST_CHECK(!LookupBodyPositionAtHeight(999, posOut, hashOut));
 }
 
-// The startup rebuild (CChainState::LoadChainTip, validation.cpp) calls this
-// once before repopulating from CBlockIndex -- must discard BOTH halves, not
-// just one, or a stale by-hash entry from before a reindex would silently
-// keep answering for a block the rebuild never re-recorded.
+// The real startup path (the free UnloadBlockIndex(CTxMemPool*),
+// validation.cpp -- F-141: NOT LoadChainTip, which only rebuilds the height
+// half) calls this once before repopulating from CBlockIndex -- must
+// discard BOTH halves, not just one, or a stale by-hash entry from before a
+// reindex would silently keep answering for a block the rebuild never
+// re-recorded.
 BOOST_AUTO_TEST_CASE(reset_body_index_clears_both_halves) {
     ResetBodyIndex();
 
