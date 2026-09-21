@@ -2031,10 +2031,18 @@ implementation anywhere.
 - **Model body serving on the BLOCK path, not the transaction path (§14, B4).** These are
   already separated in the tree: `ProcessGetData` is `LOCKS_EXCLUDED(cs_main)`, takes the lock to
   drain non-block inventory, then **breaks and releases it** before calling `ProcessGetBlockData`
-  (`net_processing.cpp:1718`, `:1879-1886`). Serving a block does not hold `cs_main` across a disk
-  read; serving a transaction does. **Bodies are block-shaped work wearing transaction clothes**,
-  so the instinct to hang them on `MSG_TX` puts them on exactly the wrong path and hands an
-  attacker the lock that block connection, ChainLocks and the DKG handlers all need.
+  (`net_processing.cpp:1850-2041`, break/release near `:2012`, call at `:2018`). **Corrected
+  (2.2 spec review, 2026-09-21) — the paragraph below overclaimed; verified directly against
+  current source, not assumed.** `ProcessGetBlockData` itself (`:1688-1848`) immediately
+  RE-ACQUIRES `cs_main` (`:1720`, no closing scope before the function ends at `:1848`) and holds
+  it straight through `ReadBlockFromDisk` (`:1780`) and every response `PushMessage`. **Serving a
+  block DOES hold `cs_main` across its disk read, today** — there is no existing off-`cs_main`
+  serving precedent anywhere in this tree. **Bodies are block-shaped work wearing transaction
+  clothes**, so the instinct to hang them on `MSG_TX` still puts them on exactly the wrong path
+  (transaction serving holds `cs_main` too, for a different reason) — but 2.2's own serving path
+  must be NEW code that resolves through the body store's own index and never takes `cs_main` at
+  all, not a copy of `ProcessGetBlockData`'s locking, which would reproduce B4 by a different
+  door.
 - **The store owns its own height index, so serving touches no chain state.** Resolving
   `(height, index)` through `ChainActive()` would need `cs_main`; a height-keyed index maintained
   by the body store at connect and disconnect needs only its own lock. **Self-verification is what
