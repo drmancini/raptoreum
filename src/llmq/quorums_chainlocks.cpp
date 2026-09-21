@@ -23,6 +23,9 @@
 namespace llmq {
 
     const std::string CLSIG_REQUESTID_PREFIX = "clsig";
+    // 3.1 (DIP8 signing attempts): see quorums_chainlocks.h's own doc comment
+    // on this constant for why a separate prefix is required, not optional.
+    const std::string CLSIG_ATTEMPT_REQUESTID_PREFIX = "clsig-attempt";
 
     CChainLocksHandler *chainLocksHandler;
 
@@ -265,11 +268,18 @@ namespace llmq {
             return;
         }
 
-        // DIP8 defines a process called "Signing attempts" which should run before the CLSIG is finalized
-        // To simplify the initial implementation, we skip this process and directly try to create a CLSIG
-        // This will fail when multiple blocks compete, but we accept this for the initial implementation.
-        // Later, we'll add the multiple attempts process.
-
+        // 3.1 (DIP8 signing attempts, build-plan.md): a one-shot-per-height
+        // guard here used to permanently block convergence once ANY attempt
+        // was made at a height, even if it never produced a CLSIG -- exactly
+        // the condition transaction-decoupling.md §3A.7 makes attacker-
+        // schedulable (identifiers arrive instantly; body release timing is
+        // the attacker's choice, so it can manufacture a quorum split on
+        // demand rather than racing for one). DecideChainLockSignAction
+        // (pure, quorums_chainlocks.h) replaces the single check with a real
+        // retry decision: keep attempting with a fresh, time-slotted request
+        // id (GetChainLockAttemptNumber/GetChainLockAttemptRequestId) until
+        // either a CLSIG forms or the tip moves on.
+        int32_t attemptNum = GetChainLockAttemptNumber(GetAdjustedTime());
         {
             LOCK(cs);
 
@@ -277,13 +287,9 @@ namespace llmq {
                 return;
             }
 
-            if (pindex->nHeight == lastSignedHeight) {
-                // already signed this one
-                return;
-            }
-
-            if (bestChainLock.getHeight() >= pindex->nHeight) {
-                // already got the same CLSIG or a better one
+            if (DecideChainLockSignAction(pindex->nHeight, attemptNum, bestChainLock.getHeight(),
+                                          lastSignedHeight, lastSignedAttempt, lastSignedIsFinalization)
+                == ChainLockSignAction::kNone) {
                 return;
             }
 
@@ -347,16 +353,23 @@ namespace llmq {
             }
         }
 
-        uint256 requestId = ::SerializeHash(std::make_pair(CLSIG_REQUESTID_PREFIX, pindex->nHeight));
+        uint256 requestId = GetChainLockAttemptRequestId(pindex->nHeight, attemptNum);
         uint256 msgHash = pindex->GetBlockHash();
 
         {
             LOCK(cs);
-            if (bestChainLock.getHeight() >= pindex->nHeight) {
-                // might have happened while we didn't hold cs
+            // Re-check under lock -- both the CLSIG and the outstanding-
+            // signing state may have changed while we didn't hold cs (the
+            // existing bestChainLock re-check already did this; now folded
+            // into the same pure decision used above).
+            if (DecideChainLockSignAction(pindex->nHeight, attemptNum, bestChainLock.getHeight(),
+                                          lastSignedHeight, lastSignedAttempt, lastSignedIsFinalization)
+                == ChainLockSignAction::kNone) {
                 return;
             }
             lastSignedHeight = pindex->nHeight;
+            lastSignedAttempt = attemptNum;
+            lastSignedIsFinalization = false;
             lastSignedRequestId = requestId;
             lastSignedMsgHash = msgHash;
         }
@@ -579,6 +592,9 @@ namespace llmq {
 
     void CChainLocksHandler::HandleNewRecoveredSig(const llmq::CRecoveredSig &recoveredSig) {
         CChainLockSig clsig;
+        uint256 finalizationRequestId;
+        uint256 finalizationMsgHash;
+        bool startFinalization = false;
         {
             LOCK(cs);
 
@@ -586,16 +602,37 @@ namespace llmq {
                 return;
             }
 
-            if (recoveredSig.getId() != lastSignedRequestId || recoveredSig.getMsgHash() != lastSignedMsgHash) {
-                // this is not what we signed, so lets not create a CLSIG for it
-                return;
-            }
-            if (bestChainLock.getHeight() >= lastSignedHeight) {
-                // already got the same or a better CLSIG through the CLSIG message
+            RecoveredSigOutcome outcome = DecideRecoveredSigOutcome(
+                    recoveredSig.getId(), recoveredSig.getMsgHash(),
+                    lastSignedRequestId, lastSignedMsgHash,
+                    bestChainLock.getHeight(), lastSignedHeight, lastSignedIsFinalization);
+
+            if (outcome == RecoveredSigOutcome::kIgnore) {
                 return;
             }
 
-            clsig = CChainLockSig(lastSignedHeight, lastSignedMsgHash, recoveredSig.sig.Get());
+            if (outcome == RecoveredSigOutcome::kStartFinalization) {
+                // 3.1 (DIP8): an ATTEMPT round converged -- kick off the
+                // fixed-id FINALIZATION round (CLSIG_REQUESTID_PREFIX, no
+                // attempt number) whose own recovered signature IS the
+                // broadcastable CLSIG, verifiable by every peer exactly as
+                // before (ProcessNewChainLock's own verification is
+                // untouched -- it only ever knew about this id).
+                finalizationRequestId = ::SerializeHash(std::make_pair(CLSIG_REQUESTID_PREFIX, lastSignedHeight));
+                finalizationMsgHash = lastSignedMsgHash;
+                lastSignedRequestId = finalizationRequestId;
+                lastSignedIsFinalization = true;
+                startFinalization = true;
+            } else {
+                // kBuildChainLock: the finalization round itself converged.
+                clsig = CChainLockSig(lastSignedHeight, lastSignedMsgHash, recoveredSig.sig.Get());
+            }
+        }
+
+        if (startFinalization) {
+            quorumSigningManager->AsyncSignIfMember(Params().GetConsensus().llmqTypeChainLocks,
+                                                    finalizationRequestId, finalizationMsgHash);
+            return;
         }
         ProcessNewChainLock(-1, clsig, ::SerializeHash(clsig));
     }
