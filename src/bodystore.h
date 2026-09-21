@@ -158,6 +158,23 @@ bool ReadBodyAt(const FlatFilePos &pos, unsigned int index, CTransactionRef &txO
  *  load (validation.cpp). */
 bool LoadBodyFileInfo();
 
+/** Flush the CURRENT body file's data to disk -- the FindBodyPos analogue of
+ *  FlushBlockFile (validation.cpp), called unconditionally on every real full
+ *  flush, right alongside FlushBlockFile's own call, so a crash right after
+ *  WriteBatchSync's batch goes durable can't leave an index entry naming body
+ *  bytes that never left the page cache (F-133's recorded gap in F-132,
+ *  closed here). `fFinalize` matches FlatFileSeq::Flush's own meaning
+ *  (truncate to used size and fsync) -- always false from the periodic-flush
+ *  call site; FindBodyPos's own rollover-time finalize is unrelated and
+ *  untouched by this function.
+ *
+ *  A no-op (returns true) if nothing has been loaded or written yet
+ *  (`vinfoBodyFile` empty) -- a fresh in-memory state before LoadBodyFileInfo
+ *  has run has no current file to flush, and indexing into an empty vector
+ *  would be undefined behaviour rather than the harmless no-op this needs to
+ *  be at that point in startup. */
+bool FlushBodyFile(bool fFinalize = false);
+
 /** Gather every body-file entry FindBodyPos has touched since the last call
  *  (`vFilesOut`) and the current last-body-file number (`nLastFileOut`),
  *  clearing the dirty set as it goes -- mirroring how validation.cpp's own

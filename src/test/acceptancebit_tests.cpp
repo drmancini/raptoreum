@@ -10,16 +10,20 @@
 // onto BLOCK_HAVE_DATA; these tests exercise the real, distinct bit.
 
 #include <algorithm>
+#include <amount.h>
+#include <bodystore.h>
 #include <chain.h>
 #include <chainparams.h>
 #include <coins.h>
 #include <consensus/validation.h>
 #include <key.h>
+#include <keystore.h>
 #include <node/context.h>
 #include <primitives/block.h>
 #include <pubkey.h>
 #include <fs.h>
 #include <script/script.h>
+#include <script/sign.h>
 #include <script/standard.h>
 #include <streams.h>
 #include <txmempool.h>
@@ -963,6 +967,170 @@ BOOST_AUTO_TEST_CASE(bodiesmigrated_migration_does_not_touch_a_later_genuine_com
     // Must still be genuinely bodies-missing -- the flag being set is what
     // stops the second pass from wrongly re-stamping it.
     BOOST_CHECK(!HaveBodies(pindexGenuine));
+}
+
+// 2.1.4: the body store's own write side, wired into AcceptBlock. Builds a
+// real spend of a mature coinbase so the block carries a genuine non-coinbase
+// body, not just a coinbase-only block (which would leave GetBodyRecordSerializedSize's
+// count-only path untested here).
+static CMutableTransaction MakeSpendOfCoinbase(const CTransactionRef &coinbase, const CKey &coinbaseKeyIn) {
+    CBasicKeyStore keystore;
+    keystore.AddKey(coinbaseKeyIn);
+    CMutableTransaction spendTx;
+    spendTx.vin.resize(1);
+    spendTx.vin[0].prevout = COutPoint(coinbase->GetHash(), 0);
+    spendTx.vout.resize(1);
+    spendTx.vout[0].nValue = 10 * CENT;
+    spendTx.vout[0].scriptPubKey = GetScriptForDestination(coinbaseKeyIn.GetPubKey().GetID());
+    BOOST_REQUIRE(SignSignature(keystore, *coinbase, spendTx, 0, SIGHASH_ALL));
+    return spendTx;
+}
+
+// The core mechanism: an accepted block's non-coinbase transactions must
+// actually be readable back from the body store, at the exact position the
+// index now records -- not just "some bit got set".
+BOOST_AUTO_TEST_CASE(accepted_block_writes_its_bodies_to_the_body_store) {
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+
+    CBlock block = CreateAndProcessBlock({spendTx}, coinbaseKey);
+    CBlockIndex *pindex = LookupBlockIndex(block.GetHash());
+    BOOST_REQUIRE(pindex != nullptr);
+
+    BOOST_CHECK(pindex->nStatus & BLOCK_HAVE_BODY_RECORD);
+    BOOST_REQUIRE(!pindex->GetBodyPos().IsNull());
+
+    std::vector<CTransactionRef> bodiesOut;
+    BOOST_REQUIRE(ReadBodyRecord(pindex->GetBodyPos(), bodiesOut));
+    // Index 0 is vtx[1] -- the coinbase is never stored here (bodystore.h's
+    // own indexing convention).
+    BOOST_REQUIRE_EQUAL(bodiesOut.size(), block.vtx.size() - 1);
+    for (size_t i = 0; i < bodiesOut.size(); i++) {
+        BOOST_CHECK(bodiesOut[i]->GetHash() == block.vtx[i + 1]->GetHash());
+    }
+}
+
+// Mirrors unrequested_arrival_fills_a_commitment_only_block above, for
+// BLOCK_HAVE_BODY_RECORD: a withheld block's real bytes are written to the
+// body store on the FIRST accept (SaveBodyToDisk is unconditional, matching
+// SaveBlockToDisk -- F-131's "must not special-case a withheld accept" write
+// path), but the STATUS bit lags until the bodies "arrive" (a later
+// unrequested re-offer), exactly the way BLOCK_HAVE_BODIES itself already
+// works. No second write happens on arrival -- nBodyFile/nBodyPos are
+// unchanged, only ReceivedBlockBodies's status bit changes.
+BOOST_AUTO_TEST_CASE(withheld_bodies_are_written_but_the_record_bit_lags_until_arrival) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    const CChainParams &chainparams = Params();
+
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock block = CreateBlock({spendTx}, coinbaseKey);
+    std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
+    uint256 hash = block.GetHash();
+
+    int nFileAfterFirstAccept = -1;
+    unsigned int nPosAfterFirstAccept = 0;
+    {
+        PerfWithholdGuard guard(hash);
+        bool fNewBlock = false;
+        BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblock, /*fForceProcessing=*/true, &fNewBlock));
+        BOOST_REQUIRE(fNewBlock);
+
+        const CBlockIndex *pindex = LookupBlockIndex(hash);
+        BOOST_REQUIRE(pindex != nullptr);
+        // GetBodyPos() is gated on the status bit (mirrors GetBlockPos()'s own
+        // convention, proven in bodystore_tests.cpp) so it is still null here
+        // -- read the raw fields directly to see that the real bytes were
+        // written anyway, only the index's CLAIM to hold them is withheld,
+        // mirroring BLOCK_HAVE_BODIES exactly.
+        BOOST_CHECK(pindex->GetBodyPos().IsNull());
+        BOOST_CHECK(!(pindex->nStatus & BLOCK_HAVE_BODY_RECORD));
+        BOOST_CHECK(pindex->nBodyFile >= 0);
+        nFileAfterFirstAccept = pindex->nBodyFile;
+        nPosAfterFirstAccept = pindex->nBodyPos;
+    }
+
+    bool fNewBlock2 = false;
+    BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblock, /*fForceProcessing=*/false, &fNewBlock2));
+    BOOST_CHECK(fNewBlock2);
+
+    const CBlockIndex *pindex = LookupBlockIndex(hash);
+    BOOST_CHECK(pindex->nStatus & BLOCK_HAVE_BODY_RECORD);
+    BOOST_REQUIRE(!pindex->GetBodyPos().IsNull());
+    // No second copy: the position is unchanged from the withheld accept.
+    BOOST_CHECK_EQUAL(pindex->GetBodyPos().nFile, nFileAfterFirstAccept);
+    BOOST_CHECK_EQUAL(pindex->GetBodyPos().nPos, nPosAfterFirstAccept);
+
+    std::vector<CTransactionRef> bodiesOut;
+    BOOST_REQUIRE(ReadBodyRecord(pindex->GetBodyPos(), bodiesOut));
+    BOOST_REQUIRE_EQUAL(bodiesOut.size(), block.vtx.size() - 1);
+    BOOST_CHECK(bodiesOut[0]->GetHash() == block.vtx[1]->GetHash());
+}
+
+// F-133's second recorded constraint, proven rather than merely argued: the
+// write side (AcceptBlock -> SaveBodyToDisk -> FindBodyPos) and the load side
+// (LoadBodyFileInfo, now wired into LoadBlockIndexDB) must actually agree
+// after a real restart, not just each work in isolation the way
+// bodystore_tests.cpp's own restart test already proved with hand-fed data.
+// This drives the SAME real LoadBlockIndexDB call
+// bodiesmigrated_migration_restores_have_bodies_on_pre_1_3_entries above
+// uses, so it is a real reload, not a simulation of one.
+BOOST_AUTO_TEST_CASE(body_store_bookkeeping_survives_a_real_loadblockindexdb_reload) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    const CChainParams &chainparams = Params();
+
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock block = CreateAndProcessBlock({spendTx}, coinbaseKey);
+    CBlockIndex *pindex = LookupBlockIndex(block.GetHash());
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(pindex->nStatus & BLOCK_HAVE_BODY_RECORD);
+    FlatFilePos bodyPos = pindex->GetBodyPos();
+
+    // The real flush pipeline's body-file half: GetDirtyBodyFileInfo folded
+    // into WriteBatchSync (F-132/F-133), for an entry FindBodyPos actually
+    // marked dirty during a real AcceptBlock -- not a hand-built
+    // CBodyFileInfo the way bodystore_tests.cpp's own tests use. (Calling the
+    // full CChainState::FlushStateToDisk directly from this fixture is not
+    // this test's job and is unsafe here -- it assumes a shutdown sequence
+    // this fixture does not run, unrelated to the body store.)
+    std::vector<std::pair<int, CBodyFileInfo>> vBodyFiles;
+    int nLastBodyFileOut = -1;
+    GetDirtyBodyFileInfo(vBodyFiles, nLastBodyFileOut);
+    BOOST_REQUIRE(pblocktree->WriteBatchSync({}, 0, {}, vBodyFiles, nLastBodyFileOut));
+
+    // Simulate a restart of bodystore.cpp's own in-memory bookkeeping (the
+    // bytes on disk and the CBlockIndex entries are untouched -- only the
+    // process-global FindBodyPos state resets, the same thing a real process
+    // restart would do).
+    TestOnlyResetBodyFileState();
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(LoadBlockIndexDB(chainman, chainparams));
+    }
+
+    // FindBodyPos must continue from the persisted position, not silently
+    // restart at file 0 and overwrite the block this test just accepted.
+    // Computed independent of the reload (from the block's own content, not
+    // from any post-reload state) so a mutant that drops LoadBodyFileInfo's
+    // wiring can't pass by having both sides of the comparison collapse to
+    // the same (wrong) zero together.
+    uint64_t expectedRecordSize = GetBodyRecordSerializedSize(
+            std::vector<CTransactionRef>(block.vtx.begin() + 1, block.vtx.end()));
+    unsigned int expectedFileSizeAfterThisBlock = bodyPos.nPos + (unsigned int) expectedRecordSize;
+    BOOST_REQUIRE_GT(expectedFileSizeAfterThisBlock, 0U);
+
+    unsigned int nSizeAfterReload = TestOnlyGetBodyFileSize(bodyPos.nFile);
+    BOOST_CHECK_EQUAL(nSizeAfterReload, expectedFileSizeAfterThisBlock);
+
+    FlatFilePos posAfter;
+    BOOST_REQUIRE(FindBodyPos(posAfter, 1));
+    BOOST_CHECK_EQUAL(posAfter.nFile, bodyPos.nFile);
+    BOOST_CHECK_EQUAL(posAfter.nPos, expectedFileSizeAfterThisBlock);
+
+    // And the accepted block's own bytes are still correct through the
+    // reloaded state -- the reload only affects in-memory bookkeeping.
+    std::vector<CTransactionRef> bodiesOut;
+    BOOST_REQUIRE(ReadBodyRecord(bodyPos, bodiesOut));
+    BOOST_REQUIRE_EQUAL(bodiesOut.size(), block.vtx.size() - 1);
+    BOOST_CHECK(bodiesOut[0]->GetHash() == block.vtx[1]->GetHash());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

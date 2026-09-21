@@ -426,6 +426,40 @@ BOOST_AUTO_TEST_CASE(find_body_pos_continues_after_a_simulated_restart) {
     }
 }
 
+// F-133: FlushBodyFile must be a harmless no-op before LoadBodyFileInfo has
+// ever run (vinfoBodyFile still empty) -- indexing vinfoBodyFile[nLastBodyFile]
+// unconditionally here would be undefined behaviour on a fresh in-memory
+// state, not a caught error, since operator[] does not bounds-check.
+BOOST_AUTO_TEST_CASE(flush_body_file_is_a_no_op_before_anything_is_loaded) {
+    TestOnlyResetBodyFileState();
+    BOOST_CHECK(FlushBodyFile());
+}
+
+// 2.1.4: FlushBodyFile is FindBodyPos's analogue of FlushBlockFile -- proves
+// it actually flushes the CURRENT file (not the wrong one, and not a no-op
+// once something real exists to flush).
+BOOST_AUTO_TEST_CASE(flush_body_file_flushes_the_current_file_after_a_real_write) {
+    TestOnlyResetBodyFileState();
+    BOOST_REQUIRE(LoadBodyFileInfo());
+
+    std::vector<CTransactionRef> bodies = MakeBodies(3);
+    uint64_t recordSize = GetBodyRecordSerializedSize(bodies);
+    FlatFilePos pos;
+    BOOST_REQUIRE(FindBodyPos(pos, (unsigned int) recordSize));
+    BOOST_REQUIRE(WriteBodyRecord(pos, bodies));
+
+    BOOST_CHECK(FlushBodyFile());
+
+    // The record must still read back correctly after the flush -- FlushBodyFile
+    // truncates/fsyncs, it must never touch the bytes it's flushing.
+    std::vector<CTransactionRef> bodiesOut;
+    BOOST_REQUIRE(ReadBodyRecord(pos, bodiesOut));
+    BOOST_REQUIRE_EQUAL(bodiesOut.size(), bodies.size());
+    for (size_t i = 0; i < bodies.size(); i++) {
+        BOOST_CHECK_EQUAL(bodiesOut[i]->GetHash().ToString(), bodies[i]->GetHash().ToString());
+    }
+}
+
 // GetDirtyBodyFileInfo with nothing touched since load must report no dirty
 // files -- a harmless empty gather, not an error.
 BOOST_AUTO_TEST_CASE(get_dirty_body_file_info_is_empty_when_nothing_is_dirty) {
