@@ -1201,4 +1201,138 @@ BOOST_AUTO_TEST_CASE(body_position_on_the_index_survives_a_real_loadblockindexdb
     BOOST_CHECK(bodiesOut[0]->GetHash() == block.vtx[1]->GetHash());
 }
 
+// 2.2.1 (F-140): the body-store-owned height+hash index's real wiring --
+// bodystore_tests.cpp already proves the index functions themselves are
+// correct against hand-fed positions; these prove the actual integration
+// points (ReceivedBlockTransactions, ConnectTip, DisconnectTip, LoadChainTip)
+// call them, which is exactly the kind of wiring gap F-135 found for the
+// per-block position fields (a correctly-implemented function nothing ever
+// called).
+BOOST_AUTO_TEST_CASE(body_index_by_hash_and_height_are_populated_by_a_real_accept_and_connect) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    CChainState &chainstate = ::ChainstateActive();
+
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock block = CreateAndProcessBlock({spendTx}, coinbaseKey);
+    CBlockIndex *pindex = LookupBlockIndex(block.GetHash());
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(pindex == chainstate.m_chain.Tip());
+    FlatFilePos bodyPos = pindex->GetBodyPos();
+    BOOST_REQUIRE(!bodyPos.IsNull());
+
+    FlatFilePos posOut;
+    BOOST_REQUIRE(LookupBodyPositionByHash(block.GetHash(), posOut));
+    BOOST_CHECK_EQUAL(posOut.nFile, bodyPos.nFile);
+    BOOST_CHECK_EQUAL(posOut.nPos, bodyPos.nPos);
+
+    uint256 hashOut;
+    BOOST_REQUIRE(LookupBodyPositionAtHeight(pindex->nHeight, posOut, hashOut));
+    BOOST_CHECK_EQUAL(posOut.nFile, bodyPos.nFile);
+    BOOST_CHECK_EQUAL(posOut.nPos, bodyPos.nPos);
+    BOOST_CHECK(hashOut == block.GetHash());
+}
+
+// A disconnected block is still fully accepted/persisted data (side-chain
+// blocks are never connected at all, so the hash half must not treat
+// disconnection as if it were "never accepted") -- only the ACTIVE CHAIN's
+// height entry is removed.
+BOOST_AUTO_TEST_CASE(body_index_height_entry_is_erased_by_a_real_disconnecttip_hash_entry_survives) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    CChainState &chainstate = ::ChainstateActive();
+    const CChainParams &chainparams = Params();
+
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock block = CreateAndProcessBlock({spendTx}, coinbaseKey);
+    CBlockIndex *pindex = LookupBlockIndex(block.GetHash());
+    BOOST_REQUIRE(pindex != nullptr);
+    int disconnectedHeight = pindex->nHeight;
+    uint256 disconnectedHash = block.GetHash();
+
+    FlatFilePos posOut;
+    uint256 hashOut;
+    BOOST_REQUIRE(LookupBodyPositionAtHeight(disconnectedHeight, posOut, hashOut));
+
+    {
+        LOCK2(cs_main, m_node.mempool->cs);
+        CValidationState dcState;
+        DisconnectedBlockTransactions disconnectpool;
+        BOOST_REQUIRE(chainstate.DisconnectTip(dcState, chainparams, &disconnectpool));
+        disconnectpool.clear();
+    }
+    // CheckBlockIndex's own invariant (see out_of_order_arrival_parks_a_child_
+    // until_its_parent_downloads above): the disconnected tip must remain a
+    // block-index candidate, since nothing else is being connected in its
+    // place within this test.
+    chainstate.setBlockIndexCandidates.insert(pindex);
+
+    BOOST_CHECK(!LookupBodyPositionAtHeight(disconnectedHeight, posOut, hashOut));
+    // The hash half must NOT have been touched -- the block's bytes are still
+    // exactly where they were, on disk, whether or not it is on the active
+    // chain right now.
+    BOOST_REQUIRE(LookupBodyPositionByHash(disconnectedHash, posOut));
+}
+
+// F-135's own reload pattern, applied to LoadChainTip's new rebuild: a
+// process restart must repopulate BOTH halves of the index from CBlockIndex's
+// own already-persisted state -- calling LoadChainTip again while the tip
+// already matches the coins view's best block would hit its early return and
+// prove nothing (the exact "early return skip logic" gap F-135 warned about
+// for a different reload path). Forcing m_chain's tip to null first is what
+// makes this a genuine exercise of the rebuild loop, not a no-op call.
+BOOST_AUTO_TEST_CASE(body_index_survives_a_real_loadchaintip_reload) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    CChainState &chainstate = ::ChainstateActive();
+    const CChainParams &chainparams = Params();
+
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock block = CreateAndProcessBlock({spendTx}, coinbaseKey);
+    CBlockIndex *pindex = LookupBlockIndex(block.GetHash());
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(pindex == chainstate.m_chain.Tip());
+    FlatFilePos bodyPos = pindex->GetBodyPos();
+    BOOST_REQUIRE(!bodyPos.IsNull());
+    int height = pindex->nHeight;
+    uint256 hash = block.GetHash();
+
+    // Simulate a fresh process: the in-memory index is empty and m_chain has
+    // no tip set yet -- LoadChainTip's own genuine "never loaded" precondition
+    // (validation.cpp's own init.cpp call site), not merely calling it again
+    // once a tip is already current.
+    ResetBodyIndex();
+    chainstate.m_chain.SetTip(nullptr);
+
+    FlatFilePos posOut;
+    uint256 hashOut;
+    BOOST_REQUIRE(!LookupBodyPositionByHash(hash, posOut));
+    BOOST_REQUIRE(!LookupBodyPositionAtHeight(height, posOut, hashOut));
+
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(chainstate.LoadChainTip(chainparams));
+    }
+
+    BOOST_REQUIRE(LookupBodyPositionByHash(hash, posOut));
+    BOOST_CHECK_EQUAL(posOut.nFile, bodyPos.nFile);
+    BOOST_CHECK_EQUAL(posOut.nPos, bodyPos.nPos);
+
+    BOOST_REQUIRE(LookupBodyPositionAtHeight(height, posOut, hashOut));
+    BOOST_CHECK_EQUAL(posOut.nFile, bodyPos.nFile);
+    BOOST_CHECK_EQUAL(posOut.nPos, bodyPos.nPos);
+    BOOST_CHECK(hashOut == hash);
+
+    // The genesis block (height 0) must also have rebuilt correctly -- proves
+    // the rebuild loop covers the whole chain, not just the block this test
+    // happened to add last.
+    const CBlockIndex *pindexGenesis = chainstate.m_chain[0];
+    BOOST_REQUIRE(pindexGenesis != nullptr);
+    FlatFilePos genesisBodyPos = pindexGenesis->GetBodyPos();
+    BOOST_REQUIRE(!genesisBodyPos.IsNull());
+    FlatFilePos genesisPosOut;
+    uint256 genesisHashOut;
+    BOOST_REQUIRE(LookupBodyPositionAtHeight(0, genesisPosOut, genesisHashOut));
+    BOOST_CHECK_EQUAL(genesisPosOut.nFile, genesisBodyPos.nFile);
+    BOOST_CHECK_EQUAL(genesisPosOut.nPos, genesisBodyPos.nPos);
+    BOOST_CHECK(genesisHashOut == pindexGenesis->GetBlockHash());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

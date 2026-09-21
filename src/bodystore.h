@@ -224,4 +224,72 @@ void TestOnlyResetBodyFileState();
  *  write next. */
 unsigned int TestOnlyGetBodyFileSize(int nFile);
 
+/** 2.2.1 (F-140, build-plan.md's 2.2 row): a body-store-owned index, entirely
+ *  decoupled from `cs_main` and `CBlockIndex`, so a future serving handler
+ *  (2.2.3) can resolve `(height|hash) -> position` without touching chain
+ *  state at all. `CBlockIndex::GetBodyPos()` alone cannot do this -- reaching
+ *  a `CBlockIndex` object at all requires looking it up in the `cs_main`-
+ *  guarded block-index map, which is exactly the coupling B4 (§14.3,
+ *  transaction-decoupling.md) identifies as the seek-amplified `cs_main`-
+ *  pinning DoS this index exists to avoid.
+ *
+ *  Two halves, deliberately asymmetric:
+ *
+ *  - `ByHash`: the primary index. Populated the moment a body record is
+ *    WRITTEN (`ReceivedBlockTransactions`'s own two call sites, `AcceptBlock`
+ *    and `AddGenesisBlock`), never at connect -- side-chain blocks are
+ *    accepted and persisted but never connected at all
+ *    (transaction-decoupling.md §5), and the tip-critical fetch path is
+ *    ALWAYS hash-form (a block being fetched is, by definition, not yet on
+ *    the requester's own active chain; build-plan.md's own "2.2 is the tip
+ *    critical path, not a history service"). Works on and off the active
+ *    chain; never removed today (no pruning exists yet, 2.1's own still-open
+ *    item).
+ *  - `AtHeight`: the active chain's own position at a height, maintained only
+ *    at `ConnectTip`/`DisconnectTip`. On disconnect the entry is removed
+ *    outright, not redirected -- the winning branch's own `ConnectTip` is
+ *    what supplies the correct one. A reader landing in the gap mid-reorg
+ *    sees no entry (a clean miss, not wrong data) exactly the way a genuine
+ *    history gap does under §8.4 decision 2's own non-punitive-miss rule.
+ *
+ *  Locking: both halves share `cs_bodyIndex`, a mutex deliberately independent
+ *  of `cs_LastBodyFile` (which holds across an `fsync` on file rollover,
+ *  `FindBodyPos`) and never taken together with it. `cs_bodyIndex` is held
+ *  ONLY for the map lookup/update itself, never across any I/O -- a future
+ *  serving handler (2.2.3) must resolve through this index, release the lock,
+ *  then read the record, exactly the discipline that makes the "no `cs_main`"
+ *  property real rather than nominal. */
+
+/** Record where a block's body record was written, keyed by the block's own
+ *  hash. No `cs_main` required to call or to read back. */
+void RecordBodyPositionByHash(const uint256 &hash, const FlatFilePos &pos);
+
+/** Look up a body position by hash. False if never recorded. */
+bool LookupBodyPositionByHash(const uint256 &hash, FlatFilePos &posOut);
+
+/** Record the ACTIVE CHAIN's body position and hash at a height -- call at
+ *  `ConnectTip`, after the connect itself succeeds. Overwrites any existing
+ *  entry at that height (a reorg's own `ConnectTip` for the winning branch is
+ *  what corrects a stale one -- no separate "is this a reorg" branch needed
+ *  here). */
+void RecordBodyPositionAtHeight(int nHeight, const uint256 &hash, const FlatFilePos &pos);
+
+/** Remove the active chain's entry at a height -- call at `DisconnectTip`,
+ *  for the height being disconnected. */
+void EraseBodyPositionAtHeight(int nHeight);
+
+/** Look up the ACTIVE CHAIN's body position and hash at a height. False if
+ *  this height has no entry (never connected, disconnected mid-reorg, or
+ *  beyond the highest height ever recorded). */
+bool LookupBodyPositionAtHeight(int nHeight, FlatFilePos &posOut, uint256 &hashOut);
+
+/** Discard both halves of the index. Called once, at the start of a full
+ *  rebuild (`CChainState::LoadChainTip`, validation.cpp -- no separate
+ *  on-disk format for this index; it is rebuilt every boot from
+ *  `CBlockIndex`'s own already-persisted `nBodyFile`/`nBodyPos`/
+ *  `BLOCK_HAVE_BODY_RECORD`, the same "rebuilt every boot" convention
+ *  `vinfoBlockFile`/`setBlockIndexCandidates` already use), and directly by
+ *  tests that need to simulate a fresh process. */
+void ResetBodyIndex();
+
 #endif // BITCOIN_BODYSTORE_H

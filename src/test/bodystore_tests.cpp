@@ -694,4 +694,151 @@ BOOST_AUTO_TEST_CASE(body_record_position_is_absent_when_the_bit_is_unset) {
     BOOST_CHECK(diskIndexOut.hashMerkleRoot == indexWithout.hashMerkleRoot);
 }
 
+// 2.2.1 (F-140): the body-store-owned height+hash index, entirely decoupled
+// from CBlockIndex/cs_main -- see bodystore.h's file-level comment for the
+// design (two asymmetric halves, one dedicated leaf-most lock).
+
+BOOST_AUTO_TEST_CASE(lookup_body_position_by_hash_returns_false_when_never_recorded) {
+    ResetBodyIndex();
+
+    FlatFilePos posOut;
+    BOOST_CHECK(!LookupBodyPositionByHash(uint256S("0x1"), posOut));
+}
+
+BOOST_AUTO_TEST_CASE(record_and_lookup_body_position_by_hash_round_trips) {
+    ResetBodyIndex();
+
+    uint256 hash = uint256S("0xaa");
+    FlatFilePos pos(3, 12345);
+    RecordBodyPositionByHash(hash, pos);
+
+    FlatFilePos posOut;
+    BOOST_REQUIRE(LookupBodyPositionByHash(hash, posOut));
+    BOOST_CHECK_EQUAL(posOut.nFile, pos.nFile);
+    BOOST_CHECK_EQUAL(posOut.nPos, pos.nPos);
+
+    // A different hash never recorded must still miss -- proves the lookup is
+    // keyed on the hash, not just "something was recorded".
+    FlatFilePos other;
+    BOOST_CHECK(!LookupBodyPositionByHash(uint256S("0xbb"), other));
+}
+
+// Side-chain blocks are accepted and persisted but never connected at all
+// (transaction-decoupling.md SS5) -- the hash index must never require a
+// connect to see an entry. This test doesn't exercise validation.cpp's own
+// AcceptBlock wiring (that's the integration test in acceptancebit_tests.cpp);
+// it proves the index itself imposes no such ordering.
+BOOST_AUTO_TEST_CASE(record_body_position_by_hash_needs_no_height_entry_at_all) {
+    ResetBodyIndex();
+
+    uint256 hash = uint256S("0xcc");
+    FlatFilePos pos(0, 500);
+    RecordBodyPositionByHash(hash, pos);
+
+    FlatFilePos posOut;
+    uint256 hashOut;
+    // This height was never recorded via RecordBodyPositionAtHeight -- the
+    // by-hash entry must not have implicitly created one.
+    BOOST_CHECK(!LookupBodyPositionAtHeight(0, posOut, hashOut));
+
+    FlatFilePos byHashOut;
+    BOOST_REQUIRE(LookupBodyPositionByHash(hash, byHashOut));
+    BOOST_CHECK_EQUAL(byHashOut.nPos, 500U);
+}
+
+BOOST_AUTO_TEST_CASE(lookup_body_position_at_height_returns_false_when_never_recorded) {
+    ResetBodyIndex();
+
+    FlatFilePos posOut;
+    uint256 hashOut;
+    BOOST_CHECK(!LookupBodyPositionAtHeight(0, posOut, hashOut));
+    BOOST_CHECK(!LookupBodyPositionAtHeight(100, posOut, hashOut));
+}
+
+BOOST_AUTO_TEST_CASE(record_and_lookup_body_position_at_height_round_trips) {
+    ResetBodyIndex();
+
+    uint256 hash = uint256S("0xdd");
+    FlatFilePos pos(1, 999);
+    RecordBodyPositionAtHeight(42, hash, pos);
+
+    FlatFilePos posOut;
+    uint256 hashOut;
+    BOOST_REQUIRE(LookupBodyPositionAtHeight(42, posOut, hashOut));
+    BOOST_CHECK_EQUAL(posOut.nFile, pos.nFile);
+    BOOST_CHECK_EQUAL(posOut.nPos, pos.nPos);
+    BOOST_CHECK(hashOut == hash);
+
+    // A neighbouring height never recorded must still miss.
+    FlatFilePos other;
+    uint256 otherHash;
+    BOOST_CHECK(!LookupBodyPositionAtHeight(41, other, otherHash));
+    BOOST_CHECK(!LookupBodyPositionAtHeight(43, other, otherHash));
+}
+
+// A reorg's own ConnectTip for the winning branch is what corrects a stale
+// height entry -- RecordBodyPositionAtHeight must overwrite, not refuse or
+// duplicate.
+BOOST_AUTO_TEST_CASE(record_body_position_at_height_overwrites_an_existing_entry) {
+    ResetBodyIndex();
+
+    uint256 hashA = uint256S("0xa1");
+    RecordBodyPositionAtHeight(10, hashA, FlatFilePos(0, 100));
+
+    uint256 hashB = uint256S("0xb2");
+    RecordBodyPositionAtHeight(10, hashB, FlatFilePos(0, 200));
+
+    FlatFilePos posOut;
+    uint256 hashOut;
+    BOOST_REQUIRE(LookupBodyPositionAtHeight(10, posOut, hashOut));
+    BOOST_CHECK(hashOut == hashB);
+    BOOST_CHECK_EQUAL(posOut.nPos, 200U);
+}
+
+// DisconnectTip's own contract (bodystore.h): remove the entry outright, never
+// redirect it -- a reader landing in the gap mid-reorg must see a clean miss,
+// not the disconnected branch's stale data.
+BOOST_AUTO_TEST_CASE(erase_body_position_at_height_removes_the_entry) {
+    ResetBodyIndex();
+
+    RecordBodyPositionAtHeight(7, uint256S("0xe1"), FlatFilePos(0, 300));
+    FlatFilePos posOut;
+    uint256 hashOut;
+    BOOST_REQUIRE(LookupBodyPositionAtHeight(7, posOut, hashOut));
+
+    EraseBodyPositionAtHeight(7);
+    BOOST_CHECK(!LookupBodyPositionAtHeight(7, posOut, hashOut));
+}
+
+// Erasing a height that was never recorded (or already erased) must be a
+// harmless no-op, not a crash -- DisconnectTip has no way to know in advance
+// whether an entry exists.
+BOOST_AUTO_TEST_CASE(erase_body_position_at_height_is_a_no_op_when_nothing_was_recorded) {
+    ResetBodyIndex();
+    EraseBodyPositionAtHeight(999);
+
+    FlatFilePos posOut;
+    uint256 hashOut;
+    BOOST_CHECK(!LookupBodyPositionAtHeight(999, posOut, hashOut));
+}
+
+// The startup rebuild (CChainState::LoadChainTip, validation.cpp) calls this
+// once before repopulating from CBlockIndex -- must discard BOTH halves, not
+// just one, or a stale by-hash entry from before a reindex would silently
+// keep answering for a block the rebuild never re-recorded.
+BOOST_AUTO_TEST_CASE(reset_body_index_clears_both_halves) {
+    ResetBodyIndex();
+
+    uint256 hash = uint256S("0xf1");
+    RecordBodyPositionByHash(hash, FlatFilePos(0, 1));
+    RecordBodyPositionAtHeight(5, hash, FlatFilePos(0, 1));
+
+    ResetBodyIndex();
+
+    FlatFilePos posOut;
+    uint256 hashOut;
+    BOOST_CHECK(!LookupBodyPositionByHash(hash, posOut));
+    BOOST_CHECK(!LookupBodyPositionAtHeight(5, posOut, hashOut));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

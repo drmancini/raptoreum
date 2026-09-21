@@ -5,10 +5,14 @@
 #include <bodystore.h>
 
 #include <clientversion.h>
+#include <saltedhasher.h>
 #include <streams.h>
 #include <sync.h>
 #include <txdb.h>
+#include <uint256.h>
 #include <util/system.h>
+
+#include <unordered_map>
 
 #include <cstdio>
 #include <memory>
@@ -39,6 +43,20 @@ namespace {
     // (F-127 -- CompactSize's 32 MiB ceiling made a
     // full-budget record unreadable).
     const size_t BODY_OFFSET_WIDTH = 4;
+
+    // 2.2.1 (F-140): the body-store-owned height+hash index -- see
+    // bodystore.h's file-level comment for the design. Deliberately its own
+    // lock, never nested with cs_LastBodyFile (which holds across an fsync on
+    // rollover) and never held across I/O by any caller.
+    Mutex cs_bodyIndex;
+
+    std::unordered_map<uint256, FlatFilePos, StaticSaltedHasher> mapBodyPosByHash GUARDED_BY(cs_bodyIndex);
+
+    struct BodyHeightEntry {
+        uint256 hash;
+        FlatFilePos pos;
+    };
+    std::unordered_map<int, BodyHeightEntry> mapBodyPosByHeight GUARDED_BY(cs_bodyIndex);
 
 } // namespace
 
@@ -313,4 +331,46 @@ unsigned int TestOnlyGetBodyFileSize(int nFile) {
         return 0;
     }
     return vinfoBodyFile[nFile].nSize;
+}
+
+void RecordBodyPositionByHash(const uint256 &hash, const FlatFilePos &pos) {
+    LOCK(cs_bodyIndex);
+    mapBodyPosByHash[hash] = pos;
+}
+
+bool LookupBodyPositionByHash(const uint256 &hash, FlatFilePos &posOut) {
+    LOCK(cs_bodyIndex);
+    auto it = mapBodyPosByHash.find(hash);
+    if (it == mapBodyPosByHash.end()) {
+        return false;
+    }
+    posOut = it->second;
+    return true;
+}
+
+void RecordBodyPositionAtHeight(int nHeight, const uint256 &hash, const FlatFilePos &pos) {
+    LOCK(cs_bodyIndex);
+    mapBodyPosByHeight[nHeight] = BodyHeightEntry{hash, pos};
+}
+
+void EraseBodyPositionAtHeight(int nHeight) {
+    LOCK(cs_bodyIndex);
+    mapBodyPosByHeight.erase(nHeight);
+}
+
+bool LookupBodyPositionAtHeight(int nHeight, FlatFilePos &posOut, uint256 &hashOut) {
+    LOCK(cs_bodyIndex);
+    auto it = mapBodyPosByHeight.find(nHeight);
+    if (it == mapBodyPosByHeight.end()) {
+        return false;
+    }
+    posOut = it->second.pos;
+    hashOut = it->second.hash;
+    return true;
+}
+
+void ResetBodyIndex() {
+    LOCK(cs_bodyIndex);
+    mapBodyPosByHash.clear();
+    mapBodyPosByHeight.clear();
 }
