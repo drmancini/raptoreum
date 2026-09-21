@@ -204,9 +204,16 @@ bool FlushBodyFile(bool fFinalize = false);
  *  entirely instead of documenting an invariant every future caller must honour. */
 void GetDirtyBodyFileInfo(std::vector<std::pair<int, CBodyFileInfo>> &vFilesOut, int &nLastFileOut);
 
-/** Test-only: reset FindBodyPos's in-memory state to simulate a fresh process
- *  that must reload from pblocktree via LoadBodyFileInfo(). Never called from
- *  production code. */
+/** Reset FindBodyPos's in-memory state -- validation.cpp's UnloadBlockIndex
+ *  calls this alongside its own vinfoBlockFile.clear()/nLastBlockFile=0 reset
+ *  (F-135, 2.1.4 review: UnloadBlockIndex had no body-store counterpart,
+ *  so a reindex-retry within one process kept stale in-memory body-file
+ *  bookkeeping after pblocktree itself was wiped). */
+void ResetBodyFileState();
+
+/** Test-only wrapper for the above, kept as its own name at every existing
+ *  call site (bodystore_tests.cpp, acceptancebit_tests.cpp) -- simulates a
+ *  fresh process that must reload from pblocktree via LoadBodyFileInfo(). */
 void TestOnlyResetBodyFileState();
 
 /** Test-only: the in-memory size LoadBodyFileInfo/FindBodyPos currently hold

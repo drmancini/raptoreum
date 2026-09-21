@@ -995,6 +995,10 @@ BOOST_AUTO_TEST_CASE(accepted_block_writes_its_bodies_to_the_body_store) {
     CBlock block = CreateAndProcessBlock({spendTx}, coinbaseKey);
     CBlockIndex *pindex = LookupBlockIndex(block.GetHash());
     BOOST_REQUIRE(pindex != nullptr);
+    // F-135 (2.1.4 review): the body store is written and the status bit set
+    // during AcceptBlock, before ConnectBlock ever runs -- without this
+    // check, an invalid spend would still pass every assertion below.
+    BOOST_REQUIRE_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), block.GetHash().ToString());
 
     BOOST_CHECK(pindex->nStatus & BLOCK_HAVE_BODY_RECORD);
     BOOST_REQUIRE(!pindex->GetBodyPos().IsNull());
@@ -1009,15 +1013,25 @@ BOOST_AUTO_TEST_CASE(accepted_block_writes_its_bodies_to_the_body_store) {
     }
 }
 
-// Mirrors unrequested_arrival_fills_a_commitment_only_block above, for
-// BLOCK_HAVE_BODY_RECORD: a withheld block's real bytes are written to the
-// body store on the FIRST accept (SaveBodyToDisk is unconditional, matching
-// SaveBlockToDisk -- F-131's "must not special-case a withheld accept" write
-// path), but the STATUS bit lags until the bodies "arrive" (a later
-// unrequested re-offer), exactly the way BLOCK_HAVE_BODIES itself already
-// works. No second write happens on arrival -- nBodyFile/nBodyPos are
-// unchanged, only ReceivedBlockBodies's status bit changes.
-BOOST_AUTO_TEST_CASE(withheld_bodies_are_written_but_the_record_bit_lags_until_arrival) {
+// F-135 (2.1.4 review): BLOCK_HAVE_BODY_RECORD is NOT BLOCK_HAVE_BODIES's
+// sibling -- it is BLOCK_HAVE_DATA's own analogue for the body store ("we
+// know where these bytes are"), unconditional the instant SaveBodyToDisk
+// succeeds. The first version of this test asserted the OPPOSITE (the record
+// bit deferred like BLOCK_HAVE_BODIES) and passed -- because gating
+// CDiskBlockIndex's conditional serialization of nBodyFile/nBodyPos on that
+// same, deliberately-withheld bit meant a withheld block's real, already-
+// written position was never persisted to disk at all, only held in memory
+// for the life of the process. A restart between a withheld accept and the
+// bodies "arriving" would then stamp BLOCK_HAVE_BODY_RECORD onto whatever a
+// fresh CBlockIndex defaults to (0,0) instead of the real position -- this
+// test cannot reach across a restart (body_store_bookkeeping_survives_a_
+// real_loadblockindexdb_reload below does, now that both are fixed), but it
+// still proves the corrected, non-deferred semantics within one process:
+// GetBodyPos() is valid and correct on the FIRST (withheld) accept, and only
+// BLOCK_HAVE_BODIES -- the deliberately-withholdable "we claim to serve real
+// content" bit -- lags until the bodies "arrive" (a later unrequested
+// re-offer).
+BOOST_AUTO_TEST_CASE(body_record_bit_is_unconditional_even_when_bodies_are_withheld) {
     ChainstateManager &chainman = EnsureChainman(m_node);
     const CChainParams &chainparams = Params();
 
@@ -1026,8 +1040,7 @@ BOOST_AUTO_TEST_CASE(withheld_bodies_are_written_but_the_record_bit_lags_until_a
     std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
     uint256 hash = block.GetHash();
 
-    int nFileAfterFirstAccept = -1;
-    unsigned int nPosAfterFirstAccept = 0;
+    FlatFilePos bodyPosAfterFirstAccept;
     {
         PerfWithholdGuard guard(hash);
         bool fNewBlock = false;
@@ -1036,16 +1049,17 @@ BOOST_AUTO_TEST_CASE(withheld_bodies_are_written_but_the_record_bit_lags_until_a
 
         const CBlockIndex *pindex = LookupBlockIndex(hash);
         BOOST_REQUIRE(pindex != nullptr);
-        // GetBodyPos() is gated on the status bit (mirrors GetBlockPos()'s own
-        // convention, proven in bodystore_tests.cpp) so it is still null here
-        // -- read the raw fields directly to see that the real bytes were
-        // written anyway, only the index's CLAIM to hold them is withheld,
-        // mirroring BLOCK_HAVE_BODIES exactly.
-        BOOST_CHECK(pindex->GetBodyPos().IsNull());
-        BOOST_CHECK(!(pindex->nStatus & BLOCK_HAVE_BODY_RECORD));
-        BOOST_CHECK(pindex->nBodyFile >= 0);
-        nFileAfterFirstAccept = pindex->nBodyFile;
-        nPosAfterFirstAccept = pindex->nBodyPos;
+        // The position is known and correct immediately -- withholding defers
+        // only the SEPARATE "claim to hold real content" bit below.
+        BOOST_CHECK(pindex->nStatus & BLOCK_HAVE_BODY_RECORD);
+        BOOST_REQUIRE(!pindex->GetBodyPos().IsNull());
+        BOOST_CHECK(!(pindex->nStatus & BLOCK_HAVE_BODIES));
+        bodyPosAfterFirstAccept = pindex->GetBodyPos();
+
+        std::vector<CTransactionRef> bodiesOut;
+        BOOST_REQUIRE(ReadBodyRecord(bodyPosAfterFirstAccept, bodiesOut));
+        BOOST_REQUIRE_EQUAL(bodiesOut.size(), block.vtx.size() - 1);
+        BOOST_CHECK(bodiesOut[0]->GetHash() == block.vtx[1]->GetHash());
     }
 
     bool fNewBlock2 = false;
@@ -1053,16 +1067,11 @@ BOOST_AUTO_TEST_CASE(withheld_bodies_are_written_but_the_record_bit_lags_until_a
     BOOST_CHECK(fNewBlock2);
 
     const CBlockIndex *pindex = LookupBlockIndex(hash);
+    BOOST_CHECK(pindex->nStatus & BLOCK_HAVE_BODIES);
     BOOST_CHECK(pindex->nStatus & BLOCK_HAVE_BODY_RECORD);
-    BOOST_REQUIRE(!pindex->GetBodyPos().IsNull());
-    // No second copy: the position is unchanged from the withheld accept.
-    BOOST_CHECK_EQUAL(pindex->GetBodyPos().nFile, nFileAfterFirstAccept);
-    BOOST_CHECK_EQUAL(pindex->GetBodyPos().nPos, nPosAfterFirstAccept);
-
-    std::vector<CTransactionRef> bodiesOut;
-    BOOST_REQUIRE(ReadBodyRecord(pindex->GetBodyPos(), bodiesOut));
-    BOOST_REQUIRE_EQUAL(bodiesOut.size(), block.vtx.size() - 1);
-    BOOST_CHECK(bodiesOut[0]->GetHash() == block.vtx[1]->GetHash());
+    // No second write: the position is unchanged from the withheld accept.
+    BOOST_CHECK_EQUAL(pindex->GetBodyPos().nFile, bodyPosAfterFirstAccept.nFile);
+    BOOST_CHECK_EQUAL(pindex->GetBodyPos().nPos, bodyPosAfterFirstAccept.nPos);
 }
 
 // F-133's second recorded constraint, proven rather than merely argued: the
@@ -1073,7 +1082,14 @@ BOOST_AUTO_TEST_CASE(withheld_bodies_are_written_but_the_record_bit_lags_until_a
 // This drives the SAME real LoadBlockIndexDB call
 // bodiesmigrated_migration_restores_have_bodies_on_pre_1_3_entries above
 // uses, so it is a real reload, not a simulation of one.
-BOOST_AUTO_TEST_CASE(body_store_bookkeeping_survives_a_real_loadblockindexdb_reload) {
+//
+// F-135 (2.1.4 review): this proves the body-FILE bookkeeping side only
+// (vinfoBodyFile's per-file sizes, via LoadBodyFileInfo) -- it never persists
+// the CBlockIndex itself, so it says nothing about the per-block POSITION
+// side. See body_position_on_the_index_survives_a_real_loadblockindexdb_reload
+// below for that half; the two are independent and BOTH were needed (the
+// second one caught a real bug this one couldn't see).
+BOOST_AUTO_TEST_CASE(body_file_bookkeeping_survives_a_real_loadblockindexdb_reload) {
     ChainstateManager &chainman = EnsureChainman(m_node);
     const CChainParams &chainparams = Params();
 
@@ -1129,6 +1145,58 @@ BOOST_AUTO_TEST_CASE(body_store_bookkeeping_survives_a_real_loadblockindexdb_rel
     // reloaded state -- the reload only affects in-memory bookkeeping.
     std::vector<CTransactionRef> bodiesOut;
     BOOST_REQUIRE(ReadBodyRecord(bodyPos, bodiesOut));
+    BOOST_REQUIRE_EQUAL(bodiesOut.size(), block.vtx.size() - 1);
+    BOOST_CHECK(bodiesOut[0]->GetHash() == block.vtx[1]->GetHash());
+}
+
+// F-135 (2.1.4 review): the test above proves the body-FILE bookkeeping
+// survives a reload; it never proves the per-block POSITION does, because it
+// never persists the CBlockIndex itself through WriteBatchSync and never
+// disturbs pindex's own nBodyFile/nBodyPos in memory. That gap hid a real
+// HIGH bug: LoadBlockIndexGuts (txdb.cpp) copied nFile/nDataPos/nUndoPos/
+// nStatus/nTx from CDiskBlockIndex but never nBodyFile/nBodyPos, so a
+// correctly PERSISTED position (CDiskBlockIndex's own conditional
+// serialization, chain.h, writes it whenever BLOCK_HAVE_BODY_RECORD is set)
+// was silently dropped on every restart regardless. Proven here by
+// persisting the real CBlockIndex, clobbering the in-memory fields to
+// exactly what a genuinely fresh CBlockIndex::SetNull() leaves (0,0) --
+// what every restart's newly constructed entry starts as before the loader
+// runs -- and confirming the reload restores the real position, not the
+// clobbered one.
+BOOST_AUTO_TEST_CASE(body_position_on_the_index_survives_a_real_loadblockindexdb_reload) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    const CChainParams &chainparams = Params();
+
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock block = CreateAndProcessBlock({spendTx}, coinbaseKey);
+    CBlockIndex *pindex = LookupBlockIndex(block.GetHash());
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(pindex->nStatus & BLOCK_HAVE_BODY_RECORD);
+    FlatFilePos bodyPos = pindex->GetBodyPos();
+    BOOST_REQUIRE(!bodyPos.IsNull());
+
+    // Persist the real CBlockIndex entry -- CDiskBlockIndex's own conditional
+    // serialization (chain.h) writes nBodyFile/nBodyPos because the status
+    // bit is set.
+    BOOST_REQUIRE(pblocktree->WriteBatchSync({}, 0, {pindex}));
+
+    // Clobber the in-memory fields to what a genuinely fresh restart's newly
+    // constructed CBlockIndex starts as, before the loader has run.
+    pindex->nBodyFile = 0;
+    pindex->nBodyPos = 0;
+    BOOST_CHECK_EQUAL(pindex->GetBodyPos().nPos, 0U);
+
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(LoadBlockIndexDB(chainman, chainparams));
+    }
+
+    // The reload must restore the REAL position, not leave the clobbered one.
+    BOOST_CHECK_EQUAL(pindex->GetBodyPos().nFile, bodyPos.nFile);
+    BOOST_CHECK_EQUAL(pindex->GetBodyPos().nPos, bodyPos.nPos);
+
+    std::vector<CTransactionRef> bodiesOut;
+    BOOST_REQUIRE(ReadBodyRecord(pindex->GetBodyPos(), bodiesOut));
     BOOST_REQUIRE_EQUAL(bodiesOut.size(), block.vtx.size() - 1);
     BOOST_CHECK(bodiesOut[0]->GetHash() == block.vtx[1]->GetHash());
 }

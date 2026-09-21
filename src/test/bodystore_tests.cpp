@@ -437,15 +437,25 @@ BOOST_AUTO_TEST_CASE(flush_body_file_is_a_no_op_before_anything_is_loaded) {
 
 // 2.1.4: FlushBodyFile is FindBodyPos's analogue of FlushBlockFile -- proves
 // it actually flushes the CURRENT file (not the wrong one, and not a no-op
-// once something real exists to flush).
+// once something real exists to flush). F-135 (2.1.4 review): the first
+// version of this test never left file 0, so a hardcoded FlatFilePos(0, ...)
+// inside FlushBodyFile would have survived it -- rolled to file 1 first,
+// matching find_body_pos_continues_after_a_simulated_restart's own reasoning,
+// so a wrong-file mutant fails to open/flush the right file instead of
+// silently passing.
 BOOST_AUTO_TEST_CASE(flush_body_file_flushes_the_current_file_after_a_real_write) {
     TestOnlyResetBodyFileState();
     BOOST_REQUIRE(LoadBodyFileInfo());
+
+    FlatFilePos fillPos;
+    BOOST_REQUIRE(FindBodyPos(fillPos, MAX_BODYFILE_SIZE - 1));
+    BOOST_REQUIRE_EQUAL(fillPos.nFile, 0);
 
     std::vector<CTransactionRef> bodies = MakeBodies(3);
     uint64_t recordSize = GetBodyRecordSerializedSize(bodies);
     FlatFilePos pos;
     BOOST_REQUIRE(FindBodyPos(pos, (unsigned int) recordSize));
+    BOOST_REQUIRE_EQUAL(pos.nFile, 1);
     BOOST_REQUIRE(WriteBodyRecord(pos, bodies));
 
     BOOST_CHECK(FlushBodyFile());

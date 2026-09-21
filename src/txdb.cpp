@@ -471,6 +471,17 @@ bool CBlockTreeDB::LoadBlockIndexGuts(const Consensus::Params &consensusParams,
                 pindexNew->nNonce = diskindex.nNonce;
                 pindexNew->nStatus = diskindex.nStatus;
                 pindexNew->nTx = diskindex.nTx;
+                // 2.1.4 review (F-135): this loader copied nFile/nDataPos/
+                // nUndoPos but never nBodyFile/nBodyPos, so a real, correctly
+                // persisted body position was silently dropped on every
+                // restart -- unconditional, exactly like the fields above:
+                // CDiskBlockIndex's own conditional serialization already
+                // leaves diskindex's copies at CBlockIndex::SetNull()'s same
+                // 0/0 default when BLOCK_HAVE_BODY_RECORD was unset, so there
+                // is nothing to guard here that isn't already true of nFile
+                // et al.
+                pindexNew->nBodyFile = diskindex.nBodyFile;
+                pindexNew->nBodyPos = diskindex.nBodyPos;
                 // TODO: replace this check with something faster
 //                if (!CheckProofOfWork(pindexNew->GetBlockHash(), pindexNew->nBits, consensusParams))
 //                    return error("%s: CheckProofOfWork failed: %s", __func__, pindexNew->ToString());
