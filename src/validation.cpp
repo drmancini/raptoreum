@@ -3155,13 +3155,17 @@ bool CChainState::DisconnectTip(CValidationState &state, const CChainParams &cha
         }
     }
 
-    m_chain.SetTip(pindexDelete->pprev);
-
-    // 2.2.1 (F-140): remove the active chain's own height entry outright,
-    // never redirect it -- the winning branch's own ConnectTip is what
-    // supplies the correct one. A reader landing in the gap mid-reorg must
-    // see a clean miss, never the disconnected branch's stale data.
+    // 2.2.1 (F-140)/F-141: remove the active chain's own height entry
+    // outright, never redirect it -- the winning branch's own ConnectTip is
+    // what supplies the correct one. Erased BEFORE SetTip, not after (F-141
+    // review): a cs_main-free reader between the two calls must never see
+    // this height still resolve to the block that is (as of the SetTip
+    // below) no longer on the active chain -- the height map is a strict
+    // subset of m_chain at every observable point this way, matching what
+    // ConnectTip already does (SetTip, then record).
     EraseBodyPositionAtHeight(pindexDelete->nHeight);
+
+    m_chain.SetTip(pindexDelete->pprev);
 
     UpdateTip(pindexDelete->pprev, chainparams);
     // Let wallets know transactions went from 1-confirmed to
@@ -3326,14 +3330,24 @@ bool CChainState::ConnectTip(CValidationState &state, const CChainParams &chainp
     // Update m_chain & related variables.
     m_chain.SetTip(pindexNew);
 
-    // 2.2.1 (F-140): record the active chain's own body position at this
-    // height. BLOCK_HAVE_BODY_RECORD is set unconditionally the moment
-    // ReceivedBlockTransactions runs (F-135), independent of bodies_held/
-    // BLOCK_HAVE_BODIES -- so GetBodyPos() is always valid for any pindexNew
-    // that reaches this point, whether or not this call supplied `pblock`
-    // directly. Overwrites any stale entry a prior branch left behind at this
-    // height, exactly what a reorg's winning ConnectTip is supposed to do.
-    RecordBodyPositionAtHeight(pindexNew->nHeight, pindexNew->GetBlockHash(), pindexNew->GetBodyPos());
+    // 2.2.1 (F-140)/F-141: record the active chain's own body position at
+    // this height. BLOCK_HAVE_BODY_RECORD is set unconditionally the moment
+    // ReceivedBlockTransactions runs (F-135) for any block THIS binary
+    // accepts, independent of bodies_held/BLOCK_HAVE_BODIES -- but
+    // chain.h's own migration note is explicit that "no pre-2.1.4 entry has
+    // ever had a real body-store record written", so a datadir synced
+    // before this commit can still reach ConnectTip's `!pblock` branch
+    // (which only requires the OLDER, already-migrated BLOCK_HAVE_BODIES
+    // bit, e.g. via a `-reindex-chainstate` replay) with the bit unset and
+    // GetBodyPos() null. Guarded exactly like LoadChainTip's own rebuild
+    // loop: a null position means no entry, not a poisoned one with
+    // nFile == -1. Overwrites any stale entry a prior branch left behind at
+    // this height, exactly what a reorg's winning ConnectTip is supposed to
+    // do.
+    FlatFilePos bodyPosForIndex = pindexNew->GetBodyPos();
+    if (!bodyPosForIndex.IsNull()) {
+        RecordBodyPositionAtHeight(pindexNew->nHeight, pindexNew->GetBlockHash(), bodyPosForIndex);
+    }
 
     UpdateTip(pindexNew, chainparams);
 
@@ -5506,6 +5520,31 @@ EXCLUSIVE_LOCKS_REQUIRED(cs_main)
                 pblocktree->ReadFlag("futureindex", fFutureIndex);
                 LogPrintf("%s: future index %s\n", __func__, fFutureIndex ? "enabled" : "disabled");
 
+                // F-141 (Fable review of F-140, 2.2.1, HIGH): the hash half of
+                // the body-store index rebuilds HERE, not in LoadChainTip --
+                // init.cpp calls THIS function on every load path except a
+                // full -reindex (where the block index starts empty and
+                // repopulates naturally as ReceivedBlockTransactions runs for
+                // each re-accepted block), but calls LoadChainTip only when
+                // `!is_coinsview_empty()`, which is false for
+                // -reindex-chainstate specifically (`fReindexChainState` is a
+                // distinct flag from `fReindex`). Before this fix, a real
+                // -reindex-chainstate run reconnected every existing block via
+                // ConnectTip (height half only) with no ReceivedBlockTransactions
+                // call for any of them (already accepted, not re-read from
+                // blk*.dat) -- so the hash half stayed permanently empty for
+                // the life of the process. ResetBodyIndex() is NOT called
+                // here: UnloadBlockIndex already cleared both halves at the
+                // top of this same load attempt, and calling it again here
+                // would only need re-stating that invariant, not changing it.
+                for (const auto &entry : chainman.BlockIndex()) {
+                    const CBlockIndex *pindexEntry = entry.second;
+                    FlatFilePos entryBodyPos = pindexEntry->GetBodyPos();
+                    if (!entryBodyPos.IsNull()) {
+                        RecordBodyPositionByHash(pindexEntry->GetBlockHash(), entryBodyPos);
+                    }
+                }
+
                 return true;
         }
 
@@ -5527,21 +5566,18 @@ bool CChainState::LoadChainTip(const CChainParams &chainparams) {
     m_chain.SetTip(pindex);
     PruneBlockIndexCandidates();
 
-    // 2.2.1 (F-140): rebuild the body-store-owned height+hash index from
-    // CBlockIndex's own already-persisted nBodyFile/nBodyPos/
-    // BLOCK_HAVE_BODY_RECORD -- no separate on-disk format for this index,
-    // the same "rebuilt every boot" convention vinfoBlockFile/
-    // setBlockIndexCandidates already use. Deliberately lives here, not in
+    // 2.2.1 (F-140)/F-141: rebuild the height half of the body-store-owned
+    // index from the now-current m_chain -- no separate on-disk format, the
+    // same "rebuilt every boot" convention vinfoBlockFile/
+    // setBlockIndexCandidates already use. The hash half is NOT rebuilt
+    // here (F-141): it rebuilds inside LoadBlockIndexDB instead, since THIS
+    // function is skipped entirely on a `-reindex-chainstate` boot
+    // (init.cpp's `is_coinsview_empty` gate) while LoadBlockIndexDB always
+    // runs on that path. No ResetBodyIndex() call here either -- both
+    // halves were already cleared once, by UnloadBlockIndex, at the top of
+    // this same load attempt. Deliberately lives in validation.cpp, not
     // bodystore.h/.cpp, so the body store keeps knowing nothing about
     // CBlockIndex/CChain/BlockMap.
-    ResetBodyIndex();
-    for (const auto &entry : BlockIndex()) {
-        const CBlockIndex *pindexEntry = entry.second;
-        FlatFilePos entryBodyPos = pindexEntry->GetBodyPos();
-        if (!entryBodyPos.IsNull()) {
-            RecordBodyPositionByHash(pindexEntry->GetBlockHash(), entryBodyPos);
-        }
-    }
     for (int height = 0; height <= m_chain.Height(); height++) {
         const CBlockIndex *pindexAtHeight = m_chain[height];
         FlatFilePos heightBodyPos = pindexAtHeight->GetBodyPos();
@@ -5835,6 +5871,15 @@ void UnloadBlockIndex(CTxMemPool *mempool) {
     // after pblocktree itself was wiped, starting the rebuilt index's body
     // writes from wherever the OLD run's counters left off instead of 0.
     ResetBodyFileState();
+    // F-141 (Fable review of F-140, 2.2.1): the height+hash index's own
+    // counterpart to ResetBodyFileState above -- without it, this same
+    // reindex-retry-within-one-process scenario left stale index entries
+    // (from before the retry) pointing at bytes the retried reindex was
+    // about to overwrite from file 0. Also fixes a real test-fixture leak:
+    // this function is what every TestingSetup's own teardown calls
+    // (test_raptoreum.cpp), so without this, every test case in the binary
+    // inherited the previous case's entries.
+    ResetBodyIndex();
     fHavePruned = false;
 }
 

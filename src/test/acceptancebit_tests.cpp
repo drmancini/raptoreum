@@ -1297,7 +1297,12 @@ BOOST_AUTO_TEST_CASE(body_index_survives_a_real_loadchaintip_reload) {
     // Simulate a fresh process: the in-memory index is empty and m_chain has
     // no tip set yet -- LoadChainTip's own genuine "never loaded" precondition
     // (validation.cpp's own init.cpp call site), not merely calling it again
-    // once a tip is already current.
+    // once a tip is already current. Both real init.cpp calls are exercised,
+    // in the same order production makes them (F-141, Fable review of F-140:
+    // the hash half rebuilds in LoadBlockIndexDB, the height half in
+    // LoadChainTip -- calling only the latter, as this test originally did,
+    // passed while silently never exercising the hash-half rebuild path at
+    // all once it moved out of LoadChainTip).
     ResetBodyIndex();
     chainstate.m_chain.SetTip(nullptr);
 
@@ -1308,6 +1313,7 @@ BOOST_AUTO_TEST_CASE(body_index_survives_a_real_loadchaintip_reload) {
 
     {
         LOCK(cs_main);
+        BOOST_REQUIRE(LoadBlockIndexDB(chainman, chainparams));
         BOOST_REQUIRE(chainstate.LoadChainTip(chainparams));
     }
 
@@ -1333,6 +1339,211 @@ BOOST_AUTO_TEST_CASE(body_index_survives_a_real_loadchaintip_reload) {
     BOOST_CHECK_EQUAL(genesisPosOut.nFile, genesisBodyPos.nFile);
     BOOST_CHECK_EQUAL(genesisPosOut.nPos, genesisBodyPos.nPos);
     BOOST_CHECK(genesisHashOut == pindexGenesis->GetBlockHash());
+}
+
+// F-141 (Fable review of F-140, HIGH): production's `-reindex-chainstate`
+// path calls LoadBlockIndexDB but deliberately SKIPS LoadChainTip when the
+// coins view isn't empty at that point (init.cpp's own `is_coinsview_empty`
+// gate: `fReset || fReindexChainState || ...` -- `-reindex-chainstate` alone
+// sets `fReindexChainState`, a genuinely distinct flag from `-reindex`'s
+// `fReindex`, confirmed directly against init.cpp). Before this fix, the
+// hash half's ONLY rebuild lived inside LoadChainTip, so a real
+// `-reindex-chainstate` run left it permanently empty: every existing block
+// gets reconnected via ConnectTip (populating only the height half) with no
+// ReceivedBlockTransactions call for any of them (they're already accepted,
+// not re-read from blk*.dat the way a full -reindex would). Per 2.2.2's own
+// planned NOTFOUND rule, a node in this state would misbehavior-flag itself
+// answering every hash-form tip-path request for its whole pre-existing
+// chain. Proven here by calling LoadBlockIndexDB ALONE, deliberately never
+// calling LoadChainTip, matching exactly what `-reindex-chainstate` does.
+BOOST_AUTO_TEST_CASE(body_index_hash_half_is_rebuilt_by_loadblockindexdb_alone) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    const CChainParams &chainparams = Params();
+
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock block = CreateAndProcessBlock({spendTx}, coinbaseKey);
+    uint256 hash = block.GetHash();
+    CBlockIndex *pindex = LookupBlockIndex(hash);
+    BOOST_REQUIRE(pindex != nullptr);
+    FlatFilePos bodyPos = pindex->GetBodyPos();
+    BOOST_REQUIRE(!bodyPos.IsNull());
+
+    ResetBodyIndex();
+    FlatFilePos posOut;
+    BOOST_REQUIRE(!LookupBodyPositionByHash(hash, posOut));
+
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(LoadBlockIndexDB(chainman, chainparams));
+        // Deliberately NOT calling LoadChainTip -- the real
+        // -reindex-chainstate path never does either.
+    }
+
+    BOOST_REQUIRE(LookupBodyPositionByHash(hash, posOut));
+    BOOST_CHECK_EQUAL(posOut.nFile, bodyPos.nFile);
+    BOOST_CHECK_EQUAL(posOut.nPos, bodyPos.nPos);
+}
+
+// F-141 (Fable review of F-140, HIGH-adjacent/LOW): the free
+// UnloadBlockIndex(CTxMemPool*) -- called both by every TestingSetup's own
+// teardown (test_raptoreum.cpp) and by init.cpp's real reindex retry loop --
+// already resets vinfoBlockFile/ResetBodyFileState but never reset this
+// index, so a reindex retried within one process (or two test cases sharing
+// one binary) silently inherited stale entries from before the reset, which
+// then pointed at bytes the retried reindex was about to overwrite from
+// file 0.
+BOOST_AUTO_TEST_CASE(unloadblockindex_clears_the_body_index) {
+    EnsureChainman(m_node);
+    const CBlockIndex *tip = ::ChainActive().Tip();
+    BOOST_REQUIRE(tip != nullptr);
+    uint256 tipHash = tip->GetBlockHash();
+
+    FlatFilePos posOut;
+    BOOST_REQUIRE(LookupBodyPositionByHash(tipHash, posOut));
+
+    UnloadBlockIndex(m_node.mempool);
+
+    BOOST_CHECK(!LookupBodyPositionByHash(tipHash, posOut));
+}
+
+// F-141 (Fable review of F-140, MEDIUM): ConnectTip recorded
+// pindexNew->GetBodyPos() unconditionally. Every block THIS binary accepts
+// always has BLOCK_HAVE_BODY_RECORD set (F-135: unconditional in
+// ReceivedBlockTransactions), but chain.h's own migration note is explicit
+// that "no pre-2.1.4 entry has ever had a real body-store record written" --
+// a `-reindex-chainstate` replay of any datadir synced before this project's
+// 2.1.4 commit reconnects such entries directly (ConnectTip's `!pblock`
+// branch only requires HaveBodies(), the OLDER, already-migrated
+// BLOCK_HAVE_BODIES bit -- NOT BLOCK_HAVE_BODY_RECORD), reaching
+// RecordBodyPositionAtHeight with a null position. Before this fix, that
+// poisoned the height map with nFile == -1: LookupBodyPositionAtHeight
+// returned true for a position OpenBodyFile would reject, rather than the
+// clean miss the rebuild path (LoadChainTip, which DOES guard on IsNull())
+// produces for the exact same chain. Reproduced by clobbering the bit off a
+// really-accepted, really-disconnected block (matching
+// body_position_on_the_index_survives_a_real_loadblockindexdb_reload's own
+// "clobber to what an old entry actually looks like" technique) and
+// reconnecting it directly through the real ConnectTip, via the same
+// `!pblock` branch a genuine historical replay uses.
+BOOST_AUTO_TEST_CASE(connecttip_never_records_a_null_body_position_for_a_pre_2_1_4_style_entry) {
+    EnsureChainman(m_node);
+    CChainState &chainstate = ::ChainstateActive();
+    const CChainParams &chainparams = Params();
+
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock block = CreateAndProcessBlock({spendTx}, coinbaseKey);
+    CBlockIndex *pindex = LookupBlockIndex(block.GetHash());
+    BOOST_REQUIRE(pindex != nullptr);
+    int height = pindex->nHeight;
+    BOOST_REQUIRE(pindex->nStatus & BLOCK_HAVE_BODIES);
+
+    FlatFilePos posOut;
+    uint256 hashOut;
+    BOOST_REQUIRE(LookupBodyPositionAtHeight(height, posOut, hashOut));
+
+    {
+        LOCK2(cs_main, m_node.mempool->cs);
+        CValidationState dcState;
+        DisconnectedBlockTransactions disconnectpool;
+        BOOST_REQUIRE(chainstate.DisconnectTip(dcState, chainparams, &disconnectpool));
+        disconnectpool.clear();
+    }
+    chainstate.setBlockIndexCandidates.insert(pindex);
+    BOOST_REQUIRE(!LookupBodyPositionAtHeight(height, posOut, hashOut));
+
+    // Simulate a genuinely pre-2.1.4 entry: BLOCK_HAVE_BODY_RECORD unset,
+    // BLOCK_HAVE_BODIES still set (already migrated by the older, pre-2.1.3
+    // "bodiesmigrated" pass) -- exactly what LoadBlockIndexDB reads off a
+    // datadir synced before this commit.
+    pindex->nStatus &= ~BLOCK_HAVE_BODY_RECORD;
+    BOOST_REQUIRE(pindex->GetBodyPos().IsNull());
+    BOOST_REQUIRE(HaveBodies(pindex));
+
+    // ConnectTrace is file-local to validation.cpp (only forward-declared in
+    // the header), so this drives the real reconnection the same way
+    // ThreadImport/other tests in this file do -- ActivateBestChain, called
+    // without cs_main held (its own requirement), constructs ConnectTrace
+    // itself and calls ConnectTip internally with pblock=nullptr for a
+    // candidate it found via FindMostWorkChain rather than one freshly
+    // handed to it -- exactly the `!pblock` branch a real historical replay
+    // uses.
+    CValidationState state;
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state, chainparams, nullptr));
+    BOOST_REQUIRE(chainstate.m_chain.Tip() == pindex);
+
+    // Must be a clean miss, never a poisoned entry with nFile == -1.
+    BOOST_CHECK(!LookupBodyPositionAtHeight(height, posOut, hashOut));
+}
+
+// F-141 (Fable review of F-140, MEDIUM/test-coverage): every prior
+// integration test used a strictly linear chain, so BlockIndex() (every
+// known block) and m_chain[0..Height()] (active chain only) always named
+// exactly the same set -- a mutant feeding the height loop from BlockIndex()
+// instead of m_chain (or vice versa) would still pass every one of them.
+// This builds a genuine equal-work sibling pair (equal_work_tiebreak_
+// survives_bodies_arriving_second's own construction): A wins the tiebreak
+// and connects, B is genuinely ACCEPTED -- its own body record IS written,
+// ReceivedBlockTransactions runs for it -- but never connects at all. B is
+// exactly the side-chain case the hash half exists for and the height half
+// must never see, at the SAME height A occupies.
+BOOST_AUTO_TEST_CASE(body_index_hash_half_covers_a_side_chain_block_the_height_half_never_does) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    const CChainParams &chainparams = Params();
+    CChainState &chainstate = ::ChainstateActive();
+
+    CKey keyB;
+    keyB.MakeNewKey(true);
+    CScript scriptPubKeyB = CScript() << ToByteVector(keyB.GetPubKey()) << OP_CHECKSIG;
+    CBlock blockB = CreateBlock({}, scriptPubKeyB);
+    CBlock blockA = CreateBlock({}, coinbaseKey);
+    BOOST_REQUIRE(blockA.GetHash() != blockB.GetHash());
+
+    std::shared_ptr<const CBlock> shared_pblockA = std::make_shared<const CBlock>(blockA);
+    std::shared_ptr<const CBlock> shared_pblockB = std::make_shared<const CBlock>(blockB);
+    uint256 hashA = blockA.GetHash();
+    uint256 hashB = blockB.GetHash();
+
+    BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblockA, /*fForceProcessing=*/true, nullptr));
+    BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblockB, /*fForceProcessing=*/true, nullptr));
+
+    const CBlockIndex *pindexA = LookupBlockIndex(hashA);
+    const CBlockIndex *pindexB = LookupBlockIndex(hashB);
+    BOOST_REQUIRE(pindexA != nullptr);
+    BOOST_REQUIRE(pindexB != nullptr);
+    BOOST_REQUIRE(::ChainActive().Tip()->GetBlockHash() == hashA);
+    BOOST_REQUIRE(pindexB->nStatus & BLOCK_HAVE_BODY_RECORD);
+    BOOST_REQUIRE(pindexB != chainstate.m_chain.Tip());
+    int heightB = pindexB->nHeight;
+
+    FlatFilePos posOut;
+    uint256 hashOut;
+    BOOST_REQUIRE(LookupBodyPositionByHash(hashB, posOut));
+    BOOST_CHECK_EQUAL(posOut.nFile, pindexB->GetBodyPos().nFile);
+    BOOST_CHECK_EQUAL(posOut.nPos, pindexB->GetBodyPos().nPos);
+
+    // This height belongs to A on the active chain, not B.
+    BOOST_REQUIRE(LookupBodyPositionAtHeight(heightB, posOut, hashOut));
+    BOOST_CHECK(hashOut == hashA);
+
+    // A real reload (LoadBlockIndexDB rebuilds the hash half from EVERY known
+    // block, LoadChainTip rebuilds the height half from the active chain
+    // only) must preserve exactly this distinction.
+    ResetBodyIndex();
+    chainstate.m_chain.SetTip(nullptr);
+    BOOST_REQUIRE(!LookupBodyPositionByHash(hashB, posOut));
+
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(LoadBlockIndexDB(chainman, chainparams));
+        BOOST_REQUIRE(chainstate.LoadChainTip(chainparams));
+    }
+
+    BOOST_REQUIRE(LookupBodyPositionByHash(hashB, posOut));
+    BOOST_CHECK_EQUAL(posOut.nFile, pindexB->GetBodyPos().nFile);
+    BOOST_CHECK_EQUAL(posOut.nPos, pindexB->GetBodyPos().nPos);
+
+    BOOST_REQUIRE(LookupBodyPositionAtHeight(heightB, posOut, hashOut));
+    BOOST_CHECK(hashOut == hashA);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
