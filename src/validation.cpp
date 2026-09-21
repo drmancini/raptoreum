@@ -3157,6 +3157,12 @@ bool CChainState::DisconnectTip(CValidationState &state, const CChainParams &cha
 
     m_chain.SetTip(pindexDelete->pprev);
 
+    // 2.2.1 (F-140): remove the active chain's own height entry outright,
+    // never redirect it -- the winning branch's own ConnectTip is what
+    // supplies the correct one. A reader landing in the gap mid-reorg must
+    // see a clean miss, never the disconnected branch's stale data.
+    EraseBodyPositionAtHeight(pindexDelete->nHeight);
+
     UpdateTip(pindexDelete->pprev, chainparams);
     // Let wallets know transactions went from 1-confirmed to
     // 0-confirmed or conflicted:
@@ -3319,6 +3325,16 @@ bool CChainState::ConnectTip(CValidationState &state, const CChainParams &chainp
     disconnectpool.removeForBlock(blockConnecting.vtx);
     // Update m_chain & related variables.
     m_chain.SetTip(pindexNew);
+
+    // 2.2.1 (F-140): record the active chain's own body position at this
+    // height. BLOCK_HAVE_BODY_RECORD is set unconditionally the moment
+    // ReceivedBlockTransactions runs (F-135), independent of bodies_held/
+    // BLOCK_HAVE_BODIES -- so GetBodyPos() is always valid for any pindexNew
+    // that reaches this point, whether or not this call supplied `pblock`
+    // directly. Overwrites any stale entry a prior branch left behind at this
+    // height, exactly what a reorg's winning ConnectTip is supposed to do.
+    RecordBodyPositionAtHeight(pindexNew->nHeight, pindexNew->GetBlockHash(), pindexNew->GetBodyPos());
+
     UpdateTip(pindexNew, chainparams);
 
     int64_t nTime6 = GetTimeMicros();
@@ -4025,6 +4041,13 @@ void CChainState::ReceivedBlockTransactions(const CBlock &block, CValidationStat
     pindexNew->nBodyFile = bodyPos.nFile;
     pindexNew->nBodyPos = bodyPos.nPos;
     pindexNew->nStatus |= BLOCK_HAVE_BODY_RECORD;
+    // 2.2.1 (F-140): the body-store-owned hash index populates HERE, at
+    // record-write time, not at connect -- a side-chain block reaches this
+    // line but may never be connected at all (transaction-decoupling.md SS5),
+    // and the tip-critical fetch path this index primarily serves is always
+    // hash-form (a block being fetched is by definition not yet on the
+    // requester's own active chain).
+    RecordBodyPositionByHash(pindexNew->GetBlockHash(), bodyPos);
     if (bodies_held) {
         pindexNew->nStatus |= BLOCK_HAVE_BODIES;
     }
@@ -5503,6 +5526,29 @@ bool CChainState::LoadChainTip(const CChainParams &chainparams) {
     }
     m_chain.SetTip(pindex);
     PruneBlockIndexCandidates();
+
+    // 2.2.1 (F-140): rebuild the body-store-owned height+hash index from
+    // CBlockIndex's own already-persisted nBodyFile/nBodyPos/
+    // BLOCK_HAVE_BODY_RECORD -- no separate on-disk format for this index,
+    // the same "rebuilt every boot" convention vinfoBlockFile/
+    // setBlockIndexCandidates already use. Deliberately lives here, not in
+    // bodystore.h/.cpp, so the body store keeps knowing nothing about
+    // CBlockIndex/CChain/BlockMap.
+    ResetBodyIndex();
+    for (const auto &entry : BlockIndex()) {
+        const CBlockIndex *pindexEntry = entry.second;
+        FlatFilePos entryBodyPos = pindexEntry->GetBodyPos();
+        if (!entryBodyPos.IsNull()) {
+            RecordBodyPositionByHash(pindexEntry->GetBlockHash(), entryBodyPos);
+        }
+    }
+    for (int height = 0; height <= m_chain.Height(); height++) {
+        const CBlockIndex *pindexAtHeight = m_chain[height];
+        FlatFilePos heightBodyPos = pindexAtHeight->GetBodyPos();
+        if (!heightBodyPos.IsNull()) {
+            RecordBodyPositionAtHeight(height, pindexAtHeight->GetBlockHash(), heightBodyPos);
+        }
+    }
 
     tip = m_chain.Tip();
     LogPrintf("Loaded best chain: hashBestChain=%s height=%d date=%s progress=%f\n",
