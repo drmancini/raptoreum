@@ -79,6 +79,15 @@ BOOST_AUTO_TEST_CASE(attempt_request_id_differs_by_attempt_number) {
 // signature must never collide with the finalization round's request id, at
 // ANY attempt number, or a peer could be tricked into treating an
 // unconverged attempt as the final, broadcastable CLSIG.
+//
+// F-137 (Fable review of F-136): this only shows SHA256 of two different
+// byte strings differs on this input, not that no collision could ever
+// exist -- the real guarantee is CLSIG_ATTEMPT_REQUESTID_PREFIX's distinct,
+// differently-sized prefix bytes (length-prefixed like every other
+// SerializeHash tuple element, so "clsig-attempt" can never be mistaken for
+// "clsig" plus part of another field) plus the extra tuple element, not
+// this test. Kept as a concrete regression check on today's exact constants,
+// not as a proof.
 BOOST_AUTO_TEST_CASE(attempt_request_id_never_collides_with_the_finalization_request_id) {
     uint256 finalizationId = ::SerializeHash(std::make_pair(CLSIG_REQUESTID_PREFIX, 500));
     for (int32_t attempt = 0; attempt < 5; attempt++) {
@@ -141,18 +150,39 @@ BOOST_AUTO_TEST_CASE(never_restarts_an_attempt_while_finalization_is_outstanding
                 == ChainLockSignAction::kNone);
 }
 
+// F-137 (Fable review of F-136): a node's own scheduler tick can roll its
+// local state into the NEXT attempt slot in the seconds between an
+// attempt's signature genuinely reaching threshold and that recovered
+// signature arriving back at this node -- proven for real against a live
+// signing manager (functional test analysis, see findings.md F-137). If
+// enough nodes race ahead the same way after every attempt, no attempt EVER
+// gathers enough still-watching votes to start finalization, which is
+// strictly worse than the original one-shot code (that never had a slot to
+// fall out of). This over-restarts the node's own tip advancement while
+// starting a fresh attempt (both must keep working) at height H+1 while
+// finalization is outstanding at H.
+BOOST_AUTO_TEST_CASE(starts_a_new_attempt_at_a_higher_tip_while_finalization_is_outstanding) {
+    BOOST_CHECK(DecideChainLockSignAction(/*nTipHeight=*/101, /*nAttemptNum=*/7, -1,
+                                          /*nLastSignedHeight=*/100, /*nLastSignedAttempt=*/7,
+                                          /*fLastSignedIsFinalization=*/true)
+                == ChainLockSignAction::kStartAttempt);
+}
+
 // --- DecideRecoveredSigOutcome --------------------------------------------
 
 BOOST_AUTO_TEST_CASE(ignores_a_recovered_sig_that_does_not_match_what_we_signed) {
     uint256 signedId = GetChainLockAttemptRequestId(100, 7);
     uint256 signedMsgHash = uint256S("0x01");
-    uint256 otherId = GetChainLockAttemptRequestId(100, 8);
+    // Far enough back that CLSIG_ATTEMPT_LOOKBACK doesn't accept it either --
+    // a genuinely different (foreign/stale) id, not a recent past slot.
+    uint256 otherId = GetChainLockAttemptRequestId(100, 7 + CLSIG_ATTEMPT_LOOKBACK + 1);
 
     BOOST_CHECK(DecideRecoveredSigOutcome(otherId, signedMsgHash, signedId, signedMsgHash,
-                                          /*nBestChainLockHeight=*/-1, /*nLastSignedHeight=*/100, false)
+                                          /*nBestChainLockHeight=*/-1, /*nLastSignedHeight=*/100,
+                                          /*nLastSignedAttempt=*/7, false)
                 == RecoveredSigOutcome::kIgnore);
     BOOST_CHECK(DecideRecoveredSigOutcome(signedId, uint256S("0x02"), signedId, signedMsgHash,
-                                          -1, 100, false)
+                                          -1, 100, 7, false)
                 == RecoveredSigOutcome::kIgnore);
 }
 
@@ -161,7 +191,8 @@ BOOST_AUTO_TEST_CASE(ignores_a_recovered_sig_once_a_better_chainlock_already_exi
     uint256 signedMsgHash = uint256S("0x01");
 
     BOOST_CHECK(DecideRecoveredSigOutcome(signedId, signedMsgHash, signedId, signedMsgHash,
-                                          /*nBestChainLockHeight=*/100, /*nLastSignedHeight=*/100, false)
+                                          /*nBestChainLockHeight=*/100, /*nLastSignedHeight=*/100,
+                                          /*nLastSignedAttempt=*/7, false)
                 == RecoveredSigOutcome::kIgnore);
 }
 
@@ -170,8 +201,49 @@ BOOST_AUTO_TEST_CASE(starts_finalization_when_an_attempt_converges) {
     uint256 signedMsgHash = uint256S("0x01");
 
     BOOST_CHECK(DecideRecoveredSigOutcome(signedId, signedMsgHash, signedId, signedMsgHash,
-                                          -1, 100, /*fLastSignedIsFinalization=*/false)
+                                          -1, 100, 7, /*fLastSignedIsFinalization=*/false)
                 == RecoveredSigOutcome::kStartFinalization);
+}
+
+// F-137: the actual fix for the handoff race. The node has already moved on
+// to attempt 9 (lastSignedRequestId/lastSignedAttempt reflect that), but a
+// recovered signature for the OLDER attempt 7 -- which genuinely reached
+// threshold before this node raced ahead -- must still be recognised, or
+// this node (and every other that raced ahead the same way) never starts
+// finalization at all.
+BOOST_AUTO_TEST_CASE(starts_finalization_from_a_recent_past_attempt_slot_not_just_the_current_one) {
+    uint256 pastAttemptId = GetChainLockAttemptRequestId(100, 7);
+    uint256 currentAttemptId = GetChainLockAttemptRequestId(100, 9);
+    uint256 signedMsgHash = uint256S("0x01");
+
+    BOOST_CHECK(DecideRecoveredSigOutcome(pastAttemptId, signedMsgHash, currentAttemptId, signedMsgHash,
+                                          -1, 100, /*nLastSignedAttempt=*/9, /*fLastSignedIsFinalization=*/false)
+                == RecoveredSigOutcome::kStartFinalization);
+}
+
+// The lookback must not reach arbitrarily far back -- a match beyond
+// CLSIG_ATTEMPT_LOOKBACK slots is still a foreign/stale id, not "recent".
+BOOST_AUTO_TEST_CASE(does_not_look_back_further_than_the_configured_window) {
+    uint256 tooOldAttemptId = GetChainLockAttemptRequestId(100, 9 - CLSIG_ATTEMPT_LOOKBACK - 1);
+    uint256 currentAttemptId = GetChainLockAttemptRequestId(100, 9);
+    uint256 signedMsgHash = uint256S("0x01");
+
+    BOOST_CHECK(DecideRecoveredSigOutcome(tooOldAttemptId, signedMsgHash, currentAttemptId, signedMsgHash,
+                                          -1, 100, 9, false)
+                == RecoveredSigOutcome::kIgnore);
+}
+
+// The lookback is deliberately scoped to the ATTEMPT phase only -- once
+// finalizing, the finalization id is fixed and unambiguous, so a
+// past-attempt id must never be treated as a match against it.
+BOOST_AUTO_TEST_CASE(does_not_apply_the_attempt_lookback_while_finalizing) {
+    uint256 pastAttemptId = GetChainLockAttemptRequestId(100, 7);
+    uint256 finalizationId = ::SerializeHash(std::make_pair(CLSIG_REQUESTID_PREFIX, 100));
+    uint256 signedMsgHash = uint256S("0x01");
+
+    BOOST_CHECK(DecideRecoveredSigOutcome(pastAttemptId, signedMsgHash, finalizationId, signedMsgHash,
+                                          -1, 100, /*nLastSignedAttempt=*/9, /*fLastSignedIsFinalization=*/true)
+                == RecoveredSigOutcome::kIgnore);
 }
 
 BOOST_AUTO_TEST_CASE(builds_the_chainlock_when_finalization_converges) {
@@ -179,7 +251,7 @@ BOOST_AUTO_TEST_CASE(builds_the_chainlock_when_finalization_converges) {
     uint256 signedMsgHash = uint256S("0x01");
 
     BOOST_CHECK(DecideRecoveredSigOutcome(finalizationId, signedMsgHash, finalizationId, signedMsgHash,
-                                          -1, 100, /*fLastSignedIsFinalization=*/true)
+                                          -1, 100, /*nLastSignedAttempt=*/7, /*fLastSignedIsFinalization=*/true)
                 == RecoveredSigOutcome::kBuildChainLock);
 }
 
