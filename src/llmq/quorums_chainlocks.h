@@ -52,13 +52,22 @@ namespace llmq {
     // local "ticks since I started retrying" counter would desync nodes onto
     // different attempt numbers for the same real moment, and their
     // signature shares could never combine into a threshold signature.
-    // Anchoring to GetAdjustedTime() (network-synchronized, already used for
-    // this same kind of cross-node timing elsewhere in quorums_chainlocks.cpp)
-    // means every node computes the same attemptNum at roughly the same real
-    // time, tolerant of a few seconds of propagation/clock skew -- 30s is
-    // comfortably above that skew and above the 5s poll interval, so most
-    // scheduler ticks land inside the same attempt slot rather than
-    // spinning up a fresh signing session every 5 seconds forever.
+    // Anchoring to GetAdjustedTime() (already used for this same kind of
+    // cross-node timing elsewhere in quorums_chainlocks.cpp) means every
+    // node computes the same attemptNum at roughly the same real time,
+    // tolerant of a few seconds of skew -- 30s is comfortably above that and
+    // above the 5s poll interval, so most scheduler ticks land inside the
+    // same attempt slot rather than spinning up a fresh signing session
+    // every 5 seconds forever. F-137 (Fable review of F-136) corrected an
+    // overclaim here: GetAdjustedTime() is NOT a synchronized network clock
+    // in the NTP sense -- it's each node's own local clock offset by the
+    // median of its peers' claimed time (timedata.cpp, capped ±70 minutes),
+    // so ordinary per-node skew of a few seconds is normal and shifts each
+    // node's own slot boundary independently. That's exactly the skew this
+    // margin is sized to tolerate, not something this design assumes away;
+    // CLSIG_ATTEMPT_LOOKBACK (below) is the other half of that tolerance,
+    // for when aggregation+gossip latency compounds with skew across a
+    // boundary.
     static const int64_t CLSIG_ATTEMPT_INTERVAL = 30;
 
     // Pure and deterministic -- every quorum member must compute the
@@ -73,6 +82,23 @@ namespace llmq {
     static inline uint256 GetChainLockAttemptRequestId(int32_t nHeight, int32_t nAttemptNum) {
         return ::SerializeHash(std::make_tuple(CLSIG_ATTEMPT_REQUESTID_PREFIX, nHeight, nAttemptNum));
     }
+
+    // F-137 (Fable review of F-136): how many PAST attempt slots
+    // DecideRecoveredSigOutcome still recognises as "what we're currently
+    // waiting on". BLS threshold aggregation and gossip take real,
+    // non-negligible time -- a node's own 5-second scheduler tick can roll
+    // its local state into attempt N+1 in the seconds between an attempt-N
+    // signature genuinely reaching threshold and that recovered signature
+    // arriving back at this same node. Without a lookback, that node
+    // discards its own attempt's success as "stale", and if enough nodes
+    // race ahead the same way, too few are left still watching attempt N's
+    // id to ever start finalization -- while the NEW attempt N+1 they moved
+    // to never collects votes from the nodes that stayed behind either
+    // (they're ignoring it, waiting on attempt N). Two slots (60s) is
+    // comfortably above normal aggregation+gossip latency while staying
+    // far short of the point where the msgHash itself would plausibly have
+    // changed underneath us (guarded separately, below).
+    static const int32_t CLSIG_ATTEMPT_LOOKBACK = 2;
 
     // What TrySignChainTip should do next, given the tip it sees and the
     // handler's own outstanding-signing state -- pure, no locks, no globals,
@@ -122,8 +148,25 @@ namespace llmq {
     static inline RecoveredSigOutcome DecideRecoveredSigOutcome(
             const uint256 &recoveredId, const uint256 &recoveredMsgHash,
             const uint256 &lastSignedRequestId, const uint256 &lastSignedMsgHash,
-            int32_t nBestChainLockHeight, int32_t nLastSignedHeight, bool fLastSignedIsFinalization) {
-        if (recoveredId != lastSignedRequestId || recoveredMsgHash != lastSignedMsgHash) {
+            int32_t nBestChainLockHeight, int32_t nLastSignedHeight, int32_t nLastSignedAttempt,
+            bool fLastSignedIsFinalization) {
+        if (recoveredMsgHash != lastSignedMsgHash) {
+            // never what we're waiting on, regardless of id -- if the tip
+            // (and so lastSignedMsgHash) has moved on, nothing about the id
+            // lookback below can make an old block's signature relevant
+            return RecoveredSigOutcome::kIgnore;
+        }
+        bool idMatches = (recoveredId == lastSignedRequestId);
+        if (!idMatches && !fLastSignedIsFinalization) {
+            // F-137: accept a recent PAST attempt slot's own id too -- see
+            // CLSIG_ATTEMPT_LOOKBACK's own doc for why. Finalization's own
+            // id is fixed (height-only, no attempt number) and unambiguous,
+            // so this widening only makes sense while still attempting.
+            for (int32_t back = 1; back <= CLSIG_ATTEMPT_LOOKBACK && !idMatches; back++) {
+                idMatches = (recoveredId == GetChainLockAttemptRequestId(nLastSignedHeight, nLastSignedAttempt - back));
+            }
+        }
+        if (!idMatches) {
             // not what we're currently waiting on -- stale or foreign
             return RecoveredSigOutcome::kIgnore;
         }

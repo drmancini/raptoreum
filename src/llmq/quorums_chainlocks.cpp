@@ -594,6 +594,7 @@ namespace llmq {
         CChainLockSig clsig;
         uint256 finalizationRequestId;
         uint256 finalizationMsgHash;
+        int32_t finalizationHeight = -1;
         bool startFinalization = false;
         {
             LOCK(cs);
@@ -605,13 +606,23 @@ namespace llmq {
             RecoveredSigOutcome outcome = DecideRecoveredSigOutcome(
                     recoveredSig.getId(), recoveredSig.getMsgHash(),
                     lastSignedRequestId, lastSignedMsgHash,
-                    bestChainLock.getHeight(), lastSignedHeight, lastSignedIsFinalization);
+                    bestChainLock.getHeight(), lastSignedHeight, lastSignedAttempt, lastSignedIsFinalization);
 
             if (outcome == RecoveredSigOutcome::kIgnore) {
                 return;
             }
 
             if (outcome == RecoveredSigOutcome::kStartFinalization) {
+                // F-137 (Fable review of F-136): TrySignChainTip checks this
+                // before starting an ATTEMPT, but nothing re-checked it here
+                // -- a conflicting CLSIG could have arrived at a LOWER height
+                // in the seconds between starting the attempt and it
+                // converging. DecideRecoveredSigOutcome's own
+                // nBestChainLockHeight check only catches a CLSIG at/above
+                // lastSignedHeight, not a conflicting one below it.
+                if (InternalHasConflictingChainLock(lastSignedHeight, lastSignedMsgHash)) {
+                    return;
+                }
                 // 3.1 (DIP8): an ATTEMPT round converged -- kick off the
                 // fixed-id FINALIZATION round (CLSIG_REQUESTID_PREFIX, no
                 // attempt number) whose own recovered signature IS the
@@ -620,6 +631,7 @@ namespace llmq {
                 // untouched -- it only ever knew about this id).
                 finalizationRequestId = ::SerializeHash(std::make_pair(CLSIG_REQUESTID_PREFIX, lastSignedHeight));
                 finalizationMsgHash = lastSignedMsgHash;
+                finalizationHeight = lastSignedHeight;
                 lastSignedRequestId = finalizationRequestId;
                 lastSignedIsFinalization = true;
                 startFinalization = true;
@@ -630,8 +642,20 @@ namespace llmq {
         }
 
         if (startFinalization) {
-            quorumSigningManager->AsyncSignIfMember(Params().GetConsensus().llmqTypeChainLocks,
-                                                    finalizationRequestId, finalizationMsgHash);
+            // F-137: this node already committed to lastSignedIsFinalization
+            // above -- if the manager refuses to sign (e.g. it decided we're
+            // not a quorum member for this id, or we already voted
+            // conflictingly), this node contributes nothing and stays
+            // "frozen" waiting on a finalization it never actually joined,
+            // same bounded/self-resolving exposure as a finalization that
+            // simply never converges (this height's CLSIG is lost, not
+            // wrong; the next height's own attempt round is unaffected).
+            // Logged so the gap is visible rather than silent.
+            if (!quorumSigningManager->AsyncSignIfMember(Params().GetConsensus().llmqTypeChainLocks,
+                                                         finalizationRequestId, finalizationMsgHash)) {
+                LogPrint(BCLog::CHAINLOCKS, "CChainLocksHandler::%s -- failed to start finalization signing, "
+                                            "height=%d\n", __func__, finalizationHeight);
+            }
             return;
         }
         ProcessNewChainLock(-1, clsig, ::SerializeHash(clsig));
