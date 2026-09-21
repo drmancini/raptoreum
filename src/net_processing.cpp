@@ -157,22 +157,38 @@ static const unsigned int AVG_ADDRESS_BROADCAST_INTERVAL = 30;
  *  Blocks and whitelisted receivers bypass this, regular outbound peers get half this delay,
  *  Smartnode outbound peers get quarter this delay. */
 static const unsigned int INVENTORY_BROADCAST_INTERVAL = 5;
-/** Maximum number of inventory items to send per transmission.
+/** Maximum number of inventory items to send per transmission, per trickle.
  *  Limits the impact of low-fee transaction floods.
- *  We have 4 times smaller block times in Raptoreum, so we need to push 4 times more invs per 1MB. */
-static constexpr unsigned int INVENTORY_BROADCAST_MAX_PER_1MB_BLOCK = 4 * 7 * INVENTORY_BROADCAST_INTERVAL;
+ *
+ *  2.3 (F-5, F-138, build-plan.md): re-indexed off block size entirely. The
+ *  original INVENTORY_BROADCAST_MAX_PER_1MB_BLOCK * MaxBlockSize()/1e6
+ *  formula assumed block bytes track how much has to propagate -- true
+ *  before decoupling, false after: a commitment block's own bytes are tiny
+ *  and roughly constant, unrelated to the body volume that actually needs
+ *  to relay. Worse, the formula's coupling to MaxBlockSize() meant this cap
+ *  would silently jump ~14x the day g_commitmentBudgetActive flips true
+ *  (COMMITMENT_BUDGET_BODY_BYTES vs MAX_DIP0001_BLOCK_SIZE), a side effect
+ *  of an unrelated flag, not a throughput decision.
+ *
+ *  50,000 is F-5's own measured value (loopback swarm): the smallest cap
+ *  that converged the full 1,500 tx/s design-point offered rate to both 8
+ *  and 16 peers (10,000 sufficed at the smaller v1 point; 7,500 was
+ *  schedule-, not throughput-, bound). Necessary, not sufficient: raising
+ *  this cap alone does not reach 1,500 tx/s -- perf-results.md's
+ *  2026-09-17 entry found message-handling cost itself ceilings relay at
+ *  ~900 tx/s regardless of this constant -- but the shipped, block-size-
+ *  indexed cap delivers only 50-65 tx/s per peer today, an order of
+ *  magnitude short of even that ceiling, so it blocks everything below it
+ *  regardless of how the rest of relay is eventually made cheaper. */
+static constexpr unsigned int INVENTORY_BROADCAST_MAX = 50000;
 
 /** Test-only overrides for the transaction-relay trickle (-perfinvmax, -perfinvinterval).
  *
- *  Relay is capped at INVENTORY_BROADCAST_MAX_PER_1MB_BLOCK * MaxBlockSize()/1e6
- *  announcements per trickle, drained on a Poisson timer of
- *  INVENTORY_BROADCAST_INTERVAL seconds. Both terms set the delivered rate, and
- *  indexing the cap to block size is what breaks under decoupling, where block
- *  size stops tracking how much has to propagate.
+ *  Relay is capped at INVENTORY_BROADCAST_MAX announcements per trickle,
+ *  drained on a Poisson timer of INVENTORY_BROADCAST_INTERVAL seconds.
  *
  *  These separate the two so the burst size and the interval can be moved
- *  independently of each other and of the block size. Zero means "use the
- *  shipped behaviour". */
+ *  independently of each other. Zero means "use the shipped behaviour". */
 unsigned int g_perf_inv_max{0};
 unsigned int g_perf_inv_interval{0};
 
@@ -193,7 +209,7 @@ static inline unsigned int InvBroadcastMax() {
     if (g_perf_inv_max != 0) {
         return g_perf_inv_max;
     }
-    return INVENTORY_BROADCAST_MAX_PER_1MB_BLOCK * MaxBlockSize() / 1000000;
+    return INVENTORY_BROADCAST_MAX;
 }
 
 /** The effective trickle interval, in seconds. */
