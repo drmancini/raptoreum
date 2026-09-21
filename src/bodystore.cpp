@@ -288,19 +288,23 @@ void GetDirtyBodyFileInfo(std::vector<std::pair<int, CBodyFileInfo>> &vFilesOut,
     nLastFileOut = nLastBodyFile;
 }
 
-void TestOnlyResetBodyFileState() {
+void ResetBodyFileState() {
     LOCK(cs_LastBodyFile);
     // F-133 review: vector::clear() drops elements but keeps capacity, so in
-    // this shared-process test binary a "reset" vinfoBodyFile can still have
-    // real (if logically removed) CBodyFileInfo objects sitting in its old
-    // buffer from an earlier test case -- indexing past size() then reads
-    // stale-but-plausible data instead of reliably faulting, which is not
-    // what "simulate a fresh process" is supposed to mean. Assignment from a
-    // temporary gives a true zero-capacity vector, matching a genuinely
-    // fresh process's own default-constructed global.
+    // a process that reuses this global across a reset (a reindex retry in
+    // production, or many test cases sharing one binary) the old buffer can
+    // still have real (if logically removed) CBodyFileInfo objects sitting
+    // in it -- indexing past size() then reads stale-but-plausible data
+    // instead of reliably faulting, which is not what "reset" is supposed to
+    // mean. Assignment from a temporary gives a true zero-capacity vector,
+    // matching a genuinely fresh process's own default-constructed global.
     vinfoBodyFile = std::vector<CBodyFileInfo>();
     nLastBodyFile = 0;
     setDirtyBodyFileInfo.clear();
+}
+
+void TestOnlyResetBodyFileState() {
+    ResetBodyFileState();
 }
 
 unsigned int TestOnlyGetBodyFileSize(int nFile) {

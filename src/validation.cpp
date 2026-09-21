@@ -3962,10 +3962,10 @@ CBlockIndex *BlockManager::AddToBlockIndex(const CBlockHeader &block, enum Block
 /** Mark a block as having its data received and checked (up to BLOCK_VALID_TRANSACTIONS). */
 void CChainState::ReceivedBlockBodies(CBlockIndex *pindexNew) {
     pindexNew->nStatus |= BLOCK_HAVE_BODIES;
-    // 2.1.4: nBodyFile/nBodyPos were already populated on the original accept
-    // (SaveBodyToDisk writes unconditionally, withheld or not) -- only the
-    // status claim was deferred, exactly mirroring BLOCK_HAVE_BODIES above.
-    pindexNew->nStatus |= BLOCK_HAVE_BODY_RECORD;
+    // F-135 (2.1.4 review): BLOCK_HAVE_BODY_RECORD is set unconditionally in
+    // ReceivedBlockTransactions below, not deferred here -- see that
+    // function's own comment for why gating it on bodies_held (as this
+    // function's first version did) was wrong.
     setDirtyBlockIndex.insert(pindexNew);
 
     // Chain selection dropped this block and parked its descendants in
@@ -4008,14 +4008,25 @@ void CChainState::ReceivedBlockTransactions(const CBlock &block, CValidationStat
     pindexNew->nDataPos = pos.nPos;
     pindexNew->nUndoPos = 0;
     pindexNew->nStatus |= BLOCK_HAVE_DATA;
-    // 2.1.4: bodyPos is always valid (SaveBodyToDisk writes unconditionally,
-    // matching pos above) -- only the status claim is gated on bodies_held,
-    // exactly the BLOCK_HAVE_BODIES pattern one line below.
+    // F-135 (2.1.4 review): bodyPos is always valid (SaveBodyToDisk writes
+    // unconditionally, matching pos above), and BLOCK_HAVE_BODY_RECORD is set
+    // unconditionally right alongside it -- NOT gated on bodies_held. The
+    // first version of this code modeled BLOCK_HAVE_BODY_RECORD as
+    // BLOCK_HAVE_BODIES's sibling (both deferred under -perfwithholdbodies),
+    // but that gates CDiskBlockIndex's own conditional serialization of
+    // nBodyFile/nBodyPos (chain.h) on the SAME bit -- so a withheld block's
+    // real, already-written position was never persisted at all, only held
+    // in memory for the current process. BLOCK_HAVE_BODY_RECORD's actual job
+    // is BLOCK_HAVE_DATA's job for the body store: "we know where these bytes
+    // are", true the instant SaveBodyToDisk succeeds, exactly as unconditional
+    // as nFile/nDataPos above. BLOCK_HAVE_BODIES alone carries the separate,
+    // deliberately-withholdable "we claim to hold/serve real body content"
+    // meaning the perf-harness needs.
     pindexNew->nBodyFile = bodyPos.nFile;
     pindexNew->nBodyPos = bodyPos.nPos;
+    pindexNew->nStatus |= BLOCK_HAVE_BODY_RECORD;
     if (bodies_held) {
         pindexNew->nStatus |= BLOCK_HAVE_BODIES;
-        pindexNew->nStatus |= BLOCK_HAVE_BODY_RECORD;
     }
     pindexNew->RaiseValidity(BLOCK_VALID_TRANSACTIONS);
     setDirtyBlockIndex.insert(pindexNew);
@@ -4770,10 +4781,11 @@ SaveBlockToDisk(const CBlock &block, int nHeight, const CChainParams &chainparam
 /** 2.1.4: store a block's non-coinbase bodies in the body store, mirroring
  *  SaveBlockToDisk's own shape. Called unconditionally alongside it (F-131's
  *  -reindex decision: the write path must not special-case a withheld or
- *  reindexed accept) -- only BLOCK_HAVE_BODY_RECORD, set by the caller,
- *  tracks whether the index currently claims to hold what's written here,
- *  exactly the way BLOCK_HAVE_DATA/BLOCK_HAVE_BODIES already split that
- *  claim for the commitment block itself. */
+ *  reindexed accept). BLOCK_HAVE_BODY_RECORD, set by the caller, always tracks
+ *  whether this succeeded -- it is BLOCK_HAVE_DATA's own analogue for the body
+ *  store ("we know where these bytes are"), not BLOCK_HAVE_BODIES's (F-135:
+ *  gating it on bodies_held instead broke CDiskBlockIndex's conditional
+ *  serialization of the position itself, see ReceivedBlockTransactions). */
 static FlatFilePos SaveBodyToDisk(const CBlock &block) {
     std::vector<CTransactionRef> bodies(block.vtx.begin() + 1, block.vtx.end());
     uint64_t nBodySize = GetBodyRecordSerializedSize(bodies);
@@ -4941,14 +4953,20 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock> &pblock, CVali
         return true;
     }
     try {
-        FlatFilePos blockPos = SaveBlockToDisk(block, pindex->nHeight, chainparams, dbp);
-        if (blockPos.IsNull()) {
-            state.Error(strprintf("%s: Failed to find position to write new block to disk", __func__));
-            return false;
-        }
+        // F-135 (2.1.4 review): SaveBodyToDisk runs FIRST, not after
+        // SaveBlockToDisk -- a failure here (e.g. disk space exhausted)
+        // then orphans nothing in blk*.dat, since SaveBlockToDisk never ran
+        // for this attempt. The reverse order left a real block's bytes
+        // permanently on disk, with vinfoBlockFile's own bookkeeping already
+        // dirtied and persisted, every time the body-side write failed.
         FlatFilePos bodyPos = SaveBodyToDisk(block);
         if (bodyPos.IsNull()) {
             state.Error(strprintf("%s: Failed to find position to write new block's bodies to disk", __func__));
+            return false;
+        }
+        FlatFilePos blockPos = SaveBlockToDisk(block, pindex->nHeight, chainparams, dbp);
+        if (blockPos.IsNull()) {
+            state.Error(strprintf("%s: Failed to find position to write new block to disk", __func__));
             return false;
         }
         ReceivedBlockTransactions(block, state, pindex, blockPos, bodyPos, !fWithholdBodies);
@@ -5765,6 +5783,12 @@ void UnloadBlockIndex(CTxMemPool *mempool) {
     nLastBlockFile = 0;
     setDirtyBlockIndex.clear();
     setDirtyFileInfo.clear();
+    // F-135 (2.1.4 review): the body-store's own counterpart to the four
+    // resets above -- without it, a reindex retried within one process
+    // (init.cpp's retry loop) kept stale in-memory body-file bookkeeping
+    // after pblocktree itself was wiped, starting the rebuilt index's body
+    // writes from wherever the OLD run's counters left off instead of 0.
+    ResetBodyFileState();
     fHavePruned = false;
 }
 
@@ -5825,16 +5849,17 @@ bool ChainstateManager::LoadBlockIndex(const CChainParams &chainparams) {
 }
 
 bool CChainState::AddGenesisBlock(const CChainParams &chainparams, const CBlock &block, CValidationState &state) {
-    FlatFilePos blockPos = SaveBlockToDisk(block, 0, chainparams, nullptr);
-    if (blockPos.IsNull())
-        return error("%s: writing genesis block to disk failed (%s)", __func__, FormatStateMessage(state));
-    // 2.1.4: genesis has no AcceptBlock path of its own, but it still needs a
-    // body-store record -- an empty one, since genesis carries no non-coinbase
-    // transactions -- so its CBlockIndex entry is shaped the same as every
-    // other block's rather than a permanent special case.
+    // F-135 (2.1.4 review): body write first, same reasoning as AcceptBlock's
+    // own reordering -- genesis has no body-store record before this, so
+    // there's nothing here to write. An empty one, since genesis carries no
+    // non-coinbase transactions -- so its CBlockIndex entry is shaped the
+    // same as every other block's rather than a permanent special case.
     FlatFilePos bodyPos = SaveBodyToDisk(block);
     if (bodyPos.IsNull())
         return error("%s: writing genesis block's bodies to disk failed (%s)", __func__, FormatStateMessage(state));
+    FlatFilePos blockPos = SaveBlockToDisk(block, 0, chainparams, nullptr);
+    if (blockPos.IsNull())
+        return error("%s: writing genesis block to disk failed (%s)", __func__, FormatStateMessage(state));
     CBlockIndex *pindex = m_blockman.AddToBlockIndex(block);
     ReceivedBlockTransactions(block, state, pindex, blockPos, bodyPos, true);
     return true;
