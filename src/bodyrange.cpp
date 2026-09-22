@@ -5,6 +5,7 @@
 #include <bodyrange.h>
 
 #include <bodystore.h>
+#include <version.h>
 
 #include <limits>
 
@@ -29,4 +30,25 @@ GetBodyRangeValidation ValidateGetBodyRange(const CGetBodyRange &request, FlatFi
     }
 
     return GetBodyRangeValidation::OK;
+}
+
+void BuildBodyRangeResponse(const CGetBodyRange &request, const FlatFilePos &pos,
+                             uint64_t nByteCeiling, CBodyRange &respOut) {
+    respOut.hashBlock = request.hashBlock;
+    respOut.nStartIndex = request.nStartIndex;
+    respOut.vBodies.clear();
+
+    uint64_t nRunningBytes = 0;
+    for (uint32_t i = 0; i < request.nCount; i++) {
+        CTransactionRef tx;
+        if (!ReadBodyAt(pos, request.nStartIndex + i, tx)) {
+            break;
+        }
+        uint64_t nTxBytes = GetSerializeSize(*tx, SER_NETWORK, PROTOCOL_VERSION);
+        if (!respOut.vBodies.empty() && nRunningBytes + nTxBytes > nByteCeiling) {
+            break;
+        }
+        respOut.vBodies.push_back(tx);
+        nRunningBytes += nTxBytes;
+    }
 }

@@ -120,4 +120,42 @@ enum class GetBodyRangeValidation {
 
 GetBodyRangeValidation ValidateGetBodyRange(const CGetBodyRange &request, FlatFilePos &posOut);
 
+/** 2.2.3 (serving handler): builds the response for an OK-classified
+ *  request. The caller must already hold a `GetBodyRangeValidation::OK` from
+ *  `ValidateGetBodyRange` for this exact `request`/`pos` pair -- this
+ *  function trusts that and does no re-validation, including of the overflow
+ *  invariant `ValidateGetBodyRange`'s own BAN tier already enforced
+ *  (`nStartIndex + nCount` fits in `uint32_t`).
+ *
+ *  Reads bodies one at a time via `ReadBodyAt`, starting at
+ *  `request.nStartIndex`, stopping at whichever comes first:
+ *   - `request.nCount` bodies read;
+ *   - the next body would push the response's own running serialized size
+ *     (`SER_NETWORK`/`PROTOCOL_VERSION`, matching how `vBodies` itself is
+ *     serialized on the wire) past `nByteCeiling` -- except the FIRST body is
+ *     always included regardless of its own size, so a request that has at
+ *     least one real body to serve never comes back with zero: seeing a
+ *     ceiling smaller than even one transaction must never look identical on
+ *     the wire to a genuine miss;
+ *   - a `ReadBodyAt` call fails -- `ValidateGetBodyRange`'s own OK only
+ *     guarantees `nStartIndex` is IN range, not that `nStartIndex + nCount`
+ *     is, so asking past the record's real end is an ordinary, expected way
+ *     to hit this; a corrupt record discovered here (this store has no
+ *     deletion/corruption path yet, but this function does not assume that)
+ *     hits the exact same stop condition.
+ *
+ *  All three stop conditions produce identical wire behaviour:
+ *  `respOut.vBodies` holds whatever was read so far, possibly fewer than
+ *  `request.nCount`, possibly empty if the very first `ReadBodyAt` itself
+ *  fails. There is no separate wire signal for "there is more" -- a client
+ *  infers continuation from getting back fewer bodies than it asked for and
+ *  re-requests starting after what it received (F-147's own deferred item:
+ *  truncate, never leave a hole).
+ *
+ *  Off `cs_main` and every chain-state lock -- reads only through the
+ *  caller-supplied `FlatFilePos`, exactly like `ValidateGetBodyRange` itself.
+ */
+void BuildBodyRangeResponse(const CGetBodyRange &request, const FlatFilePos &pos,
+                             uint64_t nByteCeiling, CBodyRange &respOut);
+
 #endif // BITCOIN_BODYRANGE_H
