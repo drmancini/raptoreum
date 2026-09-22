@@ -98,16 +98,22 @@ static const unsigned int MAX_GETDATA_SZ = 1000;
 /** 2.2.3 (F-143's accepted fetch-protocol spec): the byte ceiling a
  *  GETBODYRANGE response chunks to, per src/bodyrange.h's own
  *  BuildBodyRangeResponse. This bounds one response's SIZE, not its COST --
- *  see F-150 for why those are not the same thing (a per-call disk-I/O cost
- *  bug independent of this ceiling) and why NEITHER a per-connection
+ *  see F-150/F-151 for why those are not the same thing (F-150: a per-call
+ *  disk-I/O cost bug, fixed; F-151: even after that fix, the per-request
+ *  header-read cost still scales with the RECORD's own size, not with what
+ *  the request actually asks for -- also fixed, `ReadBodyRange` now reads
+ *  only the one offset entry it needs) and why NEITHER a per-connection
  *  records-and-bytes budget nor `-maxuploadtarget` integration exist yet
- *  (F-143's own recorded scope boundary, still deferred). **2.2.3a must not
- *  run on a live/exposed network until that budget layer lands** -- a
- *  handshaked peer can send unlimited GETBODYRANGE requests today with no
- *  rate limit anywhere in this file (2.2.3a's own Fable review, HIGH-2;
- *  confirmed no existing per-message-type limit protects this the way
- *  MAX_BLOCKTXN_DEPTH protects GETBLOCKTXN). A fixed, generous chunking
- *  default is enough to keep a single response well-behaved regardless. */
+ *  (F-143's own recorded scope boundary, still deferred to 2.2.3b). A
+ *  handshaked peer can still send unlimited GETBODYRANGE requests with no
+ *  rate limit anywhere in this file (F-150's own MEDIUM finding; confirmed
+ *  no existing per-message-type limit protects this the way
+ *  MAX_BLOCKTXN_DEPTH protects GETBLOCKTXN) -- **enforced, not just
+ *  documented**: the dispatch arm below requires `-servebodyrange` (default
+ *  off, matching this file's own `-perfwithhold*` precedent for a
+ *  still-unfinished feature) before it does anything at all. A fixed,
+ *  generous chunking default is enough to keep a single response
+ *  well-behaved regardless, once that flag is set. */
 static const uint64_t DEFAULT_MAX_BODYRANGE_BYTES = 1024 * 1024;
 // The two static_asserts below are what make BuildBodyRangeResponse's own
 // "the first body is always included, regardless of its own size" rule
@@ -3215,6 +3221,18 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
     }
 
     if (strCommand == NetMsgType::GETBODYRANGE) {
+        // F-150/F-151: this handler has no per-connection rate limit yet
+        // (2.2.3b's still-unbuilt budget layer) -- off by default, matching
+        // this file's own -perfwithhold*/-perfskipsigs precedent for a
+        // still-unfinished feature, until an operator explicitly opts in.
+        // Silently declining, like an unrecognised command (net_processing.cpp
+        // already treats those as safe to ignore, no Misbehaving), rather
+        // than banning a peer for sending a real, spec-valid message this
+        // node has simply chosen not to serve yet.
+        if (!gArgs.GetBoolArg("-servebodyrange", false)) {
+            return true;
+        }
+
         // 2.2.3 (F-143's accepted spec, docs/build-plan.md's 2.2 row): off
         // cs_main entirely, except the brief, purely in-memory Misbehaving()
         // call on the BAN path below (Misbehaving itself is

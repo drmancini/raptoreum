@@ -805,6 +805,12 @@ void SetupServerArgs() {
                  "Test-only: run mempool-acceptance script checks on the script-check thread pool "
                  "instead of inline on the message handler. (default: 0)",
                  ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    gArgs.AddArg("-servebodyrange",
+                 "Test-only: serve GETBODYRANGE requests (2.2.3a's fetch-protocol handler, "
+                 "F-149/F-150/F-151). Off by default -- this handler has no per-connection rate "
+                 "limit yet (F-150's own MEDIUM finding, still open pending 2.2.3b's budget "
+                 "layer), so it must not run on a live/exposed network unopted-in. (default: 0)",
+                 ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     gArgs.AddArg("-checkblocks=<n>",
                  strprintf("How many blocks to check at startup (default: %u, 0 = all)", DEFAULT_CHECKBLOCKS),
                  ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
