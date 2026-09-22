@@ -86,6 +86,22 @@ BasicTestingSetup::BasicTestingSetup(const std::string &chainName)
     connman = MakeUnique<CConnman>(0x1337, 0x1337);
     deterministicMNManager.reset(new CDeterministicMNManager(*evoDb, *connman));
     noui_connect();
+
+    // F-147 (Fable review of F-147's own review, MEDIUM): every fixture
+    // already computes a private `m_path_root` above and removes it in the
+    // destructor below, but never pointed `-datadir` at it -- so any test
+    // built directly on `BasicTestingSetup` (not `TestingSetup`, which has
+    // always done exactly this) that performs real file I/O silently falls
+    // through to the REAL default datadir. This has now bitten twice
+    // (F-127 in bodystore_tests.cpp, F-147 in bodyrange_tests.cpp), each
+    // fixed with its own one-off fixture subclass -- fixing it here instead
+    // closes the whole bug class by construction: a third file can no
+    // longer reintroduce it just by using `BasicTestingSetup` directly.
+    // Harmless where `TestingSetup` repeats this call -- `SetDataDir`
+    // recreates the same already-existing directory and re-sets the same
+    // arg, idempotently.
+    SetDataDir("tempdir");
+    ClearDatadirCache();
 }
 
 BasicTestingSetup::~BasicTestingSetup() {
