@@ -5,7 +5,6 @@
 #include <bodyrange.h>
 
 #include <bodystore.h>
-#include <version.h>
 
 #include <limits>
 
@@ -36,19 +35,12 @@ void BuildBodyRangeResponse(const CGetBodyRange &request, const FlatFilePos &pos
                              uint64_t nByteCeiling, CBodyRange &respOut) {
     respOut.hashBlock = request.hashBlock;
     respOut.nStartIndex = request.nStartIndex;
-    respOut.vBodies.clear();
-
-    uint64_t nRunningBytes = 0;
-    for (uint32_t i = 0; i < request.nCount; i++) {
-        CTransactionRef tx;
-        if (!ReadBodyAt(pos, request.nStartIndex + i, tx)) {
-            break;
-        }
-        uint64_t nTxBytes = GetSerializeSize(*tx, SER_NETWORK, PROTOCOL_VERSION);
-        if (!respOut.vBodies.empty() && nRunningBytes + nTxBytes > nByteCeiling) {
-            break;
-        }
-        respOut.vBodies.push_back(tx);
-        nRunningBytes += nTxBytes;
-    }
+    // F-150 (2.2.3a's own Fable review, HIGH): this used to call ReadBodyAt
+    // in a loop, which re-opens the record and re-reads its ENTIRE offset
+    // table on every single call -- O(request.nCount x the record's own
+    // real body count), measured at ~12s of real CPU for one network
+    // request against a 100,000-body record. ReadBodyRange (bodystore.h)
+    // opens the record and reads its header exactly once, then streams --
+    // O(record size) total, regardless of how many bodies are requested.
+    ReadBodyRange(pos, request.nStartIndex, request.nCount, nByteCeiling, respOut.vBodies);
 }

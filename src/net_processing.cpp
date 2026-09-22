@@ -96,11 +96,17 @@ static_assert(INBOUND_PEER_TX_DELAY
 static const unsigned int MAX_GETDATA_SZ = 1000;
 
 /** 2.2.3 (F-143's accepted fetch-protocol spec): the byte ceiling a
- *  GETBODYRANGE response chunks to, per docs/bodyrange.h's own
- *  BuildBodyRangeResponse. This is chunking, not the (still-deferred,
- *  F-143's own recorded scope boundary) real per-connection budget --
- *  folding this into `-maxuploadtarget` and adding a runtime-configurable
- *  version are both explicitly left to a later increment. A fixed, generous
+ *  GETBODYRANGE response chunks to, per src/bodyrange.h's own
+ *  BuildBodyRangeResponse. This bounds one response's SIZE, not its COST --
+ *  see F-150 for why those are not the same thing (a per-call disk-I/O cost
+ *  bug independent of this ceiling) and why NEITHER a per-connection
+ *  records-and-bytes budget nor `-maxuploadtarget` integration exist yet
+ *  (F-143's own recorded scope boundary, still deferred). **2.2.3a must not
+ *  run on a live/exposed network until that budget layer lands** -- a
+ *  handshaked peer can send unlimited GETBODYRANGE requests today with no
+ *  rate limit anywhere in this file (2.2.3a's own Fable review, HIGH-2;
+ *  confirmed no existing per-message-type limit protects this the way
+ *  MAX_BLOCKTXN_DEPTH protects GETBLOCKTXN). A fixed, generous chunking
  *  default is enough to keep a single response well-behaved regardless. */
 static const uint64_t DEFAULT_MAX_BODYRANGE_BYTES = 1024 * 1024;
 // The two static_asserts below are what make BuildBodyRangeResponse's own
