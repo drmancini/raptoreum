@@ -5,7 +5,8 @@
 #include <announcerring.h>
 
 void CAnnouncerRing::Record(int height, const uint256 &hash, int currentTipHeight, int depth) {
-    int cutoff = currentTipHeight - depth;
+    m_maxRecordedHeight = std::max(m_maxRecordedHeight, height);
+    int cutoff = EffectiveHeight(currentTipHeight) - depth;
 
     for (auto it = m_heightByHash.begin(); it != m_heightByHash.end();) {
         if (it->second < cutoff) {
@@ -25,5 +26,5 @@ bool CAnnouncerRing::WasAnnounced(const uint256 &hash, int currentTipHeight, int
     if (it == m_heightByHash.end()) {
         return false;
     }
-    return it->second >= currentTipHeight - depth;
+    return it->second >= EffectiveHeight(currentTipHeight) - depth;
 }

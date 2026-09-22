@@ -8,7 +8,9 @@
 #include <saltedhasher.h>
 #include <uint256.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <unordered_map>
 
 /** 2.2.3b (F-143's accepted fetch-protocol spec, the "announcer ring"): a
@@ -43,7 +45,20 @@
  *  ChainstateManager::ProcessNewBlockHeaders, validation.cpp: its own
  *  out-param is populated incrementally, per header, even on a caller that
  *  later returns false) -- this type itself is agnostic to all of that; it
- *  only records and answers queries.
+ *  only records and answers queries. **This set is closed as of 2.2.3b/
+ *  F-153, not closed permanently** -- a Fable review of the first version
+ *  found a sixth real path (CMPCTBLOCK announcing a block whose parent we
+ *  don't have yet, fixed the same way as the HEADERS unconnecting case),
+ *  and any future announcement mechanism (e.g. a commitment-only relay
+ *  message, once one exists) is a new insertion point this comment cannot
+ *  already know about.
+ *
+ *  This ring is per-CNodeState and is destroyed with it on disconnect
+ *  (FinalizeNode, net_processing.cpp) -- a peer that announces, disconnects,
+ *  and reconnects starts with an empty ring. This is inherent to the
+ *  accepted per-peer design (F-143) and is the same shape as the already-
+ *  accepted residual limitation that a withholder who simply goes silent,
+ *  rather than answering, is not closed by this mechanism either.
  *
  *  This type does its own I/O-free, lock-free bookkeeping and is fully
  *  testable without CNode/CConnman/cs_main scaffolding, matching this
@@ -53,21 +68,21 @@
 class CAnnouncerRing {
 public:
     /** Record that this peer announced `hash` at `height`. Evicts every
-     *  entry more than `depth` blocks behind `currentTipHeight` first, so
-     *  the ring's own memory stays bounded regardless of how long a peer
-     *  stays connected -- this eviction is a memory-hygiene measure only,
-     *  not the correctness boundary (see WasAnnounced, which re-checks
-     *  freshness itself rather than trusting that eviction has run
-     *  recently). An entry that is ALREADY stale relative to the cutoff at
-     *  the moment it would be recorded is not inserted at all -- there is
-     *  no reason to add an entry only to evict it on the very next call. */
+     *  entry more than `depth` blocks behind the ring's own EFFECTIVE
+     *  height first (see EffectiveHeight below) -- an eviction is a memory-
+     *  hygiene measure only, not the correctness boundary (WasAnnounced
+     *  re-checks freshness itself rather than trusting that eviction has
+     *  run recently). An entry that is ALREADY stale relative to the cutoff
+     *  at the moment it would be recorded is not inserted at all -- there
+     *  is no reason to add an entry only to evict it on the very next
+     *  call. */
     void Record(int height, const uint256 &hash, int currentTipHeight, int depth);
 
     /** Was `hash` ever recorded by this peer, and is that record still
-     *  within `depth` blocks of `currentTipHeight`? Re-derives freshness
-     *  from the stored height at query time -- correct regardless of
-     *  whether Record has run recently enough to have evicted a since-gone-
-     *  stale entry itself. */
+     *  within `depth` blocks of the ring's own effective height? Re-derives
+     *  freshness from the stored height at query time -- correct regardless
+     *  of whether Record has run recently enough to have evicted a since-
+     *  gone-stale entry itself. */
     bool WasAnnounced(const uint256 &hash, int currentTipHeight, int depth) const;
 
     /** Current entry count -- test-only visibility into the eviction
@@ -75,7 +90,27 @@ public:
     size_t size() const { return m_heightByHash.size(); }
 
 private:
+    /** F-153 (a Fable review of F-152, HIGH): using `currentTipHeight` alone
+     *  as the cutoff basis was wrong -- `currentTipHeight` is the CONNECTED
+     *  chain's own tip, which during headers-first sync lags far behind the
+     *  headers actually being accepted (and so recorded) for a peer racing
+     *  ahead. Every one of those far-ahead entries is "above the tip" and
+     *  so never evicted under the original scheme, and Record's own
+     *  eviction scan is O(ring size) on every call -- together, measured
+     *  directly: 200,000 such Record calls against real mainnet-scale
+     *  heights took ~692s. `EffectiveHeight` instead tracks the highest
+     *  height this ring has EVER recorded and uses whichever is higher,
+     *  that or `currentTipHeight` -- so the ring stays a bounded window
+     *  around wherever the peer's own header stream has actually reached,
+     *  correctly degrading back to plain `currentTipHeight` once real sync
+     *  catches up and the two stay close together (the steady-state,
+     *  post-IBD case every existing test already covers). */
+    int EffectiveHeight(int currentTipHeight) const {
+        return std::max(currentTipHeight, m_maxRecordedHeight);
+    }
+
     std::unordered_map<uint256, int, StaticSaltedHasher> m_heightByHash;
+    int m_maxRecordedHeight = std::numeric_limits<int>::min();
 };
 
 #endif // BITCOIN_ANNOUNCERRING_H
