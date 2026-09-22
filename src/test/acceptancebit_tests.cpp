@@ -1780,6 +1780,11 @@ BOOST_AUTO_TEST_CASE(vtx_index_from_body_index_matches_a_real_accepted_block) {
         CTransactionRef txOut;
         BOOST_REQUIRE(ReadBodyAt(pos, bodyIndex, txOut));
         uint32_t vtxIndex = VtxIndexFromBodyIndex(bodyIndex);
+        // F-147 (Fable review of F-146, LOW): an off-by-one mutant of
+        // VtxIndexFromBodyIndex would otherwise index block.vtx
+        // out-of-bounds here and "die" via UB/a crash rather than a clean
+        // assertion failure.
+        BOOST_REQUIRE_LT(vtxIndex, block.vtx.size());
         BOOST_CHECK(txOut->GetHash() == block.vtx[vtxIndex]->GetHash());
         BOOST_CHECK_EQUAL(BodyIndexFromVtxIndex(vtxIndex), bodyIndex);
     }

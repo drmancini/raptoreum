@@ -360,10 +360,19 @@ bool LookupBodyPositionByHash(const uint256 &hash, FlatFilePos &posOut, bool *fS
 }
 
 bool LookupServeableBodyPositionByHash(const uint256 &hash, FlatFilePos &posOut) {
+    // F-147 (Fable review of F-146, MEDIUM): resolve into a LOCAL position
+    // first -- LookupBodyPositionByHash writes its out-param the instant an
+    // entry is FOUND, before serveability is even checked, so writing
+    // straight into the caller's `posOut` would leak a withheld block's own
+    // real position out of a call this function reports as a miss. A
+    // caller that checks only the return value (the whole point of this
+    // function existing, per F-145) must never see that position.
+    FlatFilePos tmpPos;
     bool fServeable = false;
-    if (!LookupBodyPositionByHash(hash, posOut, &fServeable) || !fServeable) {
+    if (!LookupBodyPositionByHash(hash, tmpPos, &fServeable) || !fServeable) {
         return false;
     }
+    posOut = tmpPos;
     return true;
 }
 
