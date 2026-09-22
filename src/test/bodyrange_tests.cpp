@@ -469,18 +469,27 @@ BOOST_AUTO_TEST_CASE(build_response_stops_at_the_ceiling_once_it_already_has_one
     BOOST_CHECK(resp.vBodies[0]->GetHash() == tx1->GetHash());
 }
 
-// A mutant that turns the ReadBodyAt-failure stop from `break` into
-// `continue` is invisible to every test above: once reads start failing
-// (past the record's real end) every LATER index also fails, so the final
-// vBodies content comes out identical either way -- the only difference is
-// how many doomed ReadBodyAt calls get made. That difference is a real
-// DoS surface, not a cosmetic one: a peer can set nCount up to
-// UINT32_MAX - nStartIndex (ValidateGetBodyRange's own overflow check is
-// the only bound) against a record with far fewer real bodies. This test
-// makes that difference observable: a correct implementation does O(actual
-// bodies), not O(nCount), so it returns almost instantly even at the
-// largest legal nCount; a `continue`-based implementation would attempt
-// billions of doomed file opens.
+// F-150 (2.2.3a's own Fable review): this test originally guarded against a
+// `ReadBodyAt`-in-a-loop mutant (`break` -> `continue` on a failed read) --
+// but the SAME review found the un-mutated code itself had an equivalent
+// real cost problem: ReadBodyAt re-reads the whole offset table on every
+// call, so even correct `break`-on-failure code was O(nCount x the
+// record's own real body count) for the honest "ran past the end" case
+// too. `BuildBodyRangeResponse` no longer loops over `ReadBodyAt` at
+// all -- it delegates to `bodystore.h`'s `ReadBodyRange`, which opens the
+// record and reads its header exactly once. That function's own dedicated,
+// properly-bounded performance regression test lives in
+// `bodystore_tests.cpp` (`read_body_range_opens_the_record_once_not_once_per_body`,
+// a real 50,000-body record) -- unlike this one, it does not rely on
+// `nCount = UINT32_MAX` to make a quadratic mutant's cost enormous, so a
+// mutant fails it with a clean, fast assertion rather than a multi-hour
+// hang (this test's own `nCount = UINT32_MAX` would hang, not fail
+// cleanly, against a reintroduced per-call-reopen bug -- known and
+// accepted here, since the real guard against that shape now lives one
+// layer down). What THIS test still usefully covers: `BuildBodyRangeResponse`
+// itself stays fast and correct at the extreme end of the legal `nCount`
+// range once it delegates -- a narrower, still-real property, just not the
+// same one it originally guarded.
 BOOST_AUTO_TEST_CASE(build_response_does_not_hammer_reads_past_the_records_real_end) {
     ResetBodyIndex();
     TestOnlyResetBodyFileState();

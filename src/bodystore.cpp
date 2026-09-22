@@ -11,9 +11,11 @@
 #include <txdb.h>
 #include <uint256.h>
 #include <util/system.h>
+#include <version.h>
 
 #include <unordered_map>
 
+#include <algorithm>
 #include <cstdio>
 #include <memory>
 #include <set>
@@ -262,6 +264,68 @@ bool ReadBodyAt(const FlatFilePos &pos, unsigned int index, CTransactionRef &txO
         filein >> txOut;
     } catch (const std::exception &e) {
         return error("ReadBodyAt: %s", e.what());
+    }
+
+    return true;
+}
+
+bool ReadBodyRange(const FlatFilePos &pos, unsigned int nStartIndex, unsigned int nMaxCount,
+                    uint64_t nByteCeiling, std::vector<CTransactionRef> &bodiesOut) {
+    bodiesOut.clear();
+
+    CAutoFile filein(OpenBodyFile(pos, true), SER_DISK, CLIENT_VERSION);
+    if (filein.IsNull()) {
+        return error("ReadBodyRange: OpenBodyFile failed for %s", pos.ToString());
+    }
+
+    std::vector<uint32_t> offsets;
+    if (!ReadBodyRecordHeader(filein, offsets)) {
+        return false;
+    }
+    if (nStartIndex >= offsets.size()) {
+        // Asking past the record's real end is an ordinary, honest way to
+        // stop -- not an error, and (unlike ReadBodyAt) nothing is logged.
+        return true;
+    }
+
+    // One seek to the start of nStartIndex's bytes -- then read forward
+    // SEQUENTIALLY, since each `>>` naturally advances the file position to
+    // the next body already; no further seeking is needed. This, plus
+    // reading the header exactly once above (not once per body, F-150's own
+    // fix), is what makes this O(record size), not O(bodies read x record
+    // size) the way calling ReadBodyAt in a loop is.
+    uint32_t skipBytes = (nStartIndex == 0) ? 0 : offsets[nStartIndex - 1];
+    if (fseek(filein.Get(), (long) skipBytes, SEEK_CUR) != 0) {
+        return error("ReadBodyRange: fseek failed");
+    }
+
+    // 64-bit throughout so nStartIndex + nMaxCount can never itself overflow
+    // uint32_t before being clamped against the record's own real size --
+    // callers in this tree always derive nMaxCount from an already
+    // overflow-checked request (bodyrange.cpp's ValidateGetBodyRange), but
+    // this function does not assume that.
+    uint64_t nEnd = std::min<uint64_t>(offsets.size(), (uint64_t) nStartIndex + nMaxCount);
+
+    uint64_t nRunningBytes = 0;
+    for (uint64_t i = nStartIndex; i < nEnd; i++) {
+        CTransactionRef tx;
+        try {
+            filein >> tx;
+        } catch (const std::exception &e) {
+            // A corrupt body mid-range is treated exactly like reaching the
+            // record's real end -- truncate what was read so far, do not
+            // fail the whole call. The requester did nothing wrong either
+            // way, and there is no separate wire state for "corrupt" vs.
+            // "that's all there is" (bodyrange.h's own documented
+            // continuation contract).
+            break;
+        }
+        uint64_t nTxBytes = GetSerializeSize(*tx, SER_NETWORK, PROTOCOL_VERSION);
+        if (!bodiesOut.empty() && nRunningBytes + nTxBytes > nByteCeiling) {
+            break;
+        }
+        bodiesOut.push_back(tx);
+        nRunningBytes += nTxBytes;
     }
 
     return true;

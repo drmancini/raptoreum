@@ -19,6 +19,10 @@
 #include <uint256.h>
 #include <util/strencodings.h>
 #include <util/system.h>
+#include <version.h>
+
+#include <chrono>
+#include <limits>
 
 #include <boost/test/unit_test.hpp>
 
@@ -172,6 +176,125 @@ BOOST_AUTO_TEST_CASE(read_body_at_rejects_an_out_of_range_index) {
     CTransactionRef txOut;
     BOOST_CHECK(!ReadBodyAt(pos, 3, txOut));
     BOOST_CHECK(!ReadBodyAt(pos, 100, txOut));
+}
+
+// F-150 (2.2.3a's own Fable review): ReadBodyRange is the fix for calling
+// ReadBodyAt in a loop, which re-reads the whole offset table every single
+// call. It must preserve every black-box behaviour 2.2.3's
+// BuildBodyRangeResponse already relies on (nMaxCount/ceiling/truncation),
+// while opening the record and reading its header exactly once.
+BOOST_AUTO_TEST_CASE(read_body_range_respects_nmaxcount_with_no_ceiling) {
+    std::vector<CTransactionRef> bodies = MakeBodies(4);
+    FlatFilePos pos = WriteBodies(bodies);
+
+    std::vector<CTransactionRef> out;
+    BOOST_REQUIRE(ReadBodyRange(pos, 1, 2, std::numeric_limits<uint64_t>::max(), out));
+    BOOST_REQUIRE_EQUAL(out.size(), 2U);
+    BOOST_CHECK(out[0]->GetHash() == bodies[1]->GetHash());
+    BOOST_CHECK(out[1]->GetHash() == bodies[2]->GetHash());
+}
+
+BOOST_AUTO_TEST_CASE(read_body_range_truncates_when_the_record_runs_out_early) {
+    std::vector<CTransactionRef> bodies = MakeBodies(2);
+    FlatFilePos pos = WriteBodies(bodies);
+
+    std::vector<CTransactionRef> out;
+    BOOST_REQUIRE(ReadBodyRange(pos, 0, 10, std::numeric_limits<uint64_t>::max(), out));
+    BOOST_REQUIRE_EQUAL(out.size(), 2U);
+    BOOST_CHECK(out[0]->GetHash() == bodies[0]->GetHash());
+    BOOST_CHECK(out[1]->GetHash() == bodies[1]->GetHash());
+}
+
+BOOST_AUTO_TEST_CASE(read_body_range_always_includes_the_first_body_over_a_tiny_ceiling) {
+    std::vector<CTransactionRef> bodies = MakeBodies(2);
+    FlatFilePos pos = WriteBodies(bodies);
+
+    std::vector<CTransactionRef> out;
+    BOOST_REQUIRE(ReadBodyRange(pos, 0, 2, /*nByteCeiling=*/1, out));
+    BOOST_REQUIRE_EQUAL(out.size(), 1U);
+    BOOST_CHECK(out[0]->GetHash() == bodies[0]->GetHash());
+}
+
+BOOST_AUTO_TEST_CASE(read_body_range_stops_at_the_ceiling_once_it_already_has_one_body) {
+    CTransactionRef tx1 = MakeBodyTx(1);
+    std::vector<CTransactionRef> bodies = {tx1, MakeBodyTx(2), MakeBodyTx(3)};
+    FlatFilePos pos = WriteBodies(bodies);
+
+    uint64_t nOneBodyCeiling = GetSerializeSize(*tx1, SER_NETWORK, PROTOCOL_VERSION);
+    std::vector<CTransactionRef> out;
+    BOOST_REQUIRE(ReadBodyRange(pos, 0, 3, nOneBodyCeiling, out));
+    BOOST_REQUIRE_EQUAL(out.size(), 1U);
+    BOOST_CHECK(out[0]->GetHash() == tx1->GetHash());
+}
+
+// F-150 (2.2.3a's own Fable review, LOW): the test above only proves a
+// ceiling SMALLER than two bodies excludes the second -- it says nothing
+// about the exact boundary. A ceiling equal to exactly the combined size of
+// the first two bodies must still include both (the running total must
+// never EXCEED the ceiling, but landing exactly on it is fine) -- an
+// off-by-one mutant (`>` -> `>=` on the ceiling comparison) would wrongly
+// exclude the second body here while still passing every other test.
+BOOST_AUTO_TEST_CASE(read_body_range_includes_a_body_that_lands_exactly_on_the_ceiling) {
+    CTransactionRef tx1 = MakeBodyTx(1);
+    CTransactionRef tx2 = MakeBodyTx(2);
+    std::vector<CTransactionRef> bodies = {tx1, tx2, MakeBodyTx(3)};
+    FlatFilePos pos = WriteBodies(bodies);
+
+    uint64_t nExactTwoBodyCeiling = GetSerializeSize(*tx1, SER_NETWORK, PROTOCOL_VERSION) +
+                                     GetSerializeSize(*tx2, SER_NETWORK, PROTOCOL_VERSION);
+    std::vector<CTransactionRef> out;
+    BOOST_REQUIRE(ReadBodyRange(pos, 0, 3, nExactTwoBodyCeiling, out));
+    BOOST_REQUIRE_EQUAL(out.size(), 2U);
+    BOOST_CHECK(out[0]->GetHash() == tx1->GetHash());
+    BOOST_CHECK(out[1]->GetHash() == tx2->GetHash());
+}
+
+BOOST_AUTO_TEST_CASE(read_body_range_rejects_a_missing_record) {
+    std::vector<CTransactionRef> out;
+    BOOST_CHECK(!ReadBodyRange(FlatFilePos(999, 0), 0, 10, std::numeric_limits<uint64_t>::max(), out));
+    BOOST_CHECK(out.empty());
+}
+
+// F-150's own reproduction: a large record, asking for everything in one
+// range read. The bug this replaces (ReadBodyAt called once per body,
+// itself opening the file and re-reading the whole offset table every
+// time) is O(bodies read x record size) -- at this scale that shape reads
+// many gigabytes and takes seconds; opening once and streaming, as
+// ReadBodyRange does, is O(record size) total and finishes in well under a
+// second. The bound below is generous for the correct implementation and
+// would not remotely save the quadratic shape.
+//
+// Deliberately NOT MakeBodies -- that pads scriptPubKey by the body's own
+// index, so 50,000 of them would include one padded to 50,000 bytes and a
+// combined size FindBodyPos correctly refuses. A fixed-size body (distinct
+// only in its prevout hash, still individually verifiable) keeps this at a
+// realistic ~3 MB total while still exercising 50,000 real offset-table
+// entries.
+BOOST_AUTO_TEST_CASE(read_body_range_opens_the_record_once_not_once_per_body) {
+    const size_t N = 50000;
+    std::vector<CTransactionRef> bodies;
+    bodies.reserve(N);
+    for (size_t i = 0; i < N; i++) {
+        CMutableTransaction tx;
+        tx.nVersion = 1;
+        tx.vin.resize(1);
+        tx.vin[0].prevout = COutPoint(uint256S(strprintf("%064x", i)), 0);
+        tx.vout.resize(1);
+        tx.vout[0].nValue = 1000 + (int64_t) i;
+        tx.vout[0].scriptPubKey = CScript() << OP_TRUE;
+        bodies.push_back(MakeTransactionRef(std::move(tx)));
+    }
+    FlatFilePos pos = WriteBodies(bodies);
+
+    std::vector<CTransactionRef> out;
+    auto start = std::chrono::steady_clock::now();
+    BOOST_REQUIRE(ReadBodyRange(pos, 0, (unsigned int) N, std::numeric_limits<uint64_t>::max(), out));
+    auto elapsed = std::chrono::steady_clock::now() - start;
+
+    BOOST_REQUIRE_EQUAL(out.size(), N);
+    BOOST_CHECK(out[0]->GetHash() == bodies[0]->GetHash());
+    BOOST_CHECK(out[N - 1]->GetHash() == bodies[N - 1]->GetHash());
+    BOOST_CHECK(elapsed < std::chrono::seconds(3));
 }
 
 // F-127: GetBodyRecordSerializedSize must produce exactly

@@ -147,8 +147,45 @@ bool ReadBodyRecordCount(const FlatFilePos &pos, unsigned int &countOut);
 
 /** Read only the transaction at `index` from the record at `pos` by seeking
  *  straight to its bytes -- no earlier transaction in the record is read or
- *  deserialized. */
+ *  deserialized. Costs one file open plus one full offset-table read PER
+ *  CALL -- fine for a single, isolated lookup, but calling this in a loop
+ *  over a range re-reads the whole offset table once per iteration (F-150:
+ *  2.2.3a's own Fable review measured ~12s of real CPU for one range
+ *  request against a 100,000-body record, from exactly this call shape).
+ *  ReadBodyRange (below) is the one to use for a contiguous range. */
 bool ReadBodyAt(const FlatFilePos &pos, unsigned int index, CTransactionRef &txOut);
+
+/** Read a contiguous range of bodies from a single record, opening the file
+ *  and reading its offset table ONCE regardless of how many bodies end up
+ *  read -- the fix for the cost profile documented on `ReadBodyAt` above.
+ *
+ *  Reads starting at `nStartIndex`, stopping at whichever comes first:
+ *   - `nMaxCount` bodies read;
+ *   - the next body's own serialized size (`SER_NETWORK`/`PROTOCOL_VERSION`)
+ *     would push the running total past `nByteCeiling` -- except the FIRST
+ *     body read is always included regardless of its own size, so a caller
+ *     asking for at least one body from a record that has one never gets
+ *     zero back purely because the ceiling is small;
+ *   - `nStartIndex` plus however many have been read so far reaches the
+ *     record's own real count (enforced by clamping the loop bound to the
+ *     offset table's own size -- an out-of-range index is never actually
+ *     attempted, so this is not merely "the read fails and gets caught").
+ *     This is NOT an error -- asking past the end is an ordinary, honest
+ *     way to stop (a caller does not always know a record's real count in
+ *     advance), and unlike `ReadBodyAt` this function does not log
+ *     anything when it happens;
+ *   - a body WITHIN the known range fails to deserialize (this store has no
+ *     corruption path today, so inert in practice, but not assumed) -- also
+ *     not logged here; truncates exactly like the other two stop
+ *     conditions, on the same reasoning `bodyrange.h` already documents for
+ *     its own caller: there is no separate wire state for "corrupt" vs.
+ *     "that's all there is".
+ *
+ *  Returns false only if the record itself could not be opened or its
+ *  header could not be read -- a genuinely corrupt or missing record.
+ *  `bodiesOut` is always cleared first, so a false return leaves it empty. */
+bool ReadBodyRange(const FlatFilePos &pos, unsigned int nStartIndex, unsigned int nMaxCount,
+                    uint64_t nByteCeiling, std::vector<CTransactionRef> &bodiesOut);
 
 /** Load the per-file bookkeeping from pblocktree, so FindBodyPos continues
  *  from where a previous run left off instead of restarting at file 0 (and
