@@ -1074,6 +1074,37 @@ BOOST_AUTO_TEST_CASE(body_record_bit_is_unconditional_even_when_bodies_are_withh
     BOOST_CHECK_EQUAL(pindex->GetBodyPos().nPos, bodyPosAfterFirstAccept.nPos);
 }
 
+// F-143 (2.2.2 spec, retroactive amendment to 2.2.1): the body-store index's
+// own serveability flag must track BLOCK_HAVE_BODIES through a REAL
+// withhold-then-arrival cycle, not just in a hand-fed unit test -- this is
+// exactly the real call sequence ReceivedBlockTransactions (withheld=false)
+// then ReceivedBlockBodies (arrival) drives.
+BOOST_AUTO_TEST_CASE(body_index_serveability_flag_tracks_a_real_withhold_then_arrival_cycle) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    const CChainParams &chainparams = Params();
+
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock block = CreateBlock({spendTx}, coinbaseKey);
+    std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
+    uint256 hash = block.GetHash();
+
+    FlatFilePos posOut;
+    bool fServeableOut = true;
+
+    {
+        PerfWithholdGuard guard(hash);
+        BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblock, /*fForceProcessing=*/true, nullptr));
+
+        BOOST_REQUIRE(LookupBodyPositionByHash(hash, posOut, &fServeableOut));
+        BOOST_CHECK(!fServeableOut);
+    }
+
+    BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblock, /*fForceProcessing=*/false, nullptr));
+
+    BOOST_REQUIRE(LookupBodyPositionByHash(hash, posOut, &fServeableOut));
+    BOOST_CHECK(fServeableOut);
+}
+
 // F-133's second recorded constraint, proven rather than merely argued: the
 // write side (AcceptBlock -> SaveBodyToDisk -> FindBodyPos) and the load side
 // (LoadBodyFileInfo, now wired into LoadBlockIndexDB) must actually agree
@@ -1382,6 +1413,57 @@ BOOST_AUTO_TEST_CASE(body_index_hash_half_is_rebuilt_by_loadblockindexdb_alone) 
     BOOST_REQUIRE(LookupBodyPositionByHash(hash, posOut));
     BOOST_CHECK_EQUAL(posOut.nFile, bodyPos.nFile);
     BOOST_CHECK_EQUAL(posOut.nPos, bodyPos.nPos);
+}
+
+// F-143 (2.2.2 spec): the SAME rebuild loop must also restore the
+// serveability flag correctly -- for a normal, fully-held block AND for a
+// genuinely withheld one, in the same reload, so a rebuild can never
+// silently promote a withheld block to serveable (or vice versa) on restart.
+BOOST_AUTO_TEST_CASE(body_index_serveability_is_rebuilt_correctly_by_loadblockindexdb) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    const CChainParams &chainparams = Params();
+
+    // The pre-1.3 "bodiesmigrated" migration (bodiesmigrated_migration_does_
+    // not_touch_a_later_genuine_commitment_only_entry's own established
+    // pattern) treats any HAVE_DATA-without-HAVE_BODIES entry as a migration
+    // candidate on ITS OWN first run against a fresh pblocktree -- which
+    // would wrongly stamp BLOCK_HAVE_BODIES onto this test's own withheld
+    // block. Setting the flag directly (rather than running a full
+    // LoadBlockIndexDB now, which reprocesses m_blocks_unlinked/nChainTx
+    // against the fixture's already-live chain state and corrupts
+    // CheckBlockIndex's own invariants once a new block is processed
+    // afterward -- confirmed by triggering exactly that assertion failure)
+    // gets the same effect with none of the side effects on live state.
+    BOOST_REQUIRE(pblocktree->WriteFlag("bodiesmigrated", true));
+
+    CBlock heldBlock = CreateAndProcessBlock({}, coinbaseKey);
+    uint256 heldHash = heldBlock.GetHash();
+
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock withheldBlock = CreateBlock({spendTx}, coinbaseKey);
+    std::shared_ptr<const CBlock> shared_pwithheld = std::make_shared<const CBlock>(withheldBlock);
+    uint256 withheldHash = withheldBlock.GetHash();
+    {
+        PerfWithholdGuard guard(withheldHash);
+        BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pwithheld, /*fForceProcessing=*/true, nullptr));
+    }
+    BOOST_REQUIRE(LookupBlockIndex(withheldHash)->nStatus & BLOCK_HAVE_BODY_RECORD);
+    BOOST_REQUIRE(!(LookupBlockIndex(withheldHash)->nStatus & BLOCK_HAVE_BODIES));
+
+    ResetBodyIndex();
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(LoadBlockIndexDB(chainman, chainparams));
+    }
+
+    FlatFilePos posOut;
+    bool fServeableOut = false;
+    BOOST_REQUIRE(LookupBodyPositionByHash(heldHash, posOut, &fServeableOut));
+    BOOST_CHECK(fServeableOut);
+
+    fServeableOut = true;
+    BOOST_REQUIRE(LookupBodyPositionByHash(withheldHash, posOut, &fServeableOut));
+    BOOST_CHECK(!fServeableOut);
 }
 
 // F-141 (Fable review of F-140, HIGH-adjacent/LOW): the free

@@ -710,7 +710,7 @@ BOOST_AUTO_TEST_CASE(record_and_lookup_body_position_by_hash_round_trips) {
 
     uint256 hash = uint256S("0xaa");
     FlatFilePos pos(3, 12345);
-    RecordBodyPositionByHash(hash, pos);
+    RecordBodyPositionByHash(hash, pos, true);
 
     FlatFilePos posOut;
     BOOST_REQUIRE(LookupBodyPositionByHash(hash, posOut));
@@ -733,7 +733,7 @@ BOOST_AUTO_TEST_CASE(record_body_position_by_hash_needs_no_height_entry_at_all) 
 
     uint256 hash = uint256S("0xcc");
     FlatFilePos pos(0, 500);
-    RecordBodyPositionByHash(hash, pos);
+    RecordBodyPositionByHash(hash, pos, true);
 
     FlatFilePos posOut;
     uint256 hashOut;
@@ -744,6 +744,76 @@ BOOST_AUTO_TEST_CASE(record_body_position_by_hash_needs_no_height_entry_at_all) 
     FlatFilePos byHashOut;
     BOOST_REQUIRE(LookupBodyPositionByHash(hash, byHashOut));
     BOOST_CHECK_EQUAL(byHashOut.nPos, 500U);
+}
+
+// F-143 (2.2.2 spec, retroactive amendment to 2.2.1): the hash half's own
+// serveability flag -- "found in the index" and "may actually be served" are
+// different facts once a block's body can be withheld (BLOCK_HAVE_BODY_RECORD
+// set, BLOCK_HAVE_BODIES clear). LookupBodyPositionByHash's 3rd parameter is
+// an OPTIONAL out-pointer (nullable) deliberately: most callers -- every
+// pre-existing test in this file, and the height half's own bookkeeping --
+// never cared about serveability and must not be forced to thread an unused
+// bool through just to keep compiling. RecordBodyPositionByHash's 3rd
+// parameter is NOT optional: a body record's serveability must be a
+// deliberate choice at every call site, never a silently-assumed default,
+// since defaulting to "serveable" would be exactly the kind of silent,
+// security-relevant mistake this flag exists to prevent.
+BOOST_AUTO_TEST_CASE(lookup_body_position_by_hash_reports_serveable_true_when_recorded_serveable) {
+    ResetBodyIndex();
+
+    uint256 hash = uint256S("0xd1");
+    RecordBodyPositionByHash(hash, FlatFilePos(0, 100), true);
+
+    FlatFilePos posOut;
+    bool fServeableOut = false;
+    BOOST_REQUIRE(LookupBodyPositionByHash(hash, posOut, &fServeableOut));
+    BOOST_CHECK(fServeableOut);
+}
+
+BOOST_AUTO_TEST_CASE(lookup_body_position_by_hash_reports_serveable_false_when_recorded_withheld) {
+    ResetBodyIndex();
+
+    uint256 hash = uint256S("0xd2");
+    RecordBodyPositionByHash(hash, FlatFilePos(0, 200), false);
+
+    FlatFilePos posOut;
+    bool fServeableOut = true;
+    BOOST_REQUIRE(LookupBodyPositionByHash(hash, posOut, &fServeableOut));
+    BOOST_CHECK(!fServeableOut);
+}
+
+// A caller that doesn't pass the optional pointer must not crash and must
+// still get the position -- this is the majority of existing callers
+// (position-only tests, the height-half bookkeeping) and must keep working
+// exactly as before this amendment.
+BOOST_AUTO_TEST_CASE(lookup_body_position_by_hash_works_without_the_optional_serveable_pointer) {
+    ResetBodyIndex();
+
+    uint256 hash = uint256S("0xd3");
+    RecordBodyPositionByHash(hash, FlatFilePos(0, 300), false);
+
+    FlatFilePos posOut;
+    BOOST_REQUIRE(LookupBodyPositionByHash(hash, posOut));
+    BOOST_CHECK_EQUAL(posOut.nPos, 300U);
+}
+
+// Re-recording the SAME hash (a withheld block whose bodies later arrive)
+// must overwrite the serveability flag along with the position, not merge or
+// ignore the new value -- this is exactly ReceivedBlockBodies's own real use
+// of this API (validation.cpp).
+BOOST_AUTO_TEST_CASE(record_body_position_by_hash_overwrites_serveable_flag_on_a_later_call) {
+    ResetBodyIndex();
+
+    uint256 hash = uint256S("0xd4");
+    RecordBodyPositionByHash(hash, FlatFilePos(0, 400), false);
+    FlatFilePos posOut;
+    bool fServeableOut = true;
+    BOOST_REQUIRE(LookupBodyPositionByHash(hash, posOut, &fServeableOut));
+    BOOST_CHECK(!fServeableOut);
+
+    RecordBodyPositionByHash(hash, FlatFilePos(0, 400), true);
+    BOOST_REQUIRE(LookupBodyPositionByHash(hash, posOut, &fServeableOut));
+    BOOST_CHECK(fServeableOut);
 }
 
 BOOST_AUTO_TEST_CASE(lookup_body_position_at_height_returns_false_when_never_recorded) {
@@ -832,7 +902,7 @@ BOOST_AUTO_TEST_CASE(reset_body_index_clears_both_halves) {
     ResetBodyIndex();
 
     uint256 hash = uint256S("0xf1");
-    RecordBodyPositionByHash(hash, FlatFilePos(0, 1));
+    RecordBodyPositionByHash(hash, FlatFilePos(0, 1), true);
     RecordBodyPositionAtHeight(5, hash, FlatFilePos(0, 1));
 
     ResetBodyIndex();
