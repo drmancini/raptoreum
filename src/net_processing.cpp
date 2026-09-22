@@ -9,6 +9,7 @@
 #include <banman.h>
 #include <arith_uint256.h>
 #include <blockencodings.h>
+#include <announcerring.h>
 #include <bodyrange.h>
 #include <chainparams.h>
 #include <consensus/validation.h>
@@ -131,6 +132,20 @@ static_assert(DEFAULT_MAX_BODYRANGE_BYTES + 4096 < MAX_PROTOCOL_MESSAGE_LENGTH,
 static_assert(MAX_STANDARD_TX_SIZE + 4096 < MAX_PROTOCOL_MESSAGE_LENGTH,
               "a single forced-through oversized body (BuildBodyRangeResponse's own first-body exception) "
               "must always fit in one P2P message too");
+
+/** 2.2.3b (F-143's accepted spec, announcerring.h): how many blocks behind
+ *  the current tip the announcer ring still holds a peer accountable for.
+ *  F-143's own review left this depth explicitly open ("coupled to, never
+ *  exceeding, this project's still-unfixed minimum body-retention floor")
+ *  -- resolved (F-149/F-150's own research) by reusing the constant that
+ *  already answers the identical question for pruning
+ *  (MIN_BLOCKS_TO_KEEP, validation.h) and, under its
+ *  NODE_NETWORK_LIMITED_MIN_BLOCKS alias, for an analogous existing
+ *  "how far back can a peer be trusted to still have data" bound a few
+ *  hundred lines below in this same file -- rather than inventing a third
+ *  name for the same number. The same +2 block race-buffer margin used
+ *  there is used here for the same reason. */
+static const int ANNOUNCER_RING_DEPTH = (int) NODE_NETWORK_LIMITED_MIN_BLOCKS + 2;
 
 /** Expiration time for orphan transactions in seconds */
 static constexpr int64_t
@@ -435,6 +450,12 @@ namespace {
         //! see ShouldNegotiateCommitments (F-85).
         bool fProvidesCommitments;
 
+        //! 2.2.3b (F-143's accepted spec, announcerring.h): every block this
+        //! peer has announced to us, height-bounded -- lets a later failed
+        //! body fetch (2.2.4) be told apart as "this peer specifically owed
+        //! us an answer" from "nobody in particular did".
+        CAnnouncerRing announcerRing;
+
         /** State used to enforce CHAIN_SYNC_TIMEOUT
           * Only in effect for outbound, non-manual connections, with
           * m_protect == false
@@ -697,6 +718,25 @@ namespace {
             return true;
     }
 
+/** 2.2.3b (F-143's accepted spec): record into `nodeid`'s own announcer ring
+ *  that it announced `pindex`. Called from BOTH of this file's two
+ *  independent hash-resolution branches (ProcessBlockAvailability and
+ *  UpdateBlockAvailability, confirmed as genuinely distinct code paths, not
+ *  one calling the other "for free" -- exactly the gap F-143's own round-5
+ *  review found when only one of the two was covered) and from the
+ *  per-header loop in ProcessHeadersMessage (RecordAnnouncedHeaderRange,
+ *  below) -- recording the same hash more than once across these is
+ *  harmless (CAnnouncerRing::Record is idempotent for a repeat hash at the
+ *  same height). */
+    void RecordAnnouncer(NodeId nodeid, const CBlockIndex *pindex)
+
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+            CNodeState * state = State(nodeid);
+            assert(state != nullptr);
+            state->announcerRing.Record(pindex->nHeight, pindex->GetBlockHash(),
+                                         ::ChainActive().Height(), ANNOUNCER_RING_DEPTH);
+    }
+
 /** Check whether the last unknown block a peer advertised is not yet known. */
     void ProcessBlockAvailability(NodeId nodeid)
 
@@ -707,6 +747,13 @@ namespace {
             if (!state->hashLastUnknownBlock.IsNull()) {
                 const CBlockIndex *pindex = LookupBlockIndex(state->hashLastUnknownBlock);
                 if (pindex && pindex->nChainWork > 0) {
+                    // 2.2.3b: this is the ONLY point that resolves a hash
+                    // deferred by the unconnecting-headers path below
+                    // (headers.back().GetHash(), recorded unresolved via
+                    // UpdateBlockAvailability's own hashLastUnknownBlock
+                    // branch) -- the real "announcement" moment for that
+                    // path, per F-143's own round-4 finding.
+                    RecordAnnouncer(nodeid, pindex);
                     if (state->pindexBestKnownBlock == nullptr ||
                         pindex->nChainWork >= state->pindexBestKnownBlock->nChainWork) {
                         state->pindexBestKnownBlock = pindex;
@@ -727,6 +774,10 @@ namespace {
 
             const CBlockIndex* pindex = LookupBlockIndex(hash);
             if (pindex && pindex->nChainWork > 0) {
+                // 2.2.3b: covers INV directly (this function is INV's only
+                // path to availability tracking, F-143's own confirmed
+                // finding) plus every other direct caller of this function.
+                RecordAnnouncer(nodeid, pindex);
                 // An actually better block was announced.
                 if (state->pindexBestKnownBlock == nullptr ||
                     pindex->nChainWork >= state->pindexBestKnownBlock->nChainWork) {
@@ -2121,6 +2172,41 @@ SendBodyRange(const CGetBodyRange &req, GetBodyRangeValidation validation, const
     connman->PushMessage(pfrom, msgMaker.Make(NetMsgType::BODYRANGE, resp));
 }
 
+/** 2.2.3b (F-143's accepted spec, round-4 finding): UpdateBlockAvailability
+ *  is called with only a HEADERS batch's own TRAILING header
+ *  (pindexLast->GetBlockHash(), below) -- every OTHER header the peer just
+ *  announced in that same batch gets no announcer-ring record at all, even
+ *  though the peer genuinely announced each of them. This walks the real
+ *  accepted prefix and records every one.
+ *
+ *  `pindexLast` may be null (nothing was accepted at all -- the very first
+ *  header in the batch was itself invalid) or may point at an EARLIER
+ *  header than `headers.back()` (a batch that partially succeeded before
+ *  hitting an invalid one later in the same message,
+ *  ChainstateManager::ProcessNewBlockHeaders's own out-param is populated
+ *  incrementally per header, confirmed directly against validation.cpp,
+ *  even on a call that goes on to return false) -- this function is called
+ *  from BOTH ProcessHeadersMessage's success path and its specific
+ *  partial-failure path, and is a no-op if `pindexLast` is null. */
+    void RecordAnnouncedHeaderRange(NodeId nodeid, const std::vector <CBlockHeader> &headers,
+                                     const CBlockIndex *pindexLast)
+
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+            if (!pindexLast) {
+                return;
+            }
+            uint256 lastHash = pindexLast->GetBlockHash();
+            for (const CBlockHeader &header: headers) {
+                const CBlockIndex *pindex = LookupBlockIndex(header.GetHash());
+                if (pindex) {
+                    RecordAnnouncer(nodeid, pindex);
+                }
+                if (header.GetHash() == lastHash) {
+                    break;
+                }
+            }
+    }
+
 bool static ProcessHeadersMessage(CNode *pfrom, CConnman *connman, ChainstateManager &chainman, CTxMemPool &mempool,
                                   const std::vector <CBlockHeader> &headers, const CChainParams &chainparams,
                                   bool punish_duplicate_invalid) {
@@ -2229,6 +2315,14 @@ bool static ProcessHeadersMessage(CNode *pfrom, CConnman *connman, ChainstateMan
                 // etc), and not just the duplicate-invalid case.
                 pfrom->fDisconnect = true;
             }
+            // 2.2.3b: a partially-rejected batch still genuinely announced
+            // whatever prefix DID get accepted before hitting this invalid
+            // header -- pindexLast (possibly null, if the very first header
+            // was the invalid one) reflects exactly that prefix, confirmed
+            // directly against ChainstateManager::ProcessNewBlockHeaders's
+            // own incremental out-param population. Still under the
+            // cs_main this block already holds.
+            RecordAnnouncedHeaderRange(pfrom->GetId(), headers, pindexLast);
             return false;
         }
     }
@@ -2244,6 +2338,9 @@ bool static ProcessHeadersMessage(CNode *pfrom, CConnman *connman, ChainstateMan
 
         assert(pindexLast);
         UpdateBlockAvailability(pfrom->GetId(), pindexLast->GetBlockHash());
+        // 2.2.3b: the call above only records the BATCH's trailing header --
+        // this records every header genuinely announced in the whole batch.
+        RecordAnnouncedHeaderRange(pfrom->GetId(), headers, pindexLast);
 
         // From here, pindexBestKnownBlock should be guaranteed to be non-null,
         // because it is set in UpdateBlockAvailability. Some nullptr checks
