@@ -50,7 +50,15 @@ namespace {
     // rollover) and never held across I/O by any caller.
     Mutex cs_bodyIndex;
 
-    std::unordered_map<uint256, FlatFilePos, StaticSaltedHasher> mapBodyPosByHash GUARDED_BY(cs_bodyIndex);
+    // F-143 (2.2.2 spec, retroactive amendment): fServeable alongside
+    // position -- a withheld block (BLOCK_HAVE_BODY_RECORD set,
+    // BLOCK_HAVE_BODIES clear) is hash-resolvable but must never be handed
+    // to a serving handler with no cs_main/CBlockIndex to check HaveBodies.
+    struct BodyHashEntry {
+        FlatFilePos pos;
+        bool fServeable;
+    };
+    std::unordered_map<uint256, BodyHashEntry, StaticSaltedHasher> mapBodyPosByHash GUARDED_BY(cs_bodyIndex);
 
     struct BodyHeightEntry {
         uint256 hash;
@@ -333,18 +341,21 @@ unsigned int TestOnlyGetBodyFileSize(int nFile) {
     return vinfoBodyFile[nFile].nSize;
 }
 
-void RecordBodyPositionByHash(const uint256 &hash, const FlatFilePos &pos) {
+void RecordBodyPositionByHash(const uint256 &hash, const FlatFilePos &pos, bool fServeable) {
     LOCK(cs_bodyIndex);
-    mapBodyPosByHash[hash] = pos;
+    mapBodyPosByHash[hash] = BodyHashEntry{pos, fServeable};
 }
 
-bool LookupBodyPositionByHash(const uint256 &hash, FlatFilePos &posOut) {
+bool LookupBodyPositionByHash(const uint256 &hash, FlatFilePos &posOut, bool *fServeableOut) {
     LOCK(cs_bodyIndex);
     auto it = mapBodyPosByHash.find(hash);
     if (it == mapBodyPosByHash.end()) {
         return false;
     }
-    posOut = it->second;
+    posOut = it->second.pos;
+    if (fServeableOut) {
+        *fServeableOut = it->second.fServeable;
+    }
     return true;
 }
 

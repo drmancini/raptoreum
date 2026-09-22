@@ -261,11 +261,28 @@ unsigned int TestOnlyGetBodyFileSize(int nFile);
  *  property real rather than nominal. */
 
 /** Record where a block's body record was written, keyed by the block's own
- *  hash. No `cs_main` required to call or to read back. */
-void RecordBodyPositionByHash(const uint256 &hash, const FlatFilePos &pos);
+ *  hash, and whether it may currently be SERVED to a peer (F-143, 2.2.2's
+ *  wire-format spec, retroactive amendment: a withheld block --
+ *  BLOCK_HAVE_BODY_RECORD set, BLOCK_HAVE_BODIES clear -- is hash-resolvable
+ *  by this index but must never be handed to a 2.2.3 serving handler, which
+ *  has no CBlockIndex/cs_main to consult `HaveBodies` with). `fServeable` is
+ *  NOT optional/defaulted -- every caller must make a deliberate choice, since
+ *  a silently-assumed "serveable" default is exactly the kind of mistake this
+ *  flag exists to prevent. Overwrites any existing entry for `hash`,
+ *  including its serveability -- this is exactly `ReceivedBlockBodies`'s own
+ *  real use (validation.cpp): a withheld block's bodies arriving later
+ *  re-records the SAME position with `fServeable=true`. No `cs_main`
+ *  required to call or to read back. */
+void RecordBodyPositionByHash(const uint256 &hash, const FlatFilePos &pos, bool fServeable);
 
-/** Look up a body position by hash. False if never recorded. */
-bool LookupBodyPositionByHash(const uint256 &hash, FlatFilePos &posOut);
+/** Look up a body position by hash. False if never recorded. `fServeableOut`
+ *  is an OPTIONAL out-pointer (nullable, default nullptr) -- most callers
+ *  (every position-only test that predates F-143, the height half's own
+ *  bookkeeping) never cared about serveability and must not be forced to
+ *  thread an unused bool through just to keep compiling; pass a real pointer
+ *  only where the caller actually needs the fact (2.2.3's future serving
+ *  handler). */
+bool LookupBodyPositionByHash(const uint256 &hash, FlatFilePos &posOut, bool *fServeableOut = nullptr);
 
 /** Record the ACTIVE CHAIN's body position and hash at a height -- call at
  *  `ConnectTip`, after the connect itself succeeds. Overwrites any existing

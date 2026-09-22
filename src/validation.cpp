@@ -3998,6 +3998,15 @@ void CChainState::ReceivedBlockBodies(CBlockIndex *pindexNew) {
     // function's first version did) was wrong.
     setDirtyBlockIndex.insert(pindexNew);
 
+    // F-143 (2.2.2 spec): a previously-withheld block's bodies just arrived
+    // -- re-record the SAME position with fServeable now true. Must run
+    // before the parent-not-downloaded early return below: this block's OWN
+    // serveability doesn't depend on its parent's connectivity, only on
+    // whether ITS bytes are held. BLOCK_HAVE_BODY_RECORD is already set
+    // (this function only ever runs for a block ReceivedBlockTransactions
+    // already accepted), so GetBodyPos() is always valid here.
+    RecordBodyPositionByHash(pindexNew->GetBlockHash(), pindexNew->GetBodyPos(), true);
+
     // Chain selection dropped this block and parked its descendants in
     // m_blocks_unlinked when the bodies were missing. Put back everything the
     // arrival makes eligible again -- the same walk ReceivedBlockTransactions
@@ -4060,8 +4069,11 @@ void CChainState::ReceivedBlockTransactions(const CBlock &block, CValidationStat
     // line but may never be connected at all (transaction-decoupling.md SS5),
     // and the tip-critical fetch path this index primarily serves is always
     // hash-form (a block being fetched is by definition not yet on the
-    // requester's own active chain).
-    RecordBodyPositionByHash(pindexNew->GetBlockHash(), bodyPos);
+    // requester's own active chain). F-143 (2.2.2 spec): fServeable is
+    // exactly `bodies_held` -- the same fact that decides BLOCK_HAVE_BODIES
+    // below, since a withheld block is hash-resolvable but must never be
+    // handed to a serving handler.
+    RecordBodyPositionByHash(pindexNew->GetBlockHash(), bodyPos, bodies_held);
     if (bodies_held) {
         pindexNew->nStatus |= BLOCK_HAVE_BODIES;
     }
@@ -5541,7 +5553,16 @@ EXCLUSIVE_LOCKS_REQUIRED(cs_main)
                     const CBlockIndex *pindexEntry = entry.second;
                     FlatFilePos entryBodyPos = pindexEntry->GetBodyPos();
                     if (!entryBodyPos.IsNull()) {
-                        RecordBodyPositionByHash(pindexEntry->GetBlockHash(), entryBodyPos);
+                        // F-143 (2.2.2 spec): populate the serveability flag
+                        // from the SAME entry's BLOCK_HAVE_BODIES bit -- this
+                        // rebuild loop is the authoritative site for it on
+                        // every boot, including the pre-1.3 bodiesmigrated
+                        // migration a few lines above (which sets the bit but
+                        // must not ALSO write the index directly, since this
+                        // unconditional loop runs right after and would just
+                        // overwrite it).
+                        RecordBodyPositionByHash(pindexEntry->GetBlockHash(), entryBodyPos,
+                                                  (pindexEntry->nStatus & BLOCK_HAVE_BODIES) != 0);
                     }
                 }
 
