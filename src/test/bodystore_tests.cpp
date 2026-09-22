@@ -816,6 +816,37 @@ BOOST_AUTO_TEST_CASE(record_body_position_by_hash_overwrites_serveable_flag_on_a
     BOOST_CHECK(fServeableOut);
 }
 
+// F-145 (Fable review of F-144, MEDIUM): the safe wrapper for serving --
+// false for a genuine miss, false for a withheld hit, true only when both
+// present and serveable.
+BOOST_AUTO_TEST_CASE(lookup_serveable_body_position_by_hash_misses_when_never_recorded) {
+    ResetBodyIndex();
+
+    FlatFilePos posOut;
+    BOOST_CHECK(!LookupServeableBodyPositionByHash(uint256S("0xe1"), posOut));
+}
+
+BOOST_AUTO_TEST_CASE(lookup_serveable_body_position_by_hash_misses_when_recorded_withheld) {
+    ResetBodyIndex();
+
+    uint256 hash = uint256S("0xe2");
+    RecordBodyPositionByHash(hash, FlatFilePos(0, 500), false);
+
+    FlatFilePos posOut;
+    BOOST_CHECK(!LookupServeableBodyPositionByHash(hash, posOut));
+}
+
+BOOST_AUTO_TEST_CASE(lookup_serveable_body_position_by_hash_hits_when_recorded_serveable) {
+    ResetBodyIndex();
+
+    uint256 hash = uint256S("0xe3");
+    RecordBodyPositionByHash(hash, FlatFilePos(0, 600), true);
+
+    FlatFilePos posOut;
+    BOOST_REQUIRE(LookupServeableBodyPositionByHash(hash, posOut));
+    BOOST_CHECK_EQUAL(posOut.nPos, 600U);
+}
+
 BOOST_AUTO_TEST_CASE(lookup_body_position_at_height_returns_false_when_never_recorded) {
     ResetBodyIndex();
 
