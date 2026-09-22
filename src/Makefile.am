@@ -183,6 +183,7 @@ BITCOIN_CORE_H = \
   flat-database.h \
   hdchain.h \
   bodystore.h \
+  bodyrange.h \
   flatfile.h \
   fs.h \
   httprpc.h \
@@ -373,6 +374,7 @@ libraptoreum_server_a_SOURCES = \
   evo/simplifiedmns.cpp \
   evo/specialtx.cpp \
   bodystore.cpp \
+  bodyrange.cpp \
   flatfile.cpp \
   httprpc.cpp \
   httpserver.cpp \

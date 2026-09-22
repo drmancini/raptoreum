@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <amount.h>
+#include <bodyrange.h>
 #include <bodystore.h>
 #include <chain.h>
 #include <chainparams.h>
@@ -1751,6 +1752,40 @@ BOOST_AUTO_TEST_CASE(body_index_hash_half_covers_a_side_chain_block_the_height_h
     BOOST_CHECK_EQUAL(posOut.nPos, pindexC->GetBodyPos().nPos);
 
     BOOST_CHECK(!LookupBodyPositionAtHeight(heightC, posOut, hashOut));
+}
+
+// F-143 (2.2.2 spec deliverable): pins the index-space invariant
+// bodyrange.h's VtxIndexFromBodyIndex/BodyIndexFromVtxIndex document but
+// bodyrange_tests.cpp can only assert as bare arithmetic -- against a REAL
+// accepted block's own body store, not a hand-built fixture, matching
+// F-115's own precedent for exactly this off-by-one class of bug. For every
+// body index `i`, `ReadBodyAt(pos, i)` must be the transaction at
+// `block.vtx[VtxIndexFromBodyIndex(i)]`, and asking one index past the end
+// must fail cleanly.
+BOOST_AUTO_TEST_CASE(vtx_index_from_body_index_matches_a_real_accepted_block) {
+    CMutableTransaction spendTx1 = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CMutableTransaction spendTx2 = MakeSpendOfCoinbase(m_coinbase_txns[1], coinbaseKey);
+    CBlock block = CreateAndProcessBlock({spendTx1, spendTx2}, coinbaseKey);
+    CBlockIndex *pindex = LookupBlockIndex(block.GetHash());
+    BOOST_REQUIRE(pindex != nullptr);
+    FlatFilePos pos = pindex->GetBodyPos();
+    BOOST_REQUIRE(!pos.IsNull());
+
+    unsigned int count = 0;
+    BOOST_REQUIRE(ReadBodyRecordCount(pos, count));
+    // block.vtx[0] is the coinbase, never stored in the body store.
+    BOOST_REQUIRE_EQUAL(count, block.vtx.size() - 1);
+
+    for (uint32_t bodyIndex = 0; bodyIndex < count; bodyIndex++) {
+        CTransactionRef txOut;
+        BOOST_REQUIRE(ReadBodyAt(pos, bodyIndex, txOut));
+        uint32_t vtxIndex = VtxIndexFromBodyIndex(bodyIndex);
+        BOOST_CHECK(txOut->GetHash() == block.vtx[vtxIndex]->GetHash());
+        BOOST_CHECK_EQUAL(BodyIndexFromVtxIndex(vtxIndex), bodyIndex);
+    }
+
+    CTransactionRef txOut;
+    BOOST_CHECK(!ReadBodyAt(pos, count, txOut));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
