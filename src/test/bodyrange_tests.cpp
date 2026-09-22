@@ -20,7 +20,27 @@
 
 #include <boost/test/unit_test.hpp>
 
-BOOST_FIXTURE_TEST_SUITE(bodyrange_tests, BasicTestingSetup)
+// F-147 (Fable review of F-146, HIGH): BasicTestingSetup alone never points
+// -datadir at its own temp root or clears GetBlocksDir()'s path cache --
+// this suite's own validate_* tests call FindBodyPos/WriteBodyRecord, real
+// file I/O, so without this GetBlocksDir() falls back to the REAL default
+// datadir and writes real bdy*.dat files there. This is not hypothetical:
+// confirmed directly -- the original version of this file, using bare
+// BasicTestingSetup, wrote a real 16 MiB bdy00000.dat into
+// ~/.raptoreumcore/blocks/, the live datadir of an actually-running
+// raptoreumd process, and left stale data there across runs that then made
+// one of this file's own mutation-testing claims falsely pass (see F-147's
+// own docs/findings.md entry). Exactly F-127's own precedent
+// (bodystore_tests.cpp's BodyStoreTestingSetup) for exactly the same
+// mistake, in a second file.
+struct BodyRangeTestingSetup : public BasicTestingSetup {
+    BodyRangeTestingSetup() {
+        SetDataDir("tempdir");
+        ClearDatadirCache();
+    }
+};
+
+BOOST_FIXTURE_TEST_SUITE(bodyrange_tests, BodyRangeTestingSetup)
 
 // F-127's own precedent (bodystore_tests.cpp): every transaction the same
 // length lets a wrong-index bug pass by accident, since any plausible wrong
@@ -70,7 +90,7 @@ BOOST_AUTO_TEST_CASE(cbodyrange_round_trips_empty_vbodies) {
 BOOST_AUTO_TEST_CASE(cbodyrange_round_trips_preserving_order_and_content) {
     CBodyRange resp;
     resp.hashBlock = uint256S("0xcc");
-    resp.nStartIndex = 0;
+    resp.nStartIndex = 4;
     resp.vBodies = {MakeBodyTx(1), MakeBodyTx(2), MakeBodyTx(3)};
 
     CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
@@ -78,6 +98,13 @@ BOOST_AUTO_TEST_CASE(cbodyrange_round_trips_preserving_order_and_content) {
     CBodyRange respOut;
     ss >> respOut;
 
+    // F-147 (Fable review of F-146, LOW): the original version of this test
+    // never checked hashBlock/nStartIndex here -- only the empty-vBodies
+    // test did, which would let a SERIALIZE_METHODS field-order swap
+    // between hashBlock and vBodies pass unnoticed on the case that
+    // actually carries data.
+    BOOST_CHECK(respOut.hashBlock == resp.hashBlock);
+    BOOST_CHECK_EQUAL(respOut.nStartIndex, resp.nStartIndex);
     BOOST_REQUIRE_EQUAL(respOut.vBodies.size(), resp.vBodies.size());
     for (size_t i = 0; i < resp.vBodies.size(); i++) {
         BOOST_CHECK(respOut.vBodies[i]->GetHash() == resp.vBodies[i]->GetHash());
@@ -132,12 +159,66 @@ BOOST_AUTO_TEST_CASE(validate_misses_an_unknown_hash) {
 
     FlatFilePos posOut;
     BOOST_CHECK(ValidateGetBodyRange(req, posOut) == GetBodyRangeValidation::MISS);
+    // F-147: must not leak a position for a hash that was never recorded.
+    BOOST_CHECK(posOut.IsNull());
 }
 
+// F-147 (Fable review of F-146, HIGH): the original version of this test
+// backed `posOut` with a HAND-BUILT FlatFilePos(0, 100) -- no real record
+// ever written there. On a clean datadir, `ReadBodyRecordCount` opening
+// that position fails for the SAME reason an unrecorded hash does (no
+// readable bytes), so a mutant that drops the serveability check entirely
+// (leaking straight through to `ValidateGetBodyRange`'s later tiers)
+// coincidentally still landed on MISS -- via `ReadBodyRecordCount`'s own
+// failure path, not via the serveability check this test exists to prove.
+// Backing the withheld entry with a REAL, readable record is what makes
+// this test actually exercise "found, but withheld" rather than
+// "indistinguishable from unreadable garbage".
 BOOST_AUTO_TEST_CASE(validate_misses_a_withheld_hash) {
     ResetBodyIndex();
+    TestOnlyResetBodyFileState();
+
+    std::vector<CTransactionRef> bodies = {MakeBodyTx(1)};
+    FlatFilePos pos;
+    BOOST_REQUIRE(FindBodyPos(pos, (unsigned int) GetBodyRecordSerializedSize(bodies)));
+    BOOST_REQUIRE(WriteBodyRecord(pos, bodies));
     uint256 hash = uint256S("0x101");
-    RecordBodyPositionByHash(hash, FlatFilePos(0, 100), /*fServeable=*/false);
+    RecordBodyPositionByHash(hash, pos, /*fServeable=*/false);
+
+    CGetBodyRange req;
+    req.hashBlock = hash;
+    req.nStartIndex = 0;
+    req.nCount = 1;
+
+    FlatFilePos posOut;
+    BOOST_CHECK(ValidateGetBodyRange(req, posOut) == GetBodyRangeValidation::MISS);
+    // F-147 (MEDIUM, bodystore.cpp): the withheld block's own REAL position
+    // must never leak out of a call classified as a miss.
+    BOOST_CHECK(posOut.IsNull());
+}
+
+// F-147 (Fable review of F-146, HIGH -- the corrupt-record tier the
+// original mutation pass never tried): a serveable hash whose on-disk
+// record cannot actually be read (corrupt count byte) must classify as a
+// MISS, never a BAN -- the requester cannot tell "corrupt" from "server-side
+// problem" and did nothing wrong by asking.
+BOOST_AUTO_TEST_CASE(validate_misses_a_serveable_hash_with_a_corrupt_record) {
+    ResetBodyIndex();
+    TestOnlyResetBodyFileState();
+
+    FlatFilePos pos;
+    BOOST_REQUIRE(FindBodyPos(pos, 8));
+    {
+        // An implausible CompactSize count -- ReadBodyRecordCount's own
+        // implausible-count guard (bodystore.cpp) must reject this, exactly
+        // the F-127 precedent this record-corruption shape already covers
+        // for ReadBodyRecordCount itself.
+        CAutoFile fileout(OpenBodyFile(pos), SER_DISK, CLIENT_VERSION);
+        BOOST_REQUIRE(!fileout.IsNull());
+        WriteCompactSize(fileout, (uint64_t) COMMITMENT_BUDGET_MAX_INPUTS + 1);
+    }
+    uint256 hash = uint256S("0x104");
+    RecordBodyPositionByHash(hash, pos, /*fServeable=*/true);
 
     CGetBodyRange req;
     req.hashBlock = hash;
@@ -148,8 +229,34 @@ BOOST_AUTO_TEST_CASE(validate_misses_a_withheld_hash) {
     BOOST_CHECK(ValidateGetBodyRange(req, posOut) == GetBodyRangeValidation::MISS);
 }
 
+// F-147 (Fable review of F-146, LOW): a coinbase-only block's body record is
+// empty (count == 0) -- every range request against it is a BAN by
+// construction (nStartIndex >= 0 always holds), since an honest requester
+// never has a reason to ask for a range of a block with no non-coinbase
+// transactions at all. Not a gap; pinned explicitly so the reasoning isn't
+// left implicit.
+BOOST_AUTO_TEST_CASE(validate_bans_any_request_on_a_coinbase_only_record) {
+    ResetBodyIndex();
+    TestOnlyResetBodyFileState();
+
+    FlatFilePos pos;
+    BOOST_REQUIRE(FindBodyPos(pos, (unsigned int) GetBodyRecordSerializedSize({})));
+    BOOST_REQUIRE(WriteBodyRecord(pos, {}));
+    uint256 hash = uint256S("0x105");
+    RecordBodyPositionByHash(hash, pos, /*fServeable=*/true);
+
+    CGetBodyRange req;
+    req.hashBlock = hash;
+    req.nStartIndex = 0;
+    req.nCount = 1;
+
+    FlatFilePos posOut;
+    BOOST_CHECK(ValidateGetBodyRange(req, posOut) == GetBodyRangeValidation::BAN);
+}
+
 BOOST_AUTO_TEST_CASE(validate_bans_an_out_of_range_start_on_a_serveable_block) {
     ResetBodyIndex();
+    TestOnlyResetBodyFileState();
     std::vector<CTransactionRef> bodies = {MakeBodyTx(1), MakeBodyTx(2)};
     FlatFilePos pos;
     BOOST_REQUIRE(FindBodyPos(pos, (unsigned int) GetBodyRecordSerializedSize(bodies)));
@@ -168,6 +275,7 @@ BOOST_AUTO_TEST_CASE(validate_bans_an_out_of_range_start_on_a_serveable_block) {
 
 BOOST_AUTO_TEST_CASE(validate_ok_for_a_real_in_range_serveable_request) {
     ResetBodyIndex();
+    TestOnlyResetBodyFileState();
     std::vector<CTransactionRef> bodies = {MakeBodyTx(1), MakeBodyTx(2), MakeBodyTx(3)};
     FlatFilePos pos;
     BOOST_REQUIRE(FindBodyPos(pos, (unsigned int) GetBodyRecordSerializedSize(bodies)));

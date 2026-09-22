@@ -836,6 +836,23 @@ BOOST_AUTO_TEST_CASE(lookup_serveable_body_position_by_hash_misses_when_recorded
     BOOST_CHECK(!LookupServeableBodyPositionByHash(hash, posOut));
 }
 
+// F-147 (Fable review of F-146, MEDIUM): a caller that only checks the
+// return value and forgets to also check `posOut.IsNull()` must still be
+// safe -- `posOut` must never carry the withheld block's own real position
+// out of a call this function said was a miss. `LookupBodyPositionByHash`
+// writes `posOut` the instant the entry is FOUND, before the wrapper's own
+// serveability check runs, so this is a real, not merely theoretical, risk.
+BOOST_AUTO_TEST_CASE(lookup_serveable_body_position_by_hash_leaves_posout_untouched_on_a_withheld_miss) {
+    ResetBodyIndex();
+
+    uint256 hash = uint256S("0xe4");
+    RecordBodyPositionByHash(hash, FlatFilePos(7, 12345), false);
+
+    FlatFilePos posOut;
+    BOOST_REQUIRE(!LookupServeableBodyPositionByHash(hash, posOut));
+    BOOST_CHECK(posOut.IsNull());
+}
+
 BOOST_AUTO_TEST_CASE(lookup_serveable_body_position_by_hash_hits_when_recorded_serveable) {
     ResetBodyIndex();
 
