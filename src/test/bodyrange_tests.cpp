@@ -18,6 +18,9 @@
 #include <uint256.h>
 #include <util/strencodings.h>
 
+#include <chrono>
+#include <limits>
+
 #include <boost/test/unit_test.hpp>
 
 // F-147 (Fable review of F-146, HIGH): this suite's own validate_* tests
@@ -343,6 +346,164 @@ BOOST_AUTO_TEST_CASE(validate_ok_for_a_real_in_range_serveable_request) {
     BOOST_REQUIRE(ValidateGetBodyRange(req, posOut) == GetBodyRangeValidation::OK);
     BOOST_CHECK_EQUAL(posOut.nFile, pos.nFile);
     BOOST_CHECK_EQUAL(posOut.nPos, pos.nPos);
+}
+
+// 2.2.3 (serving handler): BuildBodyRangeResponse is the pure, cs_main-free
+// response-building logic -- given a position ValidateGetBodyRange already
+// classified OK, read bodies and assemble the wire response. The actual
+// net_processing.cpp ProcessMessage dispatch arm that calls this (deserialize
+// -> ValidateGetBodyRange -> Misbehaving on BAN / this function on OK ->
+// PushMessage) has no unit coverage, matching this tree's own established
+// convention for message-processing glue (SENDCMPCT is the same way) -- but
+// every byte of actual chunking/truncation LOGIC lives here instead, where it
+// is fully testable without CNode/CConnman scaffolding.
+BOOST_AUTO_TEST_CASE(build_response_echoes_hash_and_start_index) {
+    ResetBodyIndex();
+    TestOnlyResetBodyFileState();
+    std::vector<CTransactionRef> bodies = {MakeBodyTx(1)};
+    FlatFilePos pos;
+    BOOST_REQUIRE(FindBodyPos(pos, (unsigned int) GetBodyRecordSerializedSize(bodies)));
+    BOOST_REQUIRE(WriteBodyRecord(pos, bodies));
+
+    CGetBodyRange req;
+    req.hashBlock = uint256S("0x201");
+    req.nStartIndex = 0;
+    req.nCount = 1;
+
+    CBodyRange resp;
+    BuildBodyRangeResponse(req, pos, std::numeric_limits<uint64_t>::max(), resp);
+    BOOST_CHECK(resp.hashBlock == req.hashBlock);
+    BOOST_CHECK_EQUAL(resp.nStartIndex, req.nStartIndex);
+}
+
+BOOST_AUTO_TEST_CASE(build_response_respects_ncount_when_the_ceiling_is_no_limit) {
+    ResetBodyIndex();
+    TestOnlyResetBodyFileState();
+    std::vector<CTransactionRef> bodies = {MakeBodyTx(1), MakeBodyTx(2), MakeBodyTx(3), MakeBodyTx(4)};
+    FlatFilePos pos;
+    BOOST_REQUIRE(FindBodyPos(pos, (unsigned int) GetBodyRecordSerializedSize(bodies)));
+    BOOST_REQUIRE(WriteBodyRecord(pos, bodies));
+
+    CGetBodyRange req;
+    req.hashBlock = uint256S("0x202");
+    req.nStartIndex = 1;
+    req.nCount = 2;
+
+    CBodyRange resp;
+    BuildBodyRangeResponse(req, pos, std::numeric_limits<uint64_t>::max(), resp);
+    BOOST_REQUIRE_EQUAL(resp.vBodies.size(), 2U);
+    BOOST_CHECK(resp.vBodies[0]->GetHash() == bodies[1]->GetHash());
+    BOOST_CHECK(resp.vBodies[1]->GetHash() == bodies[2]->GetHash());
+}
+
+BOOST_AUTO_TEST_CASE(build_response_truncates_when_the_record_runs_out_before_ncount) {
+    ResetBodyIndex();
+    TestOnlyResetBodyFileState();
+    std::vector<CTransactionRef> bodies = {MakeBodyTx(1), MakeBodyTx(2)};
+    FlatFilePos pos;
+    BOOST_REQUIRE(FindBodyPos(pos, (unsigned int) GetBodyRecordSerializedSize(bodies)));
+    BOOST_REQUIRE(WriteBodyRecord(pos, bodies));
+
+    // ValidateGetBodyRange's own OK classification only guarantees
+    // nStartIndex < count -- nothing guarantees nStartIndex + nCount <=
+    // count, so a caller (correctly) getting OK can still ask for more
+    // bodies than the record actually has past nStartIndex.
+    CGetBodyRange req;
+    req.hashBlock = uint256S("0x203");
+    req.nStartIndex = 0;
+    req.nCount = 10;
+
+    CBodyRange resp;
+    BuildBodyRangeResponse(req, pos, std::numeric_limits<uint64_t>::max(), resp);
+    BOOST_REQUIRE_EQUAL(resp.vBodies.size(), 2U);
+    BOOST_CHECK(resp.vBodies[0]->GetHash() == bodies[0]->GetHash());
+    BOOST_CHECK(resp.vBodies[1]->GetHash() == bodies[1]->GetHash());
+}
+
+BOOST_AUTO_TEST_CASE(build_response_always_includes_the_first_body_even_over_a_tiny_ceiling) {
+    ResetBodyIndex();
+    TestOnlyResetBodyFileState();
+    std::vector<CTransactionRef> bodies = {MakeBodyTx(1), MakeBodyTx(2)};
+    FlatFilePos pos;
+    BOOST_REQUIRE(FindBodyPos(pos, (unsigned int) GetBodyRecordSerializedSize(bodies)));
+    BOOST_REQUIRE(WriteBodyRecord(pos, bodies));
+
+    CGetBodyRange req;
+    req.hashBlock = uint256S("0x204");
+    req.nStartIndex = 0;
+    req.nCount = 2;
+
+    CBodyRange resp;
+    // A 1-byte ceiling is smaller than any real transaction -- if the loop
+    // refused to ever exceed the ceiling, it would return zero bodies for a
+    // request that HAS at least one, making no forward progress at all. The
+    // contract is: the first body is always included regardless of its own
+    // size (see the static_assert in net_processing.cpp for why this can
+    // never overflow MAX_PROTOCOL_MESSAGE_LENGTH in the real deployment).
+    BuildBodyRangeResponse(req, pos, /*nByteCeiling=*/1, resp);
+    BOOST_REQUIRE_EQUAL(resp.vBodies.size(), 1U);
+    BOOST_CHECK(resp.vBodies[0]->GetHash() == bodies[0]->GetHash());
+}
+
+BOOST_AUTO_TEST_CASE(build_response_stops_at_the_ceiling_once_it_already_has_one_body) {
+    ResetBodyIndex();
+    TestOnlyResetBodyFileState();
+    CTransactionRef tx1 = MakeBodyTx(1);
+    std::vector<CTransactionRef> bodies = {tx1, MakeBodyTx(2), MakeBodyTx(3)};
+    FlatFilePos pos;
+    BOOST_REQUIRE(FindBodyPos(pos, (unsigned int) GetBodyRecordSerializedSize(bodies)));
+    BOOST_REQUIRE(WriteBodyRecord(pos, bodies));
+
+    CGetBodyRange req;
+    req.hashBlock = uint256S("0x205");
+    req.nStartIndex = 0;
+    req.nCount = 3;
+
+    // A ceiling that fits exactly the first body and nothing more -- proves
+    // the SECOND body is excluded once the running total would exceed the
+    // ceiling, not just that the FIRST is force-included.
+    uint64_t nOneBodyCeiling = GetSerializeSize(*tx1, SER_NETWORK, PROTOCOL_VERSION);
+    CBodyRange resp;
+    BuildBodyRangeResponse(req, pos, nOneBodyCeiling, resp);
+    BOOST_REQUIRE_EQUAL(resp.vBodies.size(), 1U);
+    BOOST_CHECK(resp.vBodies[0]->GetHash() == tx1->GetHash());
+}
+
+// A mutant that turns the ReadBodyAt-failure stop from `break` into
+// `continue` is invisible to every test above: once reads start failing
+// (past the record's real end) every LATER index also fails, so the final
+// vBodies content comes out identical either way -- the only difference is
+// how many doomed ReadBodyAt calls get made. That difference is a real
+// DoS surface, not a cosmetic one: a peer can set nCount up to
+// UINT32_MAX - nStartIndex (ValidateGetBodyRange's own overflow check is
+// the only bound) against a record with far fewer real bodies. This test
+// makes that difference observable: a correct implementation does O(actual
+// bodies), not O(nCount), so it returns almost instantly even at the
+// largest legal nCount; a `continue`-based implementation would attempt
+// billions of doomed file opens.
+BOOST_AUTO_TEST_CASE(build_response_does_not_hammer_reads_past_the_records_real_end) {
+    ResetBodyIndex();
+    TestOnlyResetBodyFileState();
+    std::vector<CTransactionRef> bodies = {MakeBodyTx(1)};
+    FlatFilePos pos;
+    BOOST_REQUIRE(FindBodyPos(pos, (unsigned int) GetBodyRecordSerializedSize(bodies)));
+    BOOST_REQUIRE(WriteBodyRecord(pos, bodies));
+
+    CGetBodyRange req;
+    req.hashBlock = uint256S("0x206");
+    req.nStartIndex = 0;
+    req.nCount = std::numeric_limits<uint32_t>::max();
+
+    CBodyRange resp;
+    auto start = std::chrono::steady_clock::now();
+    BuildBodyRangeResponse(req, pos, std::numeric_limits<uint64_t>::max(), resp);
+    auto elapsed = std::chrono::steady_clock::now() - start;
+
+    BOOST_REQUIRE_EQUAL(resp.vBodies.size(), 1U);
+    BOOST_CHECK(resp.vBodies[0]->GetHash() == bodies[0]->GetHash());
+    // A generous bound: normally microseconds; billions of doomed opens
+    // would take far, far longer than this on any real machine.
+    BOOST_CHECK(elapsed < std::chrono::seconds(5));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

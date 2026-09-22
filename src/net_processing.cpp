@@ -9,6 +9,7 @@
 #include <banman.h>
 #include <arith_uint256.h>
 #include <blockencodings.h>
+#include <bodyrange.h>
 #include <chainparams.h>
 #include <consensus/validation.h>
 #include <hash.h>
@@ -93,6 +94,31 @@ static_assert(INBOUND_PEER_TX_DELAY
 "To preserve security, MAX_GETDATA_RANDOM_DELAY should not exceed INBOUND_PEER_DELAY");
 /** Limit to avoid sending big packets. Not used in processing incoming GETDATA for compatibility */
 static const unsigned int MAX_GETDATA_SZ = 1000;
+
+/** 2.2.3 (F-143's accepted fetch-protocol spec): the byte ceiling a
+ *  GETBODYRANGE response chunks to, per docs/bodyrange.h's own
+ *  BuildBodyRangeResponse. This is chunking, not the (still-deferred,
+ *  F-143's own recorded scope boundary) real per-connection budget --
+ *  folding this into `-maxuploadtarget` and adding a runtime-configurable
+ *  version are both explicitly left to a later increment. A fixed, generous
+ *  default is enough to keep a single response well-behaved regardless. */
+static const uint64_t DEFAULT_MAX_BODYRANGE_BYTES = 1024 * 1024;
+// The two static_asserts below are what make BuildBodyRangeResponse's own
+// "the first body is always included, regardless of its own size" rule
+// (bodyrange.h) safe: EITHER the response stopped at the byte ceiling
+// (bounded by DEFAULT_MAX_BODYRANGE_BYTES), OR it forced through exactly one
+// oversized body -- and the largest a real body can ever be is bounded by
+// consensus, not merely policy, once DIP0001 is active
+// (validation.cpp:MAX_STANDARD_TX_SIZE, ContextualCheckTransaction rejects
+// anything bigger with bad-txns-oversize). 4096 is a generous margin for
+// CBodyRange's own small fixed overhead (hashBlock, nStartIndex, the
+// vBodies CompactSize prefix) plus the P2P message header, which sits
+// outside MAX_PROTOCOL_MESSAGE_LENGTH's own definition (net.h) entirely.
+static_assert(DEFAULT_MAX_BODYRANGE_BYTES + 4096 < MAX_PROTOCOL_MESSAGE_LENGTH,
+              "a GETBODYRANGE response chunked to the byte ceiling must always fit in one P2P message");
+static_assert(MAX_STANDARD_TX_SIZE + 4096 < MAX_PROTOCOL_MESSAGE_LENGTH,
+              "a single forced-through oversized body (BuildBodyRangeResponse's own first-body exception) "
+              "must always fit in one P2P message too");
 
 /** Expiration time for orphan transactions in seconds */
 static constexpr int64_t
@@ -2057,6 +2083,32 @@ SendBlockTransactions(const CBlock &block, const BlockTransactionsRequest &req, 
     connman->PushMessage(pfrom, msgMaker.Make(NetMsgType::BLOCKTXN, resp));
 }
 
+// 2.2.3 (F-143's accepted spec): the counterpart to SendBlockTransactions
+// above, deliberately NOT following its own locking pattern -- `validation`
+// and `pos` are already resolved by ValidateGetBodyRange before this is
+// called, so nothing here needs cs_main. Unlike SendBlockTransactions (which
+// wraps its own PushMessage in cs_main, matching this file's own general
+// convention, though CNetMsgMaker/PushMessage themselves need no lock --
+// confirmed no EXCLUSIVE_LOCKS_REQUIRED annotation on either in net.h), this
+// function takes no lock at all: the whole point of 2.2.3 is a serving path
+// that never touches cs_main, not even incidentally.
+inline void static
+SendBodyRange(const CGetBodyRange &req, GetBodyRangeValidation validation, const FlatFilePos &pos,
+               CNode *pfrom, CConnman *connman) {
+    CBodyRange resp;
+    if (validation == GetBodyRangeValidation::OK) {
+        BuildBodyRangeResponse(req, pos, DEFAULT_MAX_BODYRANGE_BYTES, resp);
+    } else {
+        // MISS: an honest "I don't have that" -- echo the request with an
+        // empty vBodies, per bodyrange.h's own no-fFound-field design (a
+        // miss IS vBodies.empty(), there is no separate wire state for it).
+        resp.hashBlock = req.hashBlock;
+        resp.nStartIndex = req.nStartIndex;
+    }
+    CNetMsgMaker msgMaker(pfrom->GetSendVersion());
+    connman->PushMessage(pfrom, msgMaker.Make(NetMsgType::BODYRANGE, resp));
+}
+
 bool static ProcessHeadersMessage(CNode *pfrom, CConnman *connman, ChainstateManager &chainman, CTxMemPool &mempool,
                                   const std::vector <CBlockHeader> &headers, const CChainParams &chainparams,
                                   bool punish_duplicate_invalid) {
@@ -3153,6 +3205,36 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
         assert(ret);
 
         SendBlockTransactions(block, req, pfrom, connman);
+        return true;
+    }
+
+    if (strCommand == NetMsgType::GETBODYRANGE) {
+        // 2.2.3 (F-143's accepted spec, docs/build-plan.md's 2.2 row): off
+        // cs_main entirely, except the brief, purely in-memory Misbehaving()
+        // call on the BAN path below (Misbehaving itself is
+        // EXCLUSIVE_LOCKS_REQUIRED(cs_main), since it reads/writes per-peer
+        // CNodeState -- that is a fast, no-I/O critical section, not the
+        // class of problem B4 names; the thing that must never happen is
+        // disk I/O held under cs_main, which is exactly what
+        // ProcessGetBlockData does today (`docs/transaction-decoupling.md`
+        // §F) and what this handler does not do). ValidateGetBodyRange and
+        // BuildBodyRangeResponse both resolve entirely through 2.2.1's own
+        // body-store index/files (bodystore.h's `cs_bodyIndex`), never chain
+        // state.
+        CGetBodyRange req;
+        vRecv >> req;
+
+        FlatFilePos pos;
+        GetBodyRangeValidation validation = ValidateGetBodyRange(req, pos);
+
+        if (validation == GetBodyRangeValidation::BAN) {
+            LOCK(cs_main);
+            Misbehaving(pfrom->GetId(), 100,
+                        strprintf("Peer %d sent us an invalid getbodyrange request", pfrom->GetId()));
+            return true;
+        }
+
+        SendBodyRange(req, validation, pos, pfrom, connman);
         return true;
     }
 
