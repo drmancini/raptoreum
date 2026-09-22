@@ -45,6 +45,7 @@ BITCOIN_TESTS =\
   test/bip39_tests.cpp \
   test/blockbudget_tests.cpp \
   test/bodystore_tests.cpp \
+  test/bodyrange_tests.cpp \
   test/blockchain_tests.cpp \
   test/blockencodings_tests.cpp \
   test/blockfilter_tests.cpp \

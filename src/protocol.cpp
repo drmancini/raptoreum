@@ -81,6 +81,8 @@ namespace NetMsgType {
     const char *ISLOCK = "islock";
     const char *ISDLOCK = "isdlock";
     const char *MNAUTH = "mnauth";
+    const char *GETBODYRANGE = "getbodyrange";
+    const char *BODYRANGE = "bodyrange";
 }; // namespace NetMsgType
 
 /** All known message types. Keep this in the same order as the list of
@@ -152,6 +154,8 @@ const static std::string allNetMessageTypes[] = {
         NetMsgType::ISLOCK,
         NetMsgType::ISDLOCK,
         NetMsgType::MNAUTH,
+        NetMsgType::GETBODYRANGE,
+        NetMsgType::BODYRANGE,
 };
 const static std::vector <std::string> allNetMessageTypesVec(allNetMessageTypes,
                                                              allNetMessageTypes + ARRAYLEN(allNetMessageTypes));

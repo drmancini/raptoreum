@@ -285,6 +285,22 @@ namespace NetMsgType {
     extern const char *ISLOCK;
     extern const char *ISDLOCK;
     extern const char *MNAUTH;
+
+/**
+ * 2.2.2 (F-143's accepted wire-format spec, bodyrange.h): request for a
+ * range of transaction bodies at a given block hash. Contains a
+ * CGetBodyRange. No dispatch handler exists yet (2.2.3, not built) --
+ * declared here only so the type name and its serialization are fixed.
+ */
+    extern const char *GETBODYRANGE;
+
+/**
+ * 2.2.2 (F-143's accepted wire-format spec, bodyrange.h): response to
+ * GETBODYRANGE. Contains a CBodyRange -- an empty `vBodies` is a miss, never
+ * a separate wire state (F-143's own `fFound`-removal decision). No
+ * dispatch handler exists yet (2.2.3, not built).
+ */
+    extern const char *BODYRANGE;
 };
 
 /* Get a vector of all valid message types (see above) */
