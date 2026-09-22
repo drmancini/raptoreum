@@ -4002,10 +4002,18 @@ void CChainState::ReceivedBlockBodies(CBlockIndex *pindexNew) {
     // -- re-record the SAME position with fServeable now true. Must run
     // before the parent-not-downloaded early return below: this block's OWN
     // serveability doesn't depend on its parent's connectivity, only on
-    // whether ITS bytes are held. BLOCK_HAVE_BODY_RECORD is already set
-    // (this function only ever runs for a block ReceivedBlockTransactions
-    // already accepted), so GetBodyPos() is always valid here.
-    RecordBodyPositionByHash(pindexNew->GetBlockHash(), pindexNew->GetBodyPos(), true);
+    // whether ITS bytes are held. BLOCK_HAVE_BODY_RECORD is set
+    // unconditionally by ReceivedBlockTransactions for any block THIS binary
+    // accepts, so GetBodyPos() is normally valid here -- but F-145 (Fable
+    // review of F-144, LOW): chain.h's own migration note is explicit that
+    // no pre-2.1.4 entry ever had a real record, so a pre-2.1.4-style
+    // withheld block reaching this function still has a null position.
+    // Guarded exactly like ConnectTip's own precedent (F-141): a null
+    // position means no entry, not a poisoned one with nFile == -1.
+    FlatFilePos bodyPos = pindexNew->GetBodyPos();
+    if (!bodyPos.IsNull()) {
+        RecordBodyPositionByHash(pindexNew->GetBlockHash(), bodyPos, true);
+    }
 
     // Chain selection dropped this block and parked its descendants in
     // m_blocks_unlinked when the bodies were missing. Put back everything the
@@ -5164,6 +5172,22 @@ void ChainstateManager::PruneOneBlockFile(const int fileNumber) {
             pindex->nUndoPos = 0;
             setDirtyBlockIndex.insert(pindex);
 
+            // F-145 (Fable review of F-144, HIGH): the body-store index's own
+            // serveability flag must clear alongside BLOCK_HAVE_BODIES, not
+            // just here in CBlockIndex -- F-144 wired the three WRITE sites
+            // but missed this, the one CLEAR site, leaving the index
+            // answering "serveable" for a block HaveBodies() now says is
+            // gone until a restart happened to rebuild it correctly.
+            // BLOCK_HAVE_BODY_RECORD/nBodyFile/nBodyPos are untouched by
+            // pruning (no body-file pruning exists yet, F-141/F-142's own
+            // confirmed grep) -- guarded on IsNull() regardless, matching
+            // ConnectTip's own precedent, since a pre-2.1.4-style entry
+            // could reach here with no record at all.
+            FlatFilePos bodyPos = pindex->GetBodyPos();
+            if (!bodyPos.IsNull()) {
+                RecordBodyPositionByHash(pindex->GetBlockHash(), bodyPos, false);
+            }
+
             // Prune from m_blocks_unlinked -- any block we prune would have
             // to be downloaded again in order to consider its chain, at which
             // point it would be considered as a candidate for
@@ -5555,12 +5579,19 @@ EXCLUSIVE_LOCKS_REQUIRED(cs_main)
                     if (!entryBodyPos.IsNull()) {
                         // F-143 (2.2.2 spec): populate the serveability flag
                         // from the SAME entry's BLOCK_HAVE_BODIES bit -- this
-                        // rebuild loop is the authoritative site for it on
-                        // every boot, including the pre-1.3 bodiesmigrated
-                        // migration a few lines above (which sets the bit but
-                        // must not ALSO write the index directly, since this
-                        // unconditional loop runs right after and would just
-                        // overwrite it).
+                        // rebuild loop is the ONLY site that writes it into
+                        // the index; the migration a few lines above must
+                        // never write the index directly (this unconditional
+                        // loop runs right after and would just overwrite
+                        // it). F-145 (Fable review of F-144, LOW): in
+                        // practice this governs 2.1.4+ withheld entries with
+                        // an unset bodiesmigrated flag only -- a genuinely
+                        // migrated pre-1.3 entry has no body record at all
+                        // (pre-2.1.4), so `entryBodyPos.IsNull()` is true and
+                        // the `if` below skips it entirely; its migrated bit
+                        // never reaches this index by any route (a
+                        // consequence already recorded as F-142's own LOW,
+                        // "unindexed by hash under -reindex-chainstate").
                         RecordBodyPositionByHash(pindexEntry->GetBlockHash(), entryBodyPos,
                                                   (pindexEntry->nStatus & BLOCK_HAVE_BODIES) != 0);
                     }

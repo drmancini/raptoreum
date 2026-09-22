@@ -359,6 +359,14 @@ bool LookupBodyPositionByHash(const uint256 &hash, FlatFilePos &posOut, bool *fS
     return true;
 }
 
+bool LookupServeableBodyPositionByHash(const uint256 &hash, FlatFilePos &posOut) {
+    bool fServeable = false;
+    if (!LookupBodyPositionByHash(hash, posOut, &fServeable) || !fServeable) {
+        return false;
+    }
+    return true;
+}
+
 void RecordBodyPositionAtHeight(int nHeight, const uint256 &hash, const FlatFilePos &pos) {
     LOCK(cs_bodyIndex);
     mapBodyPosByHeight[nHeight] = BodyHeightEntry{hash, pos};

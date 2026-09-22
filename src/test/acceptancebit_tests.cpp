@@ -1079,9 +1079,30 @@ BOOST_AUTO_TEST_CASE(body_record_bit_is_unconditional_even_when_bodies_are_withh
 // withhold-then-arrival cycle, not just in a hand-fed unit test -- this is
 // exactly the real call sequence ReceivedBlockTransactions (withheld=false)
 // then ReceivedBlockBodies (arrival) drives.
+// F-145 (Fable review of F-144, MEDIUM): the original version of this test
+// never asserted anything about a NORMAL, never-withheld block -- a mutant
+// that made ReceivedBlockTransactions always record fServeable=false (the
+// production consequence: a future 2.2.3 handler refuses every block until
+// the node restarts) survived the whole suite, since the withheld/arrival
+// pair alone never observes that call site's own real value. Fixed with a
+// control block, a position-stability check across arrival, and a direct
+// cross-check against HaveBodies() at both checkpoints, so the index's own
+// claim is verified against the CBlockIndex fact it's supposed to mirror,
+// not just against itself.
 BOOST_AUTO_TEST_CASE(body_index_serveability_flag_tracks_a_real_withhold_then_arrival_cycle) {
     ChainstateManager &chainman = EnsureChainman(m_node);
     const CChainParams &chainparams = Params();
+
+    // Control: a normal block, never withheld, must be serveable immediately
+    // after accept -- no mutant that quietly ignores `bodies_held` here can
+    // hide behind the withheld/arrival pair below.
+    CBlock controlBlock = CreateAndProcessBlock({}, coinbaseKey);
+    uint256 controlHash = controlBlock.GetHash();
+    FlatFilePos controlPosOut;
+    bool fControlServeableOut = false;
+    BOOST_REQUIRE(LookupBodyPositionByHash(controlHash, controlPosOut, &fControlServeableOut));
+    BOOST_CHECK(fControlServeableOut);
+    BOOST_CHECK_EQUAL(fControlServeableOut, HaveBodies(LookupBlockIndex(controlHash)));
 
     CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
     CBlock block = CreateBlock({spendTx}, coinbaseKey);
@@ -1090,6 +1111,7 @@ BOOST_AUTO_TEST_CASE(body_index_serveability_flag_tracks_a_real_withhold_then_ar
 
     FlatFilePos posOut;
     bool fServeableOut = true;
+    FlatFilePos posBeforeArrival;
 
     {
         PerfWithholdGuard guard(hash);
@@ -1097,12 +1119,20 @@ BOOST_AUTO_TEST_CASE(body_index_serveability_flag_tracks_a_real_withhold_then_ar
 
         BOOST_REQUIRE(LookupBodyPositionByHash(hash, posOut, &fServeableOut));
         BOOST_CHECK(!fServeableOut);
+        BOOST_CHECK_EQUAL(fServeableOut, HaveBodies(LookupBlockIndex(hash)));
+        posBeforeArrival = posOut;
     }
 
     BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblock, /*fForceProcessing=*/false, nullptr));
 
     BOOST_REQUIRE(LookupBodyPositionByHash(hash, posOut, &fServeableOut));
     BOOST_CHECK(fServeableOut);
+    BOOST_CHECK_EQUAL(fServeableOut, HaveBodies(LookupBlockIndex(hash)));
+    // The position must not move when bodies merely arrive for an
+    // already-accepted block -- SaveBodyToDisk only ever runs once, at the
+    // original accept.
+    BOOST_CHECK_EQUAL(posOut.nFile, posBeforeArrival.nFile);
+    BOOST_CHECK_EQUAL(posOut.nPos, posBeforeArrival.nPos);
 }
 
 // F-133's second recorded constraint, proven rather than merely argued: the
@@ -1464,6 +1494,92 @@ BOOST_AUTO_TEST_CASE(body_index_serveability_is_rebuilt_correctly_by_loadblockin
     fServeableOut = true;
     BOOST_REQUIRE(LookupBodyPositionByHash(withheldHash, posOut, &fServeableOut));
     BOOST_CHECK(!fServeableOut);
+}
+
+// F-145 (Fable review of F-144, HIGH): F-144 wired the serveability flag at
+// all three BLOCK_HAVE_BODIES WRITE sites but missed the one CLEAR site --
+// PruneOneBlockFile -- leaving the index answering "serveable" for a block
+// HaveBodies() now says is gone, until a restart happens to rebuild it
+// correctly. Drives the REAL PruneOneBlockFile directly (not a hand-cleared
+// bit simulation, matching what CheckBlockIndex/fHavePruned bookkeeping
+// genuinely needs) so this is a genuine regression test, not merely a
+// characterisation of intent.
+BOOST_AUTO_TEST_CASE(body_index_serveability_flag_is_cleared_by_a_real_prune) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    const CChainParams &chainparams = Params();
+
+    CBlock block = CreateAndProcessBlock({}, coinbaseKey);
+    uint256 hash = block.GetHash();
+    CBlockIndex *pindex = LookupBlockIndex(hash);
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(HaveBodies(pindex));
+
+    FlatFilePos posOut;
+    bool fServeableOut = false;
+    BOOST_REQUIRE(LookupBodyPositionByHash(hash, posOut, &fServeableOut));
+    BOOST_CHECK(fServeableOut);
+
+    struct FHavePrunedGuard {
+        bool saved = fHavePruned;
+        ~FHavePrunedGuard() { fHavePruned = saved; }
+    } fHavePrunedGuard;
+    fHavePruned = true;
+    {
+        LOCK(cs_main);
+        chainman.PruneOneBlockFile(pindex->nFile);
+    }
+    BOOST_REQUIRE(!HaveBodies(pindex));
+
+    // The index must now agree with HaveBodies() -- still found (the bytes
+    // are still really there, no body-file pruning exists yet), but no
+    // longer serveable, with no restart required.
+    fServeableOut = true;
+    BOOST_REQUIRE(LookupBodyPositionByHash(hash, posOut, &fServeableOut));
+    BOOST_CHECK(!fServeableOut);
+}
+
+// F-145 (Fable review of F-144, LOW): ReceivedBlockBodies's own comment
+// claims GetBodyPos() "is always valid here" because BLOCK_HAVE_BODY_RECORD
+// is set unconditionally by ReceivedBlockTransactions -- true for any block
+// THIS binary accepted, but chain.h's own migration note is explicit that no
+// pre-2.1.4 entry has ever had a real body-store record. A pre-2.1.4-style
+// withheld block that reaches this function (matching F-141's own
+// "connecttip_never_records_a_null_body_position_for_a_pre_2_1_4_style_entry"
+// clobber technique) must not poison the index with nFile=-1.
+BOOST_AUTO_TEST_CASE(receivedblockbodies_never_records_a_null_body_position_for_a_pre_2_1_4_style_entry) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    const CChainParams &chainparams = Params();
+
+    CBlock block = CreateBlock({}, coinbaseKey);
+    std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
+    uint256 hash = block.GetHash();
+
+    {
+        PerfWithholdGuard guard(hash);
+        BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblock, /*fForceProcessing=*/true, nullptr));
+    }
+    CBlockIndex *pindex = LookupBlockIndex(hash);
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(pindex->nStatus & BLOCK_HAVE_BODY_RECORD);
+    BOOST_REQUIRE(!(pindex->nStatus & BLOCK_HAVE_BODIES));
+
+    // Simulate a genuinely pre-2.1.4 entry: the record bit unset, matching
+    // F-141's own technique. Also reset the index -- the first (withheld)
+    // accept above already wrote a REAL, valid entry for this hash via
+    // ReceivedBlockTransactions; clearing it here isolates what
+    // ReceivedBlockBodies itself does with a null GetBodyPos(), rather than
+    // observing whatever the earlier, unrelated write left behind.
+    pindex->nStatus &= ~BLOCK_HAVE_BODY_RECORD;
+    BOOST_REQUIRE(pindex->GetBodyPos().IsNull());
+    ResetBodyIndex();
+
+    // Re-offer the body -- ReceivedBlockBodies runs.
+    BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblock, /*fForceProcessing=*/false, nullptr));
+
+    // Must be a clean miss, never a poisoned "found, serveable" entry with
+    // nFile == -1.
+    FlatFilePos posOut;
+    BOOST_CHECK(!LookupBodyPositionByHash(hash, posOut));
 }
 
 // F-141 (Fable review of F-140, HIGH-adjacent/LOW): the free

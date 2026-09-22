@@ -284,6 +284,16 @@ void RecordBodyPositionByHash(const uint256 &hash, const FlatFilePos &pos, bool 
  *  handler). */
 bool LookupBodyPositionByHash(const uint256 &hash, FlatFilePos &posOut, bool *fServeableOut = nullptr);
 
+/** F-145 (Fable review of F-144, MEDIUM): the SAFE way to resolve a position
+ *  for SERVING -- false unless the hash is both present AND currently
+ *  serveable, so a future 2.2.3 handler cannot forget to check the flag the
+ *  way it could with `LookupBodyPositionByHash`'s own optional out-pointer
+ *  (whose whole point was letting UNRELATED, position-only callers ignore
+ *  serveability; a serving handler is not one of those callers). Named
+ *  explicitly so 2.2.3's implementation plan can point at it rather than
+ *  re-deriving "must check both facts" from scratch. */
+bool LookupServeableBodyPositionByHash(const uint256 &hash, FlatFilePos &posOut);
+
 /** Record the ACTIVE CHAIN's body position and hash at a height -- call at
  *  `ConnectTip`, after the connect itself succeeds. Overwrites any existing
  *  entry at that height (a reorg's own `ConnectTip` for the winning branch is
