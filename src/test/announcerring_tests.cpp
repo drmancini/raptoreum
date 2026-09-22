@@ -9,6 +9,7 @@
 
 #include <announcerring.h>
 #include <test/test_raptoreum.h>
+#include <tinyformat.h>
 #include <uint256.h>
 
 #include <boost/test/unit_test.hpp>
@@ -103,6 +104,67 @@ BOOST_AUTO_TEST_CASE(record_overwrites_the_height_of_a_hash_recorded_twice) {
     BOOST_CHECK_EQUAL(ring.size(), 1U);
     // Still fresh at the newer height/tip pairing.
     BOOST_CHECK(ring.WasAnnounced(hash, 60, 10));
+}
+
+// F-153 (a Fable review of F-152, HIGH): "future heights are never evicted"
+// (record_keeps_a_future_height_regardless_of_how_far_ahead, above) is
+// correct for a SINGLE far-ahead entry, but was never tested for a peer
+// that keeps sending MANY, ever-increasing future heights while
+// currentTipHeight stays put -- exactly headers-first sync, where headers
+// are accepted (and so recorded) far ahead of the active chain tip for as
+// long as the sync takes. Confirmed real: measured 27s/196s/692s for
+// n=50,000/100,000/200,000 such Record calls against real mainnet height
+// (905,760+) before this fix -- a quadratic blowup under cs_main that would
+// make IBD take hours. The fix tracks the highest height ever recorded and
+// bounds the cutoff against THAT, not only currentTipHeight, so the ring
+// stays a bounded window around wherever the peer's own header stream has
+// actually reached, regardless of how far behind the connected-chain tip
+// lags. A size assertion is the regression guard here, not a timing one --
+// unlike F-150/F-151's cases, this fix changes size()'s own return value
+// directly, so a bound on it is a strictly stronger, non-flaky guard than
+// timing ever could be.
+BOOST_AUTO_TEST_CASE(record_stays_bounded_under_many_increasing_future_heights) {
+    CAnnouncerRing ring;
+    // currentTipHeight pinned low throughout, matching a peer racing ahead
+    // during sync while the connected chain hasn't caught up at all.
+    for (int height = 1; height <= 10000; height++) {
+        ring.Record(height, uint256S(strprintf("0x%x", height)), /*currentTipHeight=*/0, /*depth=*/290);
+    }
+    // Bounded to roughly one depth-sized window around the peer's own
+    // highest-seen height (10000), not the full 10,000 ever recorded.
+    BOOST_CHECK_LT(ring.size(), 300U);
+    // The most recent one must still be there.
+    BOOST_CHECK(ring.WasAnnounced(uint256S(strprintf("0x%x", 10000)), /*currentTipHeight=*/0, /*depth=*/290));
+}
+
+// F-153 (Fable review of F-152, MEDIUM): the two tests above pin
+// WasAnnounced's own boundary but never independently pinned Record's own
+// eviction/insertion-guard boundary -- both an eviction off-by-one
+// (`&lt;` vs `&lt;=` on the cutoff comparison) and a cutoff-arithmetic
+// off-by-one (`tip - depth` vs `tip - depth - 1`) survived the original 8
+// tests untouched.
+BOOST_AUTO_TEST_CASE(record_keeps_an_entry_exactly_at_the_eviction_boundary) {
+    CAnnouncerRing ring;
+    uint256 boundaryHash = uint256S("0x1");
+    // height 90 is exactly currentTipHeight(100) - depth(10) -- the closed
+    // window's own lower edge, must be kept, not evicted.
+    ring.Record(/*height=*/90, boundaryHash, /*currentTipHeight=*/100, /*depth=*/10);
+    BOOST_CHECK_EQUAL(ring.size(), 1U);
+
+    uint256 otherHash = uint256S("0x2");
+    ring.Record(/*height=*/100, otherHash, /*currentTipHeight=*/100, /*depth=*/10);
+    // A second Record call (which re-runs eviction) must not have evicted
+    // the boundary entry either.
+    BOOST_CHECK_EQUAL(ring.size(), 2U);
+}
+
+BOOST_AUTO_TEST_CASE(record_rejects_an_entry_exactly_one_below_the_eviction_boundary) {
+    CAnnouncerRing ring;
+    uint256 hash = uint256S("0x1");
+    // height 89 is exactly one below currentTipHeight(100) - depth(10) --
+    // already stale at the moment of recording, must not be inserted.
+    ring.Record(/*height=*/89, hash, /*currentTipHeight=*/100, /*depth=*/10);
+    BOOST_CHECK_EQUAL(ring.size(), 0U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

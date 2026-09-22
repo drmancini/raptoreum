@@ -2196,14 +2196,32 @@ SendBodyRange(const CGetBodyRange &req, GetBodyRangeValidation validation, const
                 return;
             }
             uint256 lastHash = pindexLast->GetBlockHash();
+            bool fFoundLast = false;
             for (const CBlockHeader &header: headers) {
-                const CBlockIndex *pindex = LookupBlockIndex(header.GetHash());
+                uint256 headerHash = header.GetHash();
+                const CBlockIndex *pindex = LookupBlockIndex(headerHash);
                 if (pindex) {
                     RecordAnnouncer(nodeid, pindex);
                 }
-                if (header.GetHash() == lastHash) {
+                if (headerHash == lastHash) {
+                    fFoundLast = true;
                     break;
                 }
+            }
+            // pindexLast always comes from AcceptBlockHeader's own out-param,
+            // assigned only from inside a loop over this exact `headers`
+            // vector (ChainstateManager::ProcessNewBlockHeaders,
+            // validation.cpp) -- so it should be structurally impossible for
+            // this loop to walk the whole batch without matching it. If that
+            // invariant is ever wrong, walking past it and recording later
+            // headers that happen to already be indexed (possibly a
+            // duplicate-invalid one) is the wrong behaviour -- log loudly
+            // rather than either crashing (network-input-triggered crashes
+            // are their own DoS class, F-31/F-40's own precedent) or
+            // silently mis-recording.
+            if (!fFoundLast) {
+                LogPrint(BCLog::NET, "RecordAnnouncedHeaderRange: pindexLast %s not found in its own headers batch, peer=%d\n",
+                         lastHash.ToString(), nodeid);
             }
     }
 
@@ -3647,6 +3665,15 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
                 if (!::ChainstateActive().IsInitialBlockDownload())
                     connman->PushMessage(pfrom, msgMaker.Make(NetMsgType::GETHEADERS,
                                                               ::ChainActive().GetLocator(pindexBestHeader), uint256()));
+                // F-153 (a Fable review of F-152, MEDIUM): this peer just
+                // announced cmpctblock.header -- mirror the HEADERS
+                // unconnecting path (below) rather than silently dropping
+                // the announcement on the floor. Not yet resolvable (the
+                // parent is unknown), so this lands in
+                // UpdateBlockAvailability's own hashLastUnknownBlock branch,
+                // exactly like the HEADERS case, and resolves later via
+                // ProcessBlockAvailability once the missing link arrives.
+                UpdateBlockAvailability(pfrom->GetId(), cmpctblock.header.GetHash());
                 return true;
             }
 
