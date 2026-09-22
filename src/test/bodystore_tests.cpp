@@ -26,25 +26,23 @@
 // of validation.h for one pointer (matches bodystore.cpp's own approach).
 extern std::unique_ptr<CBlockTreeDB> pblocktree;
 
-// BasicTestingSetup alone never points -datadir at its own temp root or
-// clears GetBlocksDir()'s path cache (only TestingSetup does, alongside a lot
-// of chain-init machinery this suite doesn't need) -- fine for tests that
-// never touch a real file, which is every other BasicTestingSetup-based test
-// in this tree, but these do. Without this, GetBlocksDir() can return a path
-// left behind by whichever earlier test last set one, which by the time this
-// suite runs has already been deleted by that test's own teardown -- or,
-// worse, GetBlocksDir() falls back to the real default datadir and this suite
-// writes into it (F-127 -- confirmed: an earlier run of
-// this exact file, before this fixture existed, wrote real bdy*.dat files
-// into a live node's own blocks/ directory).
+// F-127 found this suite's real file I/O (FindBodyPos/WriteBodyRecord, etc.)
+// writing into a live node's own blocks/ directory, because at the time
+// BasicTestingSetup alone never pointed -datadir at its own temp root or
+// cleared GetBlocksDir()'s path cache -- only TestingSetup did, and this
+// fixture's own SetDataDir/ClearDatadirCache calls were the original fix.
+// F-147 later found the identical bug recur in a second file
+// (bodyrange_tests.cpp) and fixed it at the root instead, in
+// BasicTestingSetup itself (test_raptoreum.cpp), so it can no longer recur
+// in a third -- which makes this fixture's own copies of those two calls
+// redundant; removed, since a plain BasicTestingSetup subclass now behaves
+// identically.
 //
 // 2.1.2 also needs a real pblocktree -- an in-memory CBlockTreeDB, the same
 // one TestingSetup constructs for its own much heavier chain-init, taken here
 // on its own rather than pulling in all of TestingSetup.
 struct BodyStoreTestingSetup : public BasicTestingSetup {
     BodyStoreTestingSetup() {
-        SetDataDir("tempdir");
-        ClearDatadirCache();
         pblocktree.reset(new CBlockTreeDB(1 << 20, /*fMemory=*/true));
     }
 
@@ -842,13 +840,33 @@ BOOST_AUTO_TEST_CASE(lookup_serveable_body_position_by_hash_misses_when_recorded
 // out of a call this function said was a miss. `LookupBodyPositionByHash`
 // writes `posOut` the instant the entry is FOUND, before the wrapper's own
 // serveability check runs, so this is a real, not merely theoretical, risk.
-BOOST_AUTO_TEST_CASE(lookup_serveable_body_position_by_hash_leaves_posout_untouched_on_a_withheld_miss) {
+//
+// A second Fable review of THIS fix (also F-147) found the original version
+// of this test only proved the property against a freshly-default-constructed
+// `posOut` -- which starts null anyway, so it could pass even if the
+// function merely left `posOut` alone rather than actively nulling it on
+// every failure path. That distinction matters: `ValidateGetBodyRange`
+// (bodyrange.cpp) is this function's only caller today and always passes a
+// fresh `FlatFilePos`, but a future caller (2.2.3's serving loop is the
+// obvious shape) that reuses one `FlatFilePos` across several requests would
+// see a PRIOR request's real position survive into a later miss. Both cases
+// below deliberately pre-load `posOut` with a real, non-null position before
+// calling, so the assertion only passes if the function actively nulls it.
+BOOST_AUTO_TEST_CASE(lookup_serveable_body_position_by_hash_nulls_posout_on_an_unknown_hash_even_if_it_started_dirty) {
+    ResetBodyIndex();
+
+    FlatFilePos posOut(3, 77);
+    BOOST_REQUIRE(!LookupServeableBodyPositionByHash(uint256S("0xe1"), posOut));
+    BOOST_CHECK(posOut.IsNull());
+}
+
+BOOST_AUTO_TEST_CASE(lookup_serveable_body_position_by_hash_nulls_posout_on_a_withheld_hash_even_if_it_started_dirty) {
     ResetBodyIndex();
 
     uint256 hash = uint256S("0xe4");
     RecordBodyPositionByHash(hash, FlatFilePos(7, 12345), false);
 
-    FlatFilePos posOut;
+    FlatFilePos posOut(3, 77);
     BOOST_REQUIRE(!LookupServeableBodyPositionByHash(hash, posOut));
     BOOST_CHECK(posOut.IsNull());
 }

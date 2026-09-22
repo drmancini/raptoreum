@@ -360,16 +360,24 @@ bool LookupBodyPositionByHash(const uint256 &hash, FlatFilePos &posOut, bool *fS
 }
 
 bool LookupServeableBodyPositionByHash(const uint256 &hash, FlatFilePos &posOut) {
-    // F-147 (Fable review of F-146, MEDIUM): resolve into a LOCAL position
-    // first -- LookupBodyPositionByHash writes its out-param the instant an
-    // entry is FOUND, before serveability is even checked, so writing
-    // straight into the caller's `posOut` would leak a withheld block's own
-    // real position out of a call this function reports as a miss. A
-    // caller that checks only the return value (the whole point of this
-    // function existing, per F-145) must never see that position.
+    // F-147 (Fable review of F-146, MEDIUM, then strengthened by a second
+    // Fable review of that same fix): resolve into a LOCAL position first --
+    // LookupBodyPositionByHash writes its out-param the instant an entry is
+    // FOUND, before serveability is even checked, so writing straight into
+    // the caller's `posOut` would leak a withheld block's own real position
+    // out of a call this function reports as a miss.
+    //
+    // Explicitly NULL the caller's `posOut` on every failure path, rather
+    // than merely leaving it unwritten -- the contract is "null unless this
+    // returns true", not "unchanged unless this returns true". The
+    // difference matters for any caller that reuses one `FlatFilePos` across
+    // several calls (the obvious shape for 2.2.3's serving loop): "leave it
+    // alone" would let a PRIOR successful call's real position survive into
+    // a later miss, which "always null on failure" cannot.
     FlatFilePos tmpPos;
     bool fServeable = false;
     if (!LookupBodyPositionByHash(hash, tmpPos, &fServeable) || !fServeable) {
+        posOut.SetNull();
         return false;
     }
     posOut = tmpPos;

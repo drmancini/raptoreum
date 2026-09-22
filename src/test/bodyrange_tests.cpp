@@ -20,27 +20,23 @@
 
 #include <boost/test/unit_test.hpp>
 
-// F-147 (Fable review of F-146, HIGH): BasicTestingSetup alone never points
-// -datadir at its own temp root or clears GetBlocksDir()'s path cache --
-// this suite's own validate_* tests call FindBodyPos/WriteBodyRecord, real
-// file I/O, so without this GetBlocksDir() falls back to the REAL default
-// datadir and writes real bdy*.dat files there. This is not hypothetical:
-// confirmed directly -- the original version of this file, using bare
-// BasicTestingSetup, wrote a real 16 MiB bdy00000.dat into
-// ~/.raptoreumcore/blocks/, the live datadir of an actually-running
-// raptoreumd process, and left stale data there across runs that then made
-// one of this file's own mutation-testing claims falsely pass (see F-147's
-// own docs/findings.md entry). Exactly F-127's own precedent
-// (bodystore_tests.cpp's BodyStoreTestingSetup) for exactly the same
-// mistake, in a second file.
-struct BodyRangeTestingSetup : public BasicTestingSetup {
-    BodyRangeTestingSetup() {
-        SetDataDir("tempdir");
-        ClearDatadirCache();
-    }
-};
-
-BOOST_FIXTURE_TEST_SUITE(bodyrange_tests, BodyRangeTestingSetup)
+// F-147 (Fable review of F-146, HIGH): this suite's own validate_* tests
+// call FindBodyPos/WriteBodyRecord, real file I/O -- at the time this was
+// found, BasicTestingSetup alone never pointed -datadir at its own temp
+// root or cleared GetBlocksDir()'s path cache, so those calls fell through
+// to the REAL default datadir. This was not hypothetical: confirmed
+// directly -- the original version of this file wrote a real 16 MiB
+// bdy00000.dat into ~/.raptoreumcore/blocks/, the live datadir of an
+// actually-running raptoreumd process, and left stale data there across
+// runs that then made one of this file's own mutation-testing claims
+// falsely pass (see F-147's own docs/findings.md entry). Exactly F-127's
+// own precedent (bodystore_tests.cpp's BodyStoreTestingSetup) for exactly
+// the same mistake, in a second file -- fixed here first with a one-off
+// fixture, then (a second Fable review of this same fix, still F-147)
+// fixed at the root in BasicTestingSetup itself (test_raptoreum.cpp) so a
+// third file can't reintroduce it. That makes the one-off fixture this
+// file used to define here redundant; plain BasicTestingSetup is enough.
+BOOST_FIXTURE_TEST_SUITE(bodyrange_tests, BasicTestingSetup)
 
 // F-127's own precedent (bodystore_tests.cpp): every transaction the same
 // length lets a wrong-index bug pass by accident, since any plausible wrong
@@ -100,15 +96,50 @@ BOOST_AUTO_TEST_CASE(cbodyrange_round_trips_preserving_order_and_content) {
 
     // F-147 (Fable review of F-146, LOW): the original version of this test
     // never checked hashBlock/nStartIndex here -- only the empty-vBodies
-    // test did, which would let a SERIALIZE_METHODS field-order swap
-    // between hashBlock and vBodies pass unnoticed on the case that
-    // actually carries data.
+    // test did.
     BOOST_CHECK(respOut.hashBlock == resp.hashBlock);
     BOOST_CHECK_EQUAL(respOut.nStartIndex, resp.nStartIndex);
     BOOST_REQUIRE_EQUAL(respOut.vBodies.size(), resp.vBodies.size());
     for (size_t i = 0; i < resp.vBodies.size(); i++) {
         BOOST_CHECK(respOut.vBodies[i]->GetHash() == resp.vBodies[i]->GetHash());
     }
+}
+
+// F-147 (a second Fable review of F-147's own fix, LOW): the comment the
+// previous version of this file carried on the test above -- that its new
+// hashBlock/nStartIndex assertions would catch "a SERIALIZE_METHODS
+// field-order swap between hashBlock and vBodies" -- is wrong.
+// SERIALIZE_METHODS generates ONE ordered list that both the writer and the
+// reader walk identically, so reordering it changes what byte range each
+// field's bytes land in on BOTH sides at once; a round-trip test can never
+// observe a pure reorder, since serializing then deserializing with the
+// reordered code still recovers each field's own value correctly. Verified
+// directly: swapping CBodyRange's field order to
+// `vBodies, nStartIndex, hashBlock` and rebuilding still passes every
+// round-trip test in this file. What a round-trip test genuinely catches is
+// a field being DROPPED or a TYPE changing in an incompatible way (fewer/
+// more bytes consumed) -- still worth having, just not for the reason
+// previously claimed.
+//
+// The only test shape that actually pins the wire format is a golden byte
+// string: this changing means the wire format changed, whether or not a
+// round-trip still happens to recover the same C++ values. `CGetBodyRange`
+// is used here since a fixed CTransactionRef test-fixture makes CBodyRange's
+// own transaction-compression encoding a second moving part not worth
+// coupling this test to; CBodyRange's message TYPE tag/dispatch is covered
+// separately (protocol.h/.cpp's own message-type tests), not its full wire
+// encoding.
+BOOST_AUTO_TEST_CASE(cgetbodyrange_wire_format_is_pinned) {
+    CGetBodyRange req;
+    req.hashBlock = uint256S("0x1122334455667788");
+    req.nStartIndex = 0x03020100;
+    req.nCount = 0x07060504;
+
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+    ss << req;
+
+    BOOST_CHECK_EQUAL(HexStr(ss),
+        "88776655443322110000000000000000000000000000000000000000000000000001020304050607");
 }
 
 BOOST_AUTO_TEST_CASE(vtx_index_from_body_index_is_plus_one) {
@@ -148,6 +179,26 @@ BOOST_AUTO_TEST_CASE(validate_bans_start_plus_count_overflow) {
 
     FlatFilePos posOut;
     BOOST_CHECK(ValidateGetBodyRange(req, posOut) == GetBodyRangeValidation::BAN);
+}
+
+// F-147 (a second Fable review of F-147's own fix, LOW): the test above only
+// ever tries a request that genuinely overflows -- nothing pinned the exact
+// boundary, so the off-by-one mutant `nStartIndex > max - nCount` -> `>=`
+// (which would BAN this legal, non-overflowing request too) survived every
+// test in this file. `nStartIndex + nCount == UINT32_MAX` doesn't overflow
+// uint32_t arithmetic and must not BAN; the hash is deliberately unknown, so
+// a correct implementation reaches MISS (not OK, which would need a real
+// serveable record) -- BAN is only possible here via the overflow check
+// itself misfiring.
+BOOST_AUTO_TEST_CASE(validate_does_not_ban_the_exact_non_overflowing_boundary) {
+    ResetBodyIndex();
+    CGetBodyRange req;
+    req.hashBlock = uint256S("0xef");
+    req.nCount = 5;
+    req.nStartIndex = std::numeric_limits<uint32_t>::max() - req.nCount;
+
+    FlatFilePos posOut;
+    BOOST_CHECK(ValidateGetBodyRange(req, posOut) == GetBodyRangeValidation::MISS);
 }
 
 BOOST_AUTO_TEST_CASE(validate_misses_an_unknown_hash) {
