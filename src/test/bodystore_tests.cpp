@@ -262,16 +262,21 @@ BOOST_AUTO_TEST_CASE(read_body_range_rejects_a_missing_record) {
 // many gigabytes and takes seconds; opening once and streaming, as
 // ReadBodyRange does, is O(record size) total and finishes in well under a
 // second. The bound below is generous for the correct implementation and
-// would not remotely save the quadratic shape.
+// would not remotely save the quadratic shape. A second assertion, added
+// for F-151, reuses this same record for a single-body request -- see its
+// own comment below.
 //
 // Deliberately NOT MakeBodies -- that pads scriptPubKey by the body's own
-// index, so 50,000 of them would include one padded to 50,000 bytes and a
-// combined size FindBodyPos correctly refuses. A fixed-size body (distinct
-// only in its prevout hash, still individually verifiable) keeps this at a
-// realistic ~3 MB total while still exercising 50,000 real offset-table
-// entries.
+// index, so 300,000 of them would include one padded to 300,000 bytes and
+// a combined size FindBodyPos correctly refuses. A fixed-size body
+// (distinct only in its prevout hash, still individually verifiable) keeps
+// this at a realistic ~18 MB total while still exercising 300,000 real
+// offset-table entries -- large enough that F-151's own single-body-request
+// regression (below) produces a robust, non-flaky timing gap rather than a
+// marginal one (measured ~78x at this scale, vs. an unreliable ~1.3x at
+// 50,000).
 BOOST_AUTO_TEST_CASE(read_body_range_opens_the_record_once_not_once_per_body) {
-    const size_t N = 50000;
+    const size_t N = 300000;
     std::vector<CTransactionRef> bodies;
     bodies.reserve(N);
     for (size_t i = 0; i < N; i++) {
@@ -294,7 +299,31 @@ BOOST_AUTO_TEST_CASE(read_body_range_opens_the_record_once_not_once_per_body) {
     BOOST_REQUIRE_EQUAL(out.size(), N);
     BOOST_CHECK(out[0]->GetHash() == bodies[0]->GetHash());
     BOOST_CHECK(out[N - 1]->GetHash() == bodies[N - 1]->GetHash());
-    BOOST_CHECK(elapsed < std::chrono::seconds(3));
+    BOOST_CHECK(elapsed < std::chrono::seconds(10));
+
+    // F-151 (a third Fable review, MEDIUM): reusing this same 300,000-body
+    // record -- a SINGLE-body request must not cost anywhere near what
+    // reading the whole record costs. The prior version of this function
+    // read every one of the record's `count` offsets regardless of
+    // nStartIndex/nMaxCount, so even a 1-body request still paid the full
+    // record's own header cost (measured ~5ms against a real
+    // 700,000-body/COMMITMENT_BUDGET_MAX_INPUTS record, independent of
+    // which single body was asked for). The fix reads only the one offset
+    // entry it actually needs.
+    //
+    // The 1ms bound below is calibrated, not guessed: on this machine, the
+    // correct implementation measures ~32us here; reintroducing the old
+    // whole-table-read shape as a mutant measures ~2.5ms at this same N --
+    // a ~78x gap, so 1ms sits with comfortable margin on both sides (~30x
+    // above the correct cost, ~2.5x below the buggy one).
+    std::vector<CTransactionRef> oneOut;
+    auto oneStart = std::chrono::steady_clock::now();
+    BOOST_REQUIRE(ReadBodyRange(pos, N / 2, 1, std::numeric_limits<uint64_t>::max(), oneOut));
+    auto oneElapsed = std::chrono::steady_clock::now() - oneStart;
+
+    BOOST_REQUIRE_EQUAL(oneOut.size(), 1U);
+    BOOST_CHECK(oneOut[0]->GetHash() == bodies[N / 2]->GetHash());
+    BOOST_CHECK(oneElapsed < std::chrono::milliseconds(1));
 }
 
 // F-127: GetBodyRecordSerializedSize must produce exactly

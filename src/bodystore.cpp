@@ -278,25 +278,62 @@ bool ReadBodyRange(const FlatFilePos &pos, unsigned int nStartIndex, unsigned in
         return error("ReadBodyRange: OpenBodyFile failed for %s", pos.ToString());
     }
 
-    std::vector<uint32_t> offsets;
-    if (!ReadBodyRecordHeader(filein, offsets)) {
-        return false;
+    // F-151 (a third Fable review, MEDIUM): the previous version of this
+    // function called the shared ReadBodyRecordHeader helper, which reads
+    // ALL `count` offsets regardless of nStartIndex/nMaxCount -- so a
+    // single-body request still cost O(the record's own real size), not
+    // O(1), measured at ~5ms against a 700,000-body record (this project's
+    // own COMMITMENT_BUDGET_MAX_INPUTS ceiling) independent of which body
+    // was asked for. This function needs only ONE specific offset value
+    // (the byte position where body `nStartIndex` begins), not the whole
+    // table, so it reads the CompactSize count directly and seeks straight
+    // to that one entry instead.
+    uint64_t count;
+    try {
+        count = ReadCompactSize(filein);
+        if (count > COMMITMENT_BUDGET_MAX_INPUTS) {
+            return error("ReadBodyRange: implausible count %llu", (unsigned long long) count);
+        }
+    } catch (const std::exception &e) {
+        return error("ReadBodyRange: %s", e.what());
     }
-    if (nStartIndex >= offsets.size()) {
+    if (nStartIndex >= count) {
         // Asking past the record's real end is an ordinary, honest way to
         // stop -- not an error, and (unlike ReadBodyAt) nothing is logged.
         return true;
     }
 
-    // One seek to the start of nStartIndex's bytes -- then read forward
-    // SEQUENTIALLY, since each `>>` naturally advances the file position to
-    // the next body already; no further seeking is needed. This, plus
-    // reading the header exactly once above (not once per body, F-150's own
-    // fix), is what makes this O(record size), not O(bodies read x record
-    // size) the way calling ReadBodyAt in a loop is.
-    uint32_t skipBytes = (nStartIndex == 0) ? 0 : offsets[nStartIndex - 1];
-    if (fseek(filein.Get(), (long) skipBytes, SEEK_CUR) != 0) {
-        return error("ReadBodyRange: fseek failed");
+    // The offset table occupies exactly `count * BODY_OFFSET_WIDTH` bytes,
+    // starting at the current position (right after the CompactSize count).
+    // Body `nStartIndex`'s own bytes start `count * BODY_OFFSET_WIDTH`
+    // bytes past here, plus offsets[nStartIndex-1] (the cumulative length
+    // of every earlier body) -- 0 if nStartIndex is 0, in which case there
+    // is no offsets[-1] to read.
+    uint32_t skipBytes = 0;
+    if (nStartIndex > 0) {
+        // Seek to offsets[nStartIndex-1]'s own position within the table
+        // (each entry is BODY_OFFSET_WIDTH bytes) and read that one value --
+        // not the ones before or after it.
+        if (fseek(filein.Get(), (long) ((nStartIndex - 1) * BODY_OFFSET_WIDTH), SEEK_CUR) != 0) {
+            return error("ReadBodyRange: fseek to offset table entry failed");
+        }
+        try {
+            filein >> skipBytes;
+        } catch (const std::exception &e) {
+            return error("ReadBodyRange: %s", e.what());
+        }
+    }
+    // From wherever that left the file position, skip past the REMAINING
+    // offset-table entries (there is no need to read them) plus skipBytes
+    // worth of earlier body data, landing exactly at body nStartIndex's own
+    // bytes. This, plus reading only one offset value above (not the whole
+    // table, F-151's own fix) and reading bodies forward sequentially
+    // below (not re-seeking per body, F-150's own fix), is what makes this
+    // whole function O(the response actually served), not O(the record's
+    // own size) the way calling ReadBodyAt in a loop is.
+    long remainingTableBytes = (long) ((count - nStartIndex) * BODY_OFFSET_WIDTH);
+    if (fseek(filein.Get(), remainingTableBytes + (long) skipBytes, SEEK_CUR) != 0) {
+        return error("ReadBodyRange: fseek to body data failed");
     }
 
     // 64-bit throughout so nStartIndex + nMaxCount can never itself overflow
@@ -304,7 +341,7 @@ bool ReadBodyRange(const FlatFilePos &pos, unsigned int nStartIndex, unsigned in
     // callers in this tree always derive nMaxCount from an already
     // overflow-checked request (bodyrange.cpp's ValidateGetBodyRange), but
     // this function does not assume that.
-    uint64_t nEnd = std::min<uint64_t>(offsets.size(), (uint64_t) nStartIndex + nMaxCount);
+    uint64_t nEnd = std::min<uint64_t>(count, (uint64_t) nStartIndex + nMaxCount);
 
     uint64_t nRunningBytes = 0;
     for (uint64_t i = nStartIndex; i < nEnd; i++) {
