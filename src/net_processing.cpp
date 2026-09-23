@@ -134,12 +134,15 @@ static_assert(MAX_STANDARD_TX_SIZE + 4096 < MAX_PROTOCOL_MESSAGE_LENGTH,
               "must always fit in one P2P message too");
 
 /** 2.2.3b (F-143's accepted spec, announcerring.h): how many blocks behind
- *  the current tip the announcer ring still holds a peer accountable for.
- *  F-143's own review left this depth explicitly open ("coupled to, never
- *  exceeding, this project's still-unfixed minimum body-retention floor")
- *  -- resolved (F-149/F-150's own research) by reusing the constant that
- *  already answers the identical question for pruning
- *  (MIN_BLOCKS_TO_KEEP, validation.h) and, under its
+ *  the announcer ring's own EFFECTIVE height (CAnnouncerRing::EffectiveHeight
+ *  -- the higher of the connected tip or the highest height any given peer
+ *  has ever announced, not simply "the current tip"; F-154 corrected this
+ *  comment after a review found it still described the pre-F-153 behaviour)
+ *  the ring still holds that peer accountable for. F-143's own review left
+ *  this depth explicitly open ("coupled to, never exceeding, this project's
+ *  still-unfixed minimum body-retention floor") -- resolved (F-149/F-150's
+ *  own research) by reusing the constant that already answers the identical
+ *  question for pruning (MIN_BLOCKS_TO_KEEP, validation.h) and, under its
  *  NODE_NETWORK_LIMITED_MIN_BLOCKS alias, for an analogous existing
  *  "how far back can a peer be trusted to still have data" bound a few
  *  hundred lines below in this same file -- rather than inventing a third
@@ -2220,8 +2223,13 @@ SendBodyRange(const CGetBodyRange &req, GetBodyRangeValidation validation, const
             // are their own DoS class, F-31/F-40's own precedent) or
             // silently mis-recording.
             if (!fFoundLast) {
-                LogPrint(BCLog::NET, "RecordAnnouncedHeaderRange: pindexLast %s not found in its own headers batch, peer=%d\n",
-                         lastHash.ToString(), nodeid);
+                // F-153/F-154 (a second Fable review of F-153): LogPrint is
+                // silent by default without -debug=net -- an actual
+                // invariant-violation tripwire needs LogPrintf, which this
+                // file already uses elsewhere for a genuinely unusual
+                // condition worth an operator's attention unconditionally.
+                LogPrintf("RecordAnnouncedHeaderRange: pindexLast %s not found in its own headers batch, peer=%d\n",
+                          lastHash.ToString(), nodeid);
             }
     }
 
