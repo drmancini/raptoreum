@@ -60,6 +60,35 @@
  *  accepted residual limitation that a withholder who simply goes silent,
  *  rather than answering, is not closed by this mechanism either.
  *
+ *  **Known residual, accepted not fixed (F-154, a second Fable review of
+ *  F-153's own fix): during any long catch-up (IBD, or a node reconnecting
+ *  after a long outage), this ring provides close to NO accountability for
+ *  fetches near where the node's own progress actually is.** `Record`'s own
+ *  memory-bounding fix (`EffectiveHeight`, below) windows around whichever
+ *  is higher -- the connected tip, or the highest height this peer has ever
+ *  announced -- and during headers-first sync a peer's own header stream
+ *  routinely races thousands of blocks ahead of where bodies are actually
+ *  being fetched. Concrete case: a peer serves headers to height 900,000
+ *  while the node is still fetching bodies near 500,000; by the time a
+ *  fetch of body 500,005 fails, that peer's own ring has long since evicted
+ *  every entry below ~899,710 (900,000 - `depth`). `WasAnnounced` then
+ *  answers false for a peer that genuinely did announce it. This is judged
+ *  inherent, not a bug to fix here: the height-bounded-memory requirement
+ *  (F-143's own round-3 finding, rejecting a count-bounded ring as
+ *  grindable) is fundamentally in tension with retaining IBD-scale
+ *  history, and any fix would need a real design change (e.g. bounding
+ *  relative to OUR OWN download-window progress instead of the peer's
+ *  header frontier), not a patch to this type. **2.2.4's own design must
+ *  not assume ring coverage during a long catch-up** -- it is a real,
+ *  tip-path-only mechanism, most useful exactly when a node is already
+ *  synced. Related, same root cause: `m_maxRecordedHeight` is a
+ *  peer-CONTROLLED input to a security-relevant window. A peer that gets
+ *  one header more than `depth` blocks past our own frontier accepted
+ *  evicts its own near-tip announcements for free -- but doing so costs
+ *  real, chain-length-scale proof-of-work (F-153/F-154's own reasoning),
+ *  not a cheap grind, so this is judged acceptable, not the same class of
+ *  problem the count-bounded design (v3) was rejected for.
+ *
  *  This type does its own I/O-free, lock-free bookkeeping and is fully
  *  testable without CNode/CConnman/cs_main scaffolding, matching this
  *  project's own established split (ValidateGetBodyRange/
@@ -101,10 +130,13 @@ private:
      *  heights took ~692s. `EffectiveHeight` instead tracks the highest
      *  height this ring has EVER recorded and uses whichever is higher,
      *  that or `currentTipHeight` -- so the ring stays a bounded window
-     *  around wherever the peer's own header stream has actually reached,
-     *  correctly degrading back to plain `currentTipHeight` once real sync
-     *  catches up and the two stay close together (the steady-state,
-     *  post-IBD case every existing test already covers). */
+     *  around wherever the peer's own header stream has actually reached.
+     *  This fixes the memory/CPU blowup correctly, but is a real tradeoff,
+     *  not a free lunch: see this header's own top-level comment for the
+     *  IBD-time coverage this costs (F-154). Post-sync, once
+     *  `currentTipHeight` and the peer's own header frontier stay close
+     *  together, this degrades back to the original, fully-covering
+     *  behaviour every pre-F-153 test already exercised. */
     int EffectiveHeight(int currentTipHeight) const {
         return std::max(currentTipHeight, m_maxRecordedHeight);
     }

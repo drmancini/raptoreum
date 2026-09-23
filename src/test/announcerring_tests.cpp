@@ -140,7 +140,7 @@ BOOST_AUTO_TEST_CASE(record_stays_bounded_under_many_increasing_future_heights) 
 // F-153 (Fable review of F-152, MEDIUM): the two tests above pin
 // WasAnnounced's own boundary but never independently pinned Record's own
 // eviction/insertion-guard boundary -- both an eviction off-by-one
-// (`&lt;` vs `&lt;=` on the cutoff comparison) and a cutoff-arithmetic
+// (`<` vs `<=` on the cutoff comparison) and a cutoff-arithmetic
 // off-by-one (`tip - depth` vs `tip - depth - 1`) survived the original 8
 // tests untouched.
 BOOST_AUTO_TEST_CASE(record_keeps_an_entry_exactly_at_the_eviction_boundary) {
@@ -165,6 +165,25 @@ BOOST_AUTO_TEST_CASE(record_rejects_an_entry_exactly_one_below_the_eviction_boun
     // already stale at the moment of recording, must not be inserted.
     ring.Record(/*height=*/89, hash, /*currentTipHeight=*/100, /*depth=*/10);
     BOOST_CHECK_EQUAL(ring.size(), 0U);
+}
+
+// F-154 (a second Fable review of F-153, LOW): confirms Record's own
+// internal ordering -- m_maxRecordedHeight must be updated BEFORE it is
+// used to compute this same call's cutoff, not after. Moving the update to
+// after the cutoff computation is benign in effect (eviction lags by one
+// call, so the size bound becomes depth+2 instead of depth+1) but was
+// entirely unguarded: the size-bound test's own `< 300` slack (291 vs 292)
+// hides a one-call lag, so this ordering was load-bearing in the fix's own
+// design but not independently pinned by any test.
+BOOST_AUTO_TEST_CASE(record_evicts_against_the_height_being_recorded_in_the_same_call) {
+    CAnnouncerRing ring;
+    ring.Record(/*height=*/100, uint256S("0x1"), /*currentTipHeight=*/0, /*depth=*/10);
+    BOOST_CHECK_EQUAL(ring.size(), 1U);
+    // Recording 111 makes the cutoff 101 in THIS very call -- height 100
+    // must be evicted here, not one call later.
+    ring.Record(/*height=*/111, uint256S("0x2"), /*currentTipHeight=*/0, /*depth=*/10);
+    BOOST_CHECK_EQUAL(ring.size(), 1U);
+    BOOST_CHECK(!ring.WasAnnounced(uint256S("0x1"), 0, 10));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
