@@ -17,6 +17,7 @@
 #include <uint256.h>
 
 #include <cstring>
+#include <limits>
 
 PyDoc_STRVAR(getPoWHash_doc,
 "getPoWHash(header) -> bytes\n\n"
@@ -36,6 +37,19 @@ static PyObject *ghostrider_getPoWHash(PyObject *self, PyObject *args)
     if (len < 36) {
         PyErr_SetString(PyExc_ValueError,
                         "header too short: need at least 36 bytes to read the previous block hash");
+        return nullptr;
+    }
+    // HashGR (src/hash.h) narrows (pend - pbegin) * sizeof(*pbegin) into a
+    // plain `int` internally to build its own lenToHash. Py_ssize_t is wider
+    // than int on every platform this extension targets, so a caller-supplied
+    // length above INT_MAX would silently truncate there -- HashGR would hash
+    // fewer bytes than actually requested instead of failing. Reject it here
+    // instead, at the boundary this binding owns, rather than let a truncation
+    // inside vendored consensus code pass for a successful call.
+    if (len > std::numeric_limits<int>::max()) {
+        PyErr_SetString(PyExc_ValueError,
+                        "header too long: length exceeds INT_MAX, which HashGR would silently "
+                        "truncate to internally rather than hash in full");
         return nullptr;
     }
 

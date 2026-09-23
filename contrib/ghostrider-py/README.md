@@ -31,10 +31,33 @@ repository that no longer exists.
 selects the algorithm sequence. The result is in internal (little-endian) byte
 order, matching the node.
 
+`header` must be a read-only bytes-like object (`bytes`, the normal case, works;
+a `bytearray` or writable `memoryview`/`mmap` does not -- `getPoWHash` raises
+`TypeError` for those).
+
 ## Requirements
 
-Boost headers, found in this order: `$BOOST_INCLUDEDIR`, then `depends/*/include`
-from a Core build, then the system.
+- A C++ compiler. Built and tested with GCC/G++ 13 on Linux; any compiler that
+  builds the rest of this tree should work, since this extension compiles the
+  same sources.
+- Python development headers (`Python.h`) for the interpreter you build
+  against -- the `python3-dev`/`python3-devel` package on most distributions,
+  or whatever provides them if you're using a pyenv/venv-managed Python.
+- `setuptools`, if your interpreter's environment doesn't already have it
+  (recent venvs often don't ship it by default): `pip install setuptools`.
+- Boost headers, found in this order: `$BOOST_INCLUDEDIR`, then `depends/*/include`
+  from a Core build, then the system.
+
+## Tests
+
+    python3 test_binding.py -v
+
+Exercises the documented length boundaries (the 36-byte minimum, and the
+`INT_MAX` ceiling `HashGR` narrows its own length calculation to internally --
+see the comment on that check in `ghostridermodule.cpp` for why exceeding it
+without a guard is a memory-safety issue for the calling process, not merely a
+wrong answer) and that the previous-block-hash bytes are wired to the position
+`HashSelection` actually reads.
 
 ## Checking it against the chain
 
