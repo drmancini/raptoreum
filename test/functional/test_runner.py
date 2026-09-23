@@ -171,7 +171,9 @@ BASE_SCRIPTS = [
     'feature_dersig.py',
     'feature_cltv.py',
     'feature_new_quorum_type_activation.py',
-    # 'feature_governance_objects.py',  # Raptoreum does not use governance
+    # feature_governance_objects.py is deliberately not registered here --
+    # see DISABLED_SCRIPTS below, which is what check_script_list() actually
+    # consults (a comment alone doesn't exclude a file from that check).
     'rpc_uptime.py',
     'wallet_resendwallettransactions.py',
     'feature_minchainwork.py',
@@ -229,6 +231,16 @@ EXTENDED_SCRIPTS = [
 
 # Place EXTENDED_SCRIPTS first since it has the 3 longest running tests
 ALL_SCRIPTS = EXTENDED_SCRIPTS + BASE_SCRIPTS
+
+DISABLED_SCRIPTS = [
+    # Real test scripts that live in the functional tests directory but are
+    # deliberately not registered in ALL_SCRIPTS -- distinct from
+    # NON_SCRIPTS below, which is for files that are not test scripts at
+    # all. check_script_list() needs to know about these too, or it reports
+    # each one as accidentally forgotten (and aborts under --ci) rather
+    # than recognising it as a real, intentional exclusion.
+    "feature_governance_objects.py",  # Raptoreum does not use governance
+]
 
 NON_SCRIPTS = [
     # These are python files that live in the functional tests directory, but are not test scripts.
@@ -600,7 +612,7 @@ def check_script_list(*, src_dir, fail_on_warn):
     not being run by pull-tester.py."""
     script_dir = src_dir + '/test/functional/'
     python_files = set([test_file for test_file in os.listdir(script_dir) if test_file.endswith(".py")])
-    missed_tests = list(python_files - set(map(lambda x: x.split()[0], ALL_SCRIPTS + NON_SCRIPTS)))
+    missed_tests = list(python_files - set(map(lambda x: x.split()[0], ALL_SCRIPTS + NON_SCRIPTS + DISABLED_SCRIPTS)))
     if len(missed_tests) != 0:
         print("%sWARNING!%s The following scripts are not being run: %s. Check the test lists in test_runner.py." % (BOLD[1], BOLD[0], str(missed_tests)))
         if fail_on_warn:
