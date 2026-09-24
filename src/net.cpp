@@ -3756,8 +3756,17 @@ void CConnman::RegisterEvents(CNode *pnode) {
     LOCK(pnode->cs_hSocket);
     assert(pnode->hSocket != INVALID_SOCKET);
 
+    // Edge-triggered on both filters, same as the epoll registration below: without EV_CLEAR
+    // a socket kevent() already reported stays "readable" until fully drained by a recv() that
+    // empties the kernel buffer. A node the receive path is refusing to drain right now (paused,
+    // send queue backed up, disconnecting -- see HasUnpausedReceivableNode() below) then makes
+    // every kevent() call return immediately instead of blocking for the timeout, which is the
+    // same busy-loop this file's SocketHandler() fix addresses, just reached through the kqueue
+    // wait call instead of the skip-wait check. mapReceivableNodes/fHasRecvData already track a
+    // socket's "still has data" state across calls independently of the backend (that's what
+    // makes epoll's edge-triggered mode above safe), so this needs no change on that side.
     struct kevent events[2];
-    EV_SET(&events[0], pnode->hSocket, EVFILT_READ, EV_ADD, 0, 0, nullptr);
+    EV_SET(&events[0], pnode->hSocket, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, nullptr);
     EV_SET(&events[1], pnode->hSocket, EVFILT_WRITE, EV_ADD | EV_CLEAR, 0, 0, nullptr);
 
     int r = kevent(kqueuefd, events, 2, nullptr, 0, nullptr);
