@@ -342,7 +342,9 @@ GetTransaction(const CBlockIndex *const block_index, const CTxMemPool *const mem
  * validationinterface callback.
  */
 bool ActivateBestChain(CValidationState &state, const CChainParams &chainparams,
-                       std::shared_ptr<const CBlock> pblock = std::shared_ptr<const CBlock>());
+                       std::shared_ptr<const CBlock> pblock = std::shared_ptr<const CBlock>())
+
+LOCKS_EXCLUDED(cs_main);
 
 double ConvertBitsToDouble(unsigned int nBits);
 
@@ -856,10 +858,32 @@ public:
 
     void PruneAndFlush();
 
+    /**
+     * F-157 (Fable review of F-155/F-156): "May not be called with cs_main
+     * held" (this class's own definition, validation.cpp) was previously
+     * enforced only by a runtime AssertLockNotHeld(cs_main) inside the
+     * function body, itself compiled to a no-op without DEBUG_LOCKORDER
+     * (this project's build does not default it on) -- so a caller holding
+     * cs_main across this call (the exact bug this review found in
+     * net_processing.cpp's BODYRANGE handler, which calls this member via
+     * ::ChainstateActive().ActivateBestChain(...)) was silently unchecked
+     * by anything in this project's normal build or test run. The
+     * LOCKS_EXCLUDED(cs_main) annotation below makes the contract checked
+     * by ordinary compilation under Clang (this environment's g++ build
+     * ignores the attribute entirely, matching threadsafety.h's own
+     * existing GCC/Clang split) -- confirmed directly: a throwaway
+     * reintroduction of the exact bug this review found (a bare, unscoped
+     * LOCK(cs_main) held across this call) produces a real -Wthread-safety
+     * "cannot call function 'ActivateBestChain' while mutex 'cs_main' is
+     * held" diagnostic under `clang++ -fsyntax-only -Wthread-safety`, and
+     * the fixed (scope-released) call site produces none.
+     */
     bool ActivateBestChain(
             CValidationState &state,
             const CChainParams &chainparams,
-            std::shared_ptr<const CBlock> pblock);
+            std::shared_ptr<const CBlock> pblock)
+
+    LOCKS_EXCLUDED(cs_main);
 
     bool
     AcceptBlock(const std::shared_ptr<const CBlock> &pblock, CValidationState &state, const CChainParams &chainparams,

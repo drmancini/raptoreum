@@ -387,6 +387,54 @@ namespace {
     std::map <uint256, std::vector<CTransactionRef>> mapBodyRangePartial
     GUARDED_BY(cs_main);
 
+    /** F-157 (Fable review of F-155/F-156): "bodies wanted" for a
+     *  commitment-only pindex -- the same one-liner was duplicated at both
+     *  the BODYRANGE response handler and the getbodyrange-issuing
+     *  SendMessages section. pindex->nTx is the commitment-level count
+     *  (coinbase + bodies), set unconditionally by ReceivedBlockTransactions
+     *  regardless of whether bodies are held (F-135) -- always available for
+     *  a block that reached either call site at all (BLOCK_HAVE_DATA is
+     *  set). Coinbase itself is never stored in the body store (bodystore.h's
+     *  own indexing convention), hence -1. */
+    static unsigned int BodyRangeWantedCount(const CBlockIndex *pindex) {
+        return pindex->nTx > 0 ? (unsigned int) (pindex->nTx - 1) : 0;
+    }
+
+    /** F-157: the three near-identical "erase a mapBodyRangeInFlight entry
+     *  and decrement its counterpart nBodyRangeInFlight" call sites
+     *  (FinalizeNode's disconnect cleanup, the stale-request reaper, and the
+     *  BODYRANGE handler's two single-entry erases) duplicated the same
+     *  invariant-maintenance pair, which a future edit to one site without
+     *  the other would silently desync (mapBodyRangeInFlight.size() would
+     *  stop matching nBodyRangeInFlight, corrupting the aggregate cap).
+     *  Factored into one place so the pairing can't drift. Takes an
+     *  iterator (not a hash) since every call site already holds one from
+     *  its own find()/loop -- erasing by iterator avoids a second lookup.
+     *  Returns map::erase's own next-iterator, so an erase-while-iterating
+     *  loop can write `it = EraseBodyRangeInFlight(it);` exactly as it would
+     *  `it = mapBodyRangeInFlight.erase(it);` directly. */
+    static std::map<uint256, BodyRangeInFlight>::iterator
+    EraseBodyRangeInFlight(std::map<uint256, BodyRangeInFlight>::iterator it)
+
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        nBodyRangeInFlight--;
+        return mapBodyRangeInFlight.erase(it);
+    }
+
+    /** F-157: throttles the stale-in-flight-request reap (bodyrange.h's
+     *  IsBodyRangeRequestStale, F-156) to run at most once per interval
+     *  rather than once per CONNECTED PEER's SendMessages pass -- with N
+     *  peers, the unthrottled version rescanned the same (small but
+     *  non-zero) mapBodyRangeInFlight map N times per round under cs_main
+     *  for no additional benefit, since staleness only changes with real
+     *  time, not with which peer happens to be calling. One second is far
+     *  finer than BODY_RETRY_MAX_MICROS (the staleness threshold itself,
+     *  30s) needs -- a stale slot is reaped within ~1s of crossing the
+     *  threshold either way. */
+    static const int64_t BODY_RANGE_MAINTENANCE_INTERVAL_MICROS = 1000000; // 1s
+    int64_t nBodyRangeMaintenanceLastRun
+    GUARDED_BY(cs_main) = 0;
+
     /** Stack of nodes which we have set to announce using compact blocks */
     std::list <NodeId> lNodesAnnouncingHeaderAndIDs
     GUARDED_BY(cs_main);
@@ -1018,7 +1066,19 @@ namespace {
                                 // gap does.
                                 fBehindGap = true;
                                 if (pindex->nHeight > nWindowEnd) {
-                                    if (vBlocks.size() == 0 && waitingfor != nodeid) {
+                                    // F-157 (Fable review): HasOutstandingBlockDownloadWork
+                                    // (bodyrange.h) added -- an earlier iteration of THIS SAME
+                                    // walk may already have queued genuine body-range
+                                    // candidates (this branch's own push below, for a
+                                    // lower-height pindex visited first). vBlocks.size() == 0
+                                    // alone only proves no WHOLE-BLOCK work was found; it says
+                                    // nothing about whether this peer has real outstanding work
+                                    // via the newer GETBODYRANGE path. Without this, a peer
+                                    // making genuine body-fetch progress could still cause an
+                                    // unrelated peer (waitingfor) to be wrongly marked as a
+                                    // staller.
+                                    if (!HasOutstandingBlockDownloadWork(vBlocks.size(), vBodyBlocks.size()) &&
+                                        waitingfor != nodeid) {
                                         nodeStaller = waitingfor;
                                     }
                                     return;
@@ -1036,7 +1096,12 @@ namespace {
                                 fBehindGap = true;
                                 if (pindex->nHeight > nWindowEnd) {
                                     // We reached the end of the window.
-                                    if (vBlocks.size() == 0 && waitingfor != nodeid) {
+                                    // F-157 (Fable review): HasOutstandingBlockDownloadWork
+                                    // added -- same reasoning as the BLOCK_HAVE_DATA branch
+                                    // above; an earlier, lower-height pindex in this same walk
+                                    // may already have queued genuine body-range work.
+                                    if (!HasOutstandingBlockDownloadWork(vBlocks.size(), vBodyBlocks.size()) &&
+                                        waitingfor != nodeid) {
                                         // We aren't able to fetch anything, but we would be if the download window was one larger.
                                         nodeStaller = waitingfor;
                                     }
@@ -1262,8 +1327,25 @@ void PeerLogicValidation::FinalizeNode(NodeId nodeid, bool &fUpdateConnectionTim
     // still good, whichever peer answers the resumption.
     for (auto it = mapBodyRangeInFlight.begin(); it != mapBodyRangeInFlight.end();) {
         if (it->second.peer == nodeid) {
-            it = mapBodyRangeInFlight.erase(it);
-            nBodyRangeInFlight--;
+            it = EraseBodyRangeInFlight(it);
+        } else {
+            ++it;
+        }
+    }
+    // F-157 (Fable review of F-155/F-156): g_body_retry_state is keyed by
+    // (NodeId, hash) -- its own per-block entries are only ever erased when
+    // THIS SAME peer's later FindNextBlocksToDownload call resolves that
+    // block (the "1.3.6 (H-2): resolved" erase() above). A peer that
+    // disconnects before resolving never gets that later call, and NodeIds
+    // are never reused for the life of the process (CConnman's own
+    // monotonic counter) -- so without this sweep, every (peer, hash) pair
+    // this peer ever had backed off stays in the map forever, growing
+    // unboundedly with ordinary peer churn (connect/disconnect/reconnect
+    // each mint a fresh NodeId). The same leak class F-155/F-156 already
+    // closed for mapBodyRangeInFlight, closed here for its sibling map.
+    for (auto it = g_body_retry_state.begin(); it != g_body_retry_state.end();) {
+        if (it->first.first == nodeid) {
+            it = g_body_retry_state.erase(it);
         } else {
             ++it;
         }
@@ -1288,6 +1370,11 @@ void PeerLogicValidation::FinalizeNode(NodeId nodeid, bool &fUpdateConnectionTim
         // mapBlocksInFlight above.
         assert(mapBodyRangeInFlight.empty());
         assert(nBodyRangeInFlight == 0);
+        // F-157: same reasoning, now that g_body_retry_state's own
+        // per-departing-peer sweep exists above -- every entry names a peer
+        // via its key's NodeId half, so once every peer is gone, none can
+        // remain either.
+        assert(g_body_retry_state.empty());
     }
     LogPrint(BCLog::NET, "Cleared nodestate for peer=%d\n", nodeid);
 }
@@ -3477,82 +3564,98 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
         CBodyRange resp;
         vRecv >> resp;
 
-        LOCK(cs_main);
+        // F-157 (Fable review, CONFIRMED HIGH): ActivateBestChain's own
+        // contract (validation.h's doc, AssertLockNotHeld(cs_main) at its
+        // own definition) requires cs_main NOT be held -- this file's other
+        // two call sites (ProcessGetData, ProcessGetBlocks) both already
+        // release cs_main first, one with this exact comment. The original
+        // draft here took a bare, unscoped LOCK(cs_main) that stayed held
+        // all the way through the ActivateBestChain call at the bottom --
+        // fixed by confining every cs_main-dependent step to its own scope,
+        // recording only WHETHER activation is warranted, and calling
+        // ActivateBestChain after that scope (and its lock) has closed.
+        bool fShouldActivateBestChain = false;
+        {
+            LOCK(cs_main);
 
-        auto it = mapBodyRangeInFlight.find(resp.hashBlock);
-        if (it == mapBodyRangeInFlight.end() || it->second.peer != pfrom->GetId()) {
-            return true;
-        }
-        CGetBodyRange req;
-        req.hashBlock = resp.hashBlock;
-        req.nStartIndex = it->second.nStartIndex;
-        req.nCount = it->second.nCount;
-
-        if (!ValidateBodyRangeResponse(req, resp)) {
-            Misbehaving(pfrom->GetId(), 20,
-                        strprintf("Peer %d sent us a malformed bodyrange response", pfrom->GetId()));
-            mapBodyRangeInFlight.erase(it);
-            nBodyRangeInFlight--;
-            return true;
-        }
-        mapBodyRangeInFlight.erase(it);
-        nBodyRangeInFlight--;
-
-        if (resp.vBodies.empty()) {
-            // An honest miss (bodyrange.h's own CBodyRange doc: no fFound
-            // field, a miss IS vBodies.empty()) -- the block is withheld or
-            // this peer never had it. Not misbehaviour by itself (F-139's
-            // own regime split governs whether an ANNOUNCER staying silent
-            // on the tip path should be punished -- deferred here, see
-            // findings). g_body_retry_state's own backoff (already advanced
-            // when this request was sent) is what paces the next attempt,
-            // to this or another peer.
-            return true;
-        }
-
-        std::vector<CTransactionRef> &partial = mapBodyRangePartial[resp.hashBlock];
-        partial.insert(partial.end(), resp.vBodies.begin(), resp.vBodies.end());
-
-        CBlockIndex *pindex = LookupBlockIndex(resp.hashBlock);
-        if (pindex == nullptr) {
-            mapBodyRangePartial.erase(resp.hashBlock);
-            return true;
-        }
-        unsigned int nWanted = pindex->nTx > 0 ? (unsigned int) (pindex->nTx - 1) : 0;
-        if (partial.size() < nWanted) {
-            // More chunks needed -- the "Message: getbodyrange" section in
-            // SendMessages picks this back up (mapBodyRangeInFlight no
-            // longer names this hash), resuming from partial.size().
-            return true;
-        }
-
-        CCommitmentBlock commitments;
-        if (!ReadCommitmentBlockFromDisk(commitments, pindex, chainparams.GetConsensus())) {
-            mapBodyRangePartial.erase(resp.hashBlock);
-            return true;
-        }
-
-        CValidationState state;
-        bool ok = ::ChainstateActive().ProcessFetchedBodyRange(pindex, commitments, partial, state, chainparams);
-        mapBodyRangePartial.erase(resp.hashBlock);
-
-        if (!ok) {
-            if (state.CorruptionPossible()) {
-                // This specific peer's answer didn't match the block's own
-                // committed identifiers -- that peer's fault, not a fact
-                // about the block (ProcessFetchedBodyRange's own doc).
-                Misbehaving(pfrom->GetId(), 100,
-                            strprintf("Peer %d answered getbodyrange with bodies that do not match %s",
-                                     pfrom->GetId(), resp.hashBlock.ToString()));
+            auto it = mapBodyRangeInFlight.find(resp.hashBlock);
+            if (it == mapBodyRangeInFlight.end() || it->second.peer != pfrom->GetId()) {
+                return true;
             }
-            // A genuine body-dependent validation failure already stamped
-            // BLOCK_FAILED_VALID inside ProcessFetchedBodyRange -- nothing
-            // further to do here either way.
-            return true;
-        }
+            CGetBodyRange req;
+            req.hashBlock = resp.hashBlock;
+            req.nStartIndex = it->second.nStartIndex;
+            req.nCount = it->second.nCount;
 
-        CValidationState activateState;
-        ::ChainstateActive().ActivateBestChain(activateState, chainparams, nullptr);
+            if (!ValidateBodyRangeResponse(req, resp)) {
+                Misbehaving(pfrom->GetId(), 20,
+                            strprintf("Peer %d sent us a malformed bodyrange response", pfrom->GetId()));
+                EraseBodyRangeInFlight(it);
+                return true;
+            }
+            EraseBodyRangeInFlight(it);
+
+            if (resp.vBodies.empty()) {
+                // An honest miss (bodyrange.h's own CBodyRange doc: no
+                // fFound field, a miss IS vBodies.empty()) -- the block is
+                // withheld or this peer never had it. Not misbehaviour by
+                // itself (F-139's own regime split governs whether an
+                // ANNOUNCER staying silent on the tip path should be
+                // punished -- deferred here, see findings).
+                // g_body_retry_state's own backoff (already advanced when
+                // this request was sent) is what paces the next attempt, to
+                // this or another peer.
+                return true;
+            }
+
+            std::vector<CTransactionRef> &partial = mapBodyRangePartial[resp.hashBlock];
+            partial.insert(partial.end(), resp.vBodies.begin(), resp.vBodies.end());
+
+            CBlockIndex *pindex = LookupBlockIndex(resp.hashBlock);
+            if (pindex == nullptr) {
+                mapBodyRangePartial.erase(resp.hashBlock);
+                return true;
+            }
+            if (partial.size() < BodyRangeWantedCount(pindex)) {
+                // More chunks needed -- the "Message: getbodyrange" section
+                // in SendMessages picks this back up (mapBodyRangeInFlight
+                // no longer names this hash), resuming from partial.size().
+                return true;
+            }
+
+            CCommitmentBlock commitments;
+            if (!ReadCommitmentBlockFromDisk(commitments, pindex, chainparams.GetConsensus())) {
+                mapBodyRangePartial.erase(resp.hashBlock);
+                return true;
+            }
+
+            CValidationState state;
+            bool ok = ::ChainstateActive().ProcessFetchedBodyRange(pindex, commitments, partial, state, chainparams);
+            mapBodyRangePartial.erase(resp.hashBlock);
+
+            if (!ok) {
+                if (state.CorruptionPossible()) {
+                    // This specific peer's answer didn't match the block's
+                    // own committed identifiers -- that peer's fault, not a
+                    // fact about the block (ProcessFetchedBodyRange's own
+                    // doc).
+                    Misbehaving(pfrom->GetId(), 100,
+                                strprintf("Peer %d answered getbodyrange with bodies that do not match %s",
+                                         pfrom->GetId(), resp.hashBlock.ToString()));
+                }
+                // A genuine body-dependent validation failure already
+                // stamped BLOCK_FAILED_VALID inside ProcessFetchedBodyRange
+                // -- nothing further to do here either way.
+                return true;
+            }
+
+            fShouldActivateBestChain = true;
+        } // release cs_main before calling ActivateBestChain
+
+        if (fShouldActivateBestChain) {
+            CValidationState activateState;
+            ::ChainstateActive().ActivateBestChain(activateState, chainparams, nullptr);
+        }
         return true;
     }
 
@@ -5342,22 +5445,29 @@ bool PeerLogicValidation::SendMessages(CNode *pto) {
         // C1, not built here). The aggregate cap (nBodyRangeInFlight vs.
         // -maxbodyrangeinflight) is checked per candidate, last, by
         // ShouldRequestBodyRange (bodyrange.h).
-        if (gArgs.GetBoolArg("-fetchbodyrange", false)) {
+        if (gArgs.GetBoolArg("-fetchbodyrange", false) &&
+            nNow - nBodyRangeMaintenanceLastRun > BODY_RANGE_MAINTENANCE_INTERVAL_MICROS) {
             // 2.2.4: reap any in-flight request stuck against a peer that
             // stayed CONNECTED but never answered at all -- IsBodyRangeRequestStale's
             // own doc (bodyrange.h) explains why nothing else catches this.
-            // Runs on every peer's SendMessages pass (not gated on THIS
-            // peer's own vBodyBlocks/CanReceiveCommitments eligibility below),
-            // since a stale slot can be held against any peer while a wholly
-            // different peer is the one currently calling SendMessages.
             // mapBodyRangePartial is left alone -- bodies already received
             // and shape-validated are still good for whichever peer resumes
             // the fetch (matches FinalizeNode's own disconnect-cleanup
             // convention).
+            //
+            // F-157 (Fable review): throttled to BODY_RANGE_MAINTENANCE_INTERVAL_MICROS
+            // rather than running unconditionally on EVERY connected peer's
+            // own SendMessages pass -- staleness is a function of real time,
+            // not of which peer happens to be calling, so with N peers the
+            // untethered version rescanned the same map N times per round
+            // under cs_main for no additional benefit. nBodyRangeMaintenanceLastRun
+            // is intentionally not peer-specific -- whichever peer's
+            // SendMessages call happens to cross the interval runs it for
+            // everyone, same as any other shared periodic-maintenance timer.
+            nBodyRangeMaintenanceLastRun = nNow;
             for (auto it = mapBodyRangeInFlight.begin(); it != mapBodyRangeInFlight.end();) {
                 if (IsBodyRangeRequestStale(it->second.nRequestTime, nNow, BODY_RETRY_MAX_MICROS)) {
-                    it = mapBodyRangeInFlight.erase(it);
-                    nBodyRangeInFlight--;
+                    it = EraseBodyRangeInFlight(it);
                 } else {
                     ++it;
                 }
@@ -5385,14 +5495,11 @@ bool PeerLogicValidation::SendMessages(CNode *pto) {
                     continue;
                 }
 
-                // pindex->nTx is the commitment-level count (coinbase +
-                // bodies), set unconditionally by ReceivedBlockTransactions
-                // regardless of whether bodies are held (F-135) -- always
-                // available for a block that reached this branch at all
-                // (BLOCK_HAVE_DATA is set). Resume from wherever a prior
-                // partial chunk left off (the server's own truncate-only
-                // continuation contract, bodyrange.h).
-                unsigned int nWanted = pindex->nTx > 0 ? (unsigned int) (pindex->nTx - 1) : 0;
+                // Resume from wherever a prior partial chunk left off (the
+                // server's own truncate-only continuation contract,
+                // bodyrange.h). BodyRangeWantedCount's own doc explains the
+                // nTx/coinbase-indexing reasoning.
+                unsigned int nWanted = BodyRangeWantedCount(pindex);
                 std::vector<CTransactionRef> &partial = mapBodyRangePartial[hash];
                 if (nWanted == 0 || partial.size() >= nWanted) {
                     // Nothing left to ask for -- a coinbase-only block (never

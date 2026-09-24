@@ -86,3 +86,7 @@ int64_t NextBodyRetryBackoffMicros(unsigned int nAttempts, int64_t nBaseMicros, 
 bool IsBodyRangeRequestStale(int64_t nRequestTime, int64_t nNow, int64_t nStaleAfterMicros) {
     return nNow - nRequestTime > nStaleAfterMicros;
 }
+
+bool HasOutstandingBlockDownloadWork(size_t nWholeBlockCandidates, size_t nBodyRangeCandidates) {
+    return nWholeBlockCandidates > 0 || nBodyRangeCandidates > 0;
+}
