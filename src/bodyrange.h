@@ -264,4 +264,19 @@ int64_t NextBodyRetryBackoffMicros(unsigned int nAttempts, int64_t nBaseMicros, 
  *  this isn't backoff arithmetic itself. */
 bool IsBodyRangeRequestStale(int64_t nRequestTime, int64_t nNow, int64_t nStaleAfterMicros);
 
+/** F-157 (Fable review of F-155/F-156): `FindNextBlocksToDownload`'s own
+ *  staller-detection blames an unrelated peer (`waitingfor`) for THIS
+ *  peer's lack of progress once its whole-block candidate list (`vBlocks`)
+ *  comes back empty at the download window's end -- but 2.2.4 added a
+ *  SECOND, independent source of real progress for the exact same peer
+ *  (`vBodyBlocks`, the single-source GETBODYRANGE candidates), which the
+ *  original check never consulted: a peer with genuine outstanding
+ *  body-range work queued was still treated as evidence of an unrelated
+ *  peer stalling, purely because the WHOLE-BLOCK list happened to be empty.
+ *  Pure, taking both candidate counts as plain values (this project's own
+ *  established split) rather than reaching into `FindNextBlocksToDownload`'s
+ *  own local `vBlocks`/`vBodyBlocks` -- true only when NEITHER fetch path
+ *  found anything for this peer to do. */
+bool HasOutstandingBlockDownloadWork(size_t nWholeBlockCandidates, size_t nBodyRangeCandidates);
+
 #endif // BITCOIN_BODYRANGE_H

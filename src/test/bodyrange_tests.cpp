@@ -715,4 +715,25 @@ BOOST_AUTO_TEST_CASE(stale_check_reaps_a_long_silent_request) {
                                          /*nStaleAfterMicros=*/30000000));
 }
 
+// F-157 (Fable review of F-155/F-156): FindNextBlocksToDownload's own
+// staller-detection blind spot -- extracted as a pure predicate so the fix
+// is testable without net_processing.cpp's own untested scaffolding.
+BOOST_AUTO_TEST_CASE(outstanding_work_true_when_only_whole_block_candidates_exist) {
+    BOOST_CHECK(HasOutstandingBlockDownloadWork(/*nWholeBlockCandidates=*/3, /*nBodyRangeCandidates=*/0));
+}
+
+BOOST_AUTO_TEST_CASE(outstanding_work_true_when_only_body_range_candidates_exist) {
+    // The regression this whole predicate exists to fix: real outstanding
+    // work via the newer GETBODYRANGE path alone must count.
+    BOOST_CHECK(HasOutstandingBlockDownloadWork(/*nWholeBlockCandidates=*/0, /*nBodyRangeCandidates=*/1));
+}
+
+BOOST_AUTO_TEST_CASE(outstanding_work_true_when_both_kinds_exist) {
+    BOOST_CHECK(HasOutstandingBlockDownloadWork(/*nWholeBlockCandidates=*/2, /*nBodyRangeCandidates=*/2));
+}
+
+BOOST_AUTO_TEST_CASE(outstanding_work_false_when_neither_kind_exists) {
+    BOOST_CHECK(!HasOutstandingBlockDownloadWork(/*nWholeBlockCandidates=*/0, /*nBodyRangeCandidates=*/0));
+}
+
 BOOST_AUTO_TEST_SUITE_END()
