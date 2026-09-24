@@ -6,6 +6,7 @@
 
 #include <bodystore.h>
 
+#include <algorithm>
 #include <limits>
 
 GetBodyRangeValidation ValidateGetBodyRange(const CGetBodyRange &request, FlatFilePos &posOut) {
@@ -43,4 +44,41 @@ void BuildBodyRangeResponse(const CGetBodyRange &request, const FlatFilePos &pos
     // opens the record and reads its header exactly once, then streams --
     // O(record size) total, regardless of how many bodies are requested.
     ReadBodyRange(pos, request.nStartIndex, request.nCount, nByteCeiling, respOut.vBodies);
+}
+
+bool ValidateBodyRangeResponse(const CGetBodyRange &request, const CBodyRange &response) {
+    if (response.hashBlock != request.hashBlock) {
+        return false;
+    }
+    if (response.nStartIndex != request.nStartIndex) {
+        return false;
+    }
+    if (response.vBodies.size() > request.nCount) {
+        return false;
+    }
+    for (const CTransactionRef &tx : response.vBodies) {
+        if (!tx) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ShouldRequestBodyRange(bool fWasAnnounced, int64_t nNow, int64_t nNextAttempt,
+                             unsigned int nInFlight, unsigned int nMaxInFlight) {
+    if (!fWasAnnounced) {
+        return false;
+    }
+    if (nNow < nNextAttempt) {
+        return false;
+    }
+    if (nInFlight >= nMaxInFlight) {
+        return false;
+    }
+    return true;
+}
+
+int64_t NextBodyRetryBackoffMicros(unsigned int nAttempts, int64_t nBaseMicros, int64_t nMaxMicros) {
+    int64_t nBackoff = nBaseMicros << std::min(nAttempts - 1, 5U);
+    return std::min(nBackoff, nMaxMicros);
 }

@@ -1793,4 +1793,240 @@ BOOST_AUTO_TEST_CASE(vtx_index_from_body_index_matches_a_real_accepted_block) {
     BOOST_CHECK(!ReadBodyAt(pos, count, txOut));
 }
 
+// 2.2.4 (build-plan.md's 2.2 row, F-139's own spec): the body-ARRIVAL write
+// path -- ProcessFetchedBodyRange turns wire-fetched bodies into a durably
+// stored, indexed, connectable block for a pindex whose commitments are
+// known but whose body record has never been written at all (unlike every
+// existing withhold-then-arrival test above, which always starts from a
+// record SaveBodyToDisk already wrote unconditionally at accept -- the only
+// shape the -perfwithholdbody harness produces). No such pindex is
+// reachable via any real accept path today (a genuine commitment-only
+// relay/accept is 4.1's own still-unbuilt job) -- simulated directly here,
+// the same "clobber the index to a state only a future real path would
+// produce" technique this file's own reload/prune/pre-2.1.4 tests already
+// use (F-135/F-141/F-145).
+static void SimulateBodyRecordNeverWritten(CBlockIndex *pindex) {
+    pindex->nStatus &= ~(BLOCK_HAVE_BODY_RECORD | BLOCK_HAVE_BODIES);
+    pindex->nBodyFile = -1;
+    pindex->nBodyPos = 0;
+    RecordBodyPositionByHash(pindex->GetBlockHash(), FlatFilePos(), /*fServeable=*/false);
+}
+
+BOOST_AUTO_TEST_CASE(process_fetched_body_range_writes_and_connects_a_genuinely_unwritten_body) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    const CChainParams &chainparams = Params();
+
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock block = CreateBlock({spendTx}, coinbaseKey);
+    std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
+    uint256 hash = block.GetHash();
+
+    CBlockIndex *pindex;
+    {
+        // PerfWithholdGuard gets a real, commitment-only-shaped accept (no
+        // connect) without this test having to hand-roll AcceptBlockHeader
+        // plumbing -- SimulateBodyRecordNeverWritten then erases the body
+        // record the harness still wrote underneath it (F-134/F-135: always
+        // unconditional), leaving exactly 2.2.4's real target precondition.
+        PerfWithholdGuard guard(hash);
+        BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblock, /*fForceProcessing=*/true, nullptr));
+    }
+    pindex = LookupBlockIndex(hash);
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(pindex->nStatus & BLOCK_HAVE_DATA);
+    SimulateBodyRecordNeverWritten(pindex);
+    BOOST_REQUIRE(pindex->GetBodyPos().IsNull());
+    BOOST_REQUIRE(!(pindex->nStatus & BLOCK_HAVE_BODY_RECORD));
+    BOOST_REQUIRE(!HaveBodies(pindex));
+
+    CCommitmentBlock commitments = CommitmentsFromBlock(block);
+    std::vector<CTransactionRef> bodies(block.vtx.begin() + 1, block.vtx.end());
+
+    CValidationState state;
+    BOOST_REQUIRE(::ChainstateActive().ProcessFetchedBodyRange(pindex, commitments, bodies, state, chainparams));
+
+    BOOST_CHECK(pindex->nStatus & BLOCK_HAVE_BODY_RECORD);
+    BOOST_CHECK(pindex->nStatus & BLOCK_HAVE_BODIES);
+    BOOST_CHECK(HaveBodies(pindex));
+    FlatFilePos pos = pindex->GetBodyPos();
+    BOOST_REQUIRE(!pos.IsNull());
+
+    std::vector<CTransactionRef> bodiesOut;
+    BOOST_REQUIRE(ReadBodyRecord(pos, bodiesOut));
+    BOOST_REQUIRE_EQUAL(bodiesOut.size(), bodies.size());
+    for (size_t i = 0; i < bodies.size(); i++) {
+        BOOST_CHECK(bodiesOut[i]->GetHash() == bodies[i]->GetHash());
+    }
+
+    FlatFilePos posOut;
+    BOOST_REQUIRE(LookupServeableBodyPositionByHash(hash, posOut));
+    BOOST_CHECK_EQUAL(posOut.nFile, pos.nFile);
+    BOOST_CHECK_EQUAL(posOut.nPos, pos.nPos);
+
+    // The point of the mechanism: the block must become connectable, not
+    // just carry the right bits (same reasoning as
+    // unrequested_arrival_fills_a_commitment_only_block above).
+    CValidationState activateState;
+    BOOST_REQUIRE(::ChainstateActive().ActivateBestChain(activateState, chainparams, nullptr));
+    BOOST_CHECK(::ChainActive().Tip()->GetBlockHash() == hash);
+}
+
+// A peer that answers with bodies not matching the block's committed
+// identifiers is THAT PEER's fault, not a fact about the block -- must not
+// permanently fail the block (BLOCK_FAILED_VALID), unlike a genuine
+// body-dependent consensus violation (the next test).
+BOOST_AUTO_TEST_CASE(process_fetched_body_range_rejects_a_hash_mismatch_without_failing_the_block) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    const CChainParams &chainparams = Params();
+
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock block = CreateBlock({spendTx}, coinbaseKey);
+    std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
+    uint256 hash = block.GetHash();
+
+    CBlockIndex *pindex;
+    {
+        PerfWithholdGuard guard(hash);
+        BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblock, /*fForceProcessing=*/true, nullptr));
+    }
+    pindex = LookupBlockIndex(hash);
+    BOOST_REQUIRE(pindex != nullptr);
+    SimulateBodyRecordNeverWritten(pindex);
+
+    CCommitmentBlock commitments = CommitmentsFromBlock(block);
+    // A body that does not match the committed identifier at index 0 --
+    // MaterialiseBlock's own hash check must reject this.
+    CMutableTransaction wrongTx = MakeSpendOfCoinbase(m_coinbase_txns[1], coinbaseKey);
+    std::vector<CTransactionRef> wrongBodies = {MakeTransactionRef(wrongTx)};
+
+    CValidationState state;
+    BOOST_CHECK(!::ChainstateActive().ProcessFetchedBodyRange(pindex, commitments, wrongBodies, state, chainparams));
+    BOOST_CHECK(state.IsInvalid());
+    // This peer's own answer being wrong is not proof the BLOCK is invalid.
+    BOOST_CHECK(state.CorruptionPossible());
+    BOOST_CHECK(!(pindex->nStatus & BLOCK_FAILED_VALID));
+    // Nothing was written.
+    BOOST_CHECK(pindex->GetBodyPos().IsNull());
+    BOOST_CHECK(!(pindex->nStatus & BLOCK_HAVE_BODY_RECORD));
+    BOOST_CHECK(!HaveBodies(pindex));
+}
+
+// Unlike a hash mismatch (one specific peer's answer being wrong -- not a
+// fact about the block), a genuine body-dependent consensus violation IS a
+// fact about the block. This is the BLOCK_FAILED_VALID branch of
+// ProcessFetchedBodyRange -- untested until this case, despite the
+// hash-mismatch test's own comment above promising it ("the next test").
+//
+// Getting here needs care: AcceptBlock's own accept-time pipeline ALWAYS
+// runs the full CheckBlock/ContextualCheckBlock against today's only real
+// local CBlock, REGARDLESS of PerfWithholdGuard (which only defers the body
+// WRITE/claim, per validation.cpp's own comment on this -- "not actually
+// before any per-transaction work runs on today's only real path"). So a
+// block carrying a genuinely invalid non-coinbase tx can never reach
+// ProcessNewBlock's return true at all -- there is no way, with today's test
+// infrastructure, to get an INVALID block's own pindex into the index via
+// the normal accept path (matching F-139's still-open point: nothing yet
+// delivers a genuine standalone CCommitmentBlock over the wire, so a
+// genuinely commitment-only, never-locally-validated accept isn't
+// constructible today either).
+//
+// Instead: accept a real, VALID block (giving pindex a realistic chain
+// context -- pprev, height, time -- for ContextualCheckBlock to check
+// against), then hand ProcessFetchedBodyRange a COMMITMENTS/BODIES pair that
+// is internally self-consistent (MaterialiseBlock's hash check passes) but
+// commits to a structurally invalid transaction instead of the block's real
+// one -- isolating the test to exactly ProcessFetchedBodyRange's own error
+// handling for a genuine CheckBlock failure, independent of how that
+// mismatch could arise in a not-yet-built real commitment-only accept.
+// ProcessFetchedBodyRange itself does not (and structurally cannot, without
+// a real commitment-only accept path to compare against) cross-check
+// `commitments` against `pindexNew`'s own true original content -- the real
+// production caller (net_processing.cpp) always sources `commitments` via
+// ReadCommitmentBlockFromDisk(pindex), which guarantees this pairing by
+// construction; this test relies on the SAME latitude the hash-mismatch
+// test above already takes (a deliberately mismatched bodies/commitments
+// pair), just breaking a different half of the pairing.
+BOOST_AUTO_TEST_CASE(process_fetched_body_range_fails_the_block_on_a_genuine_body_dependent_violation) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    const CChainParams &chainparams = Params();
+
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock block = CreateBlock({spendTx}, coinbaseKey);
+    std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
+    uint256 hash = block.GetHash();
+
+    CBlockIndex *pindex;
+    {
+        PerfWithholdGuard guard(hash);
+        BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblock, /*fForceProcessing=*/true, nullptr));
+    }
+    pindex = LookupBlockIndex(hash);
+    BOOST_REQUIRE(pindex != nullptr);
+    SimulateBodyRecordNeverWritten(pindex);
+
+    // The real header + real coinbase (both already accepted and valid),
+    // but the ONE committed identifier swapped for a structurally invalid
+    // transaction's hash -- CheckTransaction's own "bad-txns-vout-negative"
+    // (consensus/tx_check.cpp), body-dependent since nothing about a
+    // non-coinbase tx's own field values is ever visible from the
+    // commitment view alone. Mutating after signing doesn't matter here:
+    // CheckBlock/ContextualCheckBlock never run script/signature
+    // verification (ConnectBlock's own job).
+    CCommitmentBlock commitments = CommitmentsFromBlock(block);
+    CMutableTransaction invalidTx(spendTx);
+    invalidTx.vout[0].nValue = -1;
+    CTransactionRef invalidTxRef = MakeTransactionRef(invalidTx);
+    // CreateBlock may add more than just spendTx (e.g. a founder/masternode
+    // payment) -- find spendTx's own committed slot rather than assume
+    // index 0, and substitute the invalid tx only there.
+    std::vector<CTransactionRef> bodies(block.vtx.begin() + 1, block.vtx.end());
+    bool fFoundSpendTx = false;
+    for (size_t i = 0; i < bodies.size(); i++) {
+        if (bodies[i]->GetHash() == spendTx.GetHash()) {
+            commitments.vCommitments[i] = invalidTxRef->GetHash();
+            bodies[i] = invalidTxRef;
+            fFoundSpendTx = true;
+            break;
+        }
+    }
+    BOOST_REQUIRE(fFoundSpendTx);
+
+    CValidationState state;
+    BOOST_CHECK(!::ChainstateActive().ProcessFetchedBodyRange(pindex, commitments, bodies, state, chainparams));
+    BOOST_CHECK(state.IsInvalid());
+    // The critical distinction from the hash-mismatch test above: this is a
+    // real consensus violation, not a single peer's bad answer -- it must be
+    // stamped permanently invalid, not excused as corruption.
+    BOOST_CHECK(!state.CorruptionPossible());
+    BOOST_CHECK(pindex->nStatus & BLOCK_FAILED_VALID);
+    // Nothing was written -- the failure is caught before any disk write.
+    BOOST_CHECK(pindex->GetBodyPos().IsNull());
+    BOOST_CHECK(!(pindex->nStatus & BLOCK_HAVE_BODY_RECORD));
+    BOOST_CHECK(!HaveBodies(pindex));
+}
+
+// Defensive no-op: a pindex that already has bodies (an unsolicited/stale/
+// duplicate arrival, or simply the wrong call site) must not be touched --
+// the caller's own in-flight bookkeeping is what should have filtered this
+// out; this is a second, independent guard, not the only one.
+BOOST_AUTO_TEST_CASE(process_fetched_body_range_is_a_noop_when_bodies_are_already_held) {
+    const CChainParams &chainparams = Params();
+
+    CBlock block = CreateAndProcessBlock({}, coinbaseKey);
+    uint256 hash = block.GetHash();
+    CBlockIndex *pindex = LookupBlockIndex(hash);
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(HaveBodies(pindex));
+    FlatFilePos posBefore = pindex->GetBodyPos();
+
+    CCommitmentBlock commitments = CommitmentsFromBlock(block);
+    std::vector<CTransactionRef> bodies(block.vtx.begin() + 1, block.vtx.end());
+
+    CValidationState state;
+    BOOST_CHECK(!::ChainstateActive().ProcessFetchedBodyRange(pindex, commitments, bodies, state, chainparams));
+    BOOST_CHECK(state.IsValid());  // a no-op, not a rejection
+    BOOST_CHECK_EQUAL(pindex->GetBodyPos().nFile, posBefore.nFile);
+    BOOST_CHECK_EQUAL(pindex->GetBodyPos().nPos, posBefore.nPos);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

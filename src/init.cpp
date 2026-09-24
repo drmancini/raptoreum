@@ -15,6 +15,7 @@
 #include <amount.h>
 #include <banman.h>
 #include <base58.h>
+#include <bodyrange.h>
 #include <chain.h>
 #include <chainparams.h>
 #include <checkpoints.h>
@@ -810,6 +811,18 @@ void SetupServerArgs() {
                  "F-149/F-150/F-151). Off by default -- this handler has no per-connection rate "
                  "limit yet (F-150's own MEDIUM finding, still open pending 2.2.3b's budget "
                  "layer), so it must not run on a live/exposed network unopted-in. (default: 0)",
+                 ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    gArgs.AddArg("-maxbodyrangeinflight=<n>",
+                 strprintf("Test-only: the aggregate cap on in-flight GETBODYRANGE requests across "
+                           "all peers at once (2.2.4's fetching client, build-plan.md's 2.2 row). "
+                           "Not per-peer -- a separate, still-unbuilt concern. (default: %u)",
+                           DEFAULT_MAX_BODYRANGE_INFLIGHT),
+                 ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    gArgs.AddArg("-fetchbodyrange",
+                 "Test-only: issue GETBODYRANGE requests to fetch bodies for commitment-only "
+                 "blocks (2.2.4's single-source fetch client, build-plan.md's 2.2 row). Off by "
+                 "default, matching -servebodyrange's own precedent -- multi-source scoring is a "
+                 "later phase and this path has not run against a live/exposed network. (default: 0)",
                  ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     gArgs.AddArg("-checkblocks=<n>",
                  strprintf("How many blocks to check at startup (default: %u, 0 = all)", DEFAULT_CHECKBLOCKS),

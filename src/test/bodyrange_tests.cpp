@@ -515,4 +515,177 @@ BOOST_AUTO_TEST_CASE(build_response_does_not_hammer_reads_past_the_records_real_
     BOOST_CHECK(elapsed < std::chrono::seconds(5));
 }
 
+// 2.2.4 (build-plan.md's 2.2 row): the fetching CLIENT's own response-shape
+// check, before MaterialiseBlock ever sees the bodies. Pure, no I/O, no
+// cs_main -- matches this file's own established split.
+BOOST_AUTO_TEST_CASE(validate_response_accepts_a_well_formed_answer) {
+    CGetBodyRange req;
+    req.hashBlock = uint256S("0x301");
+    req.nStartIndex = 0;
+    req.nCount = 2;
+
+    CBodyRange resp;
+    resp.hashBlock = req.hashBlock;
+    resp.nStartIndex = req.nStartIndex;
+    resp.vBodies = {MakeBodyTx(1)};  // fewer than nCount -- legal truncation
+
+    BOOST_CHECK(ValidateBodyRangeResponse(req, resp));
+}
+
+BOOST_AUTO_TEST_CASE(validate_response_accepts_an_honest_empty_miss) {
+    CGetBodyRange req;
+    req.hashBlock = uint256S("0x302");
+    req.nStartIndex = 0;
+    req.nCount = 5;
+
+    CBodyRange resp;
+    resp.hashBlock = req.hashBlock;
+    resp.nStartIndex = req.nStartIndex;
+    // vBodies left empty.
+
+    BOOST_CHECK(ValidateBodyRangeResponse(req, resp));
+}
+
+BOOST_AUTO_TEST_CASE(validate_response_rejects_a_hash_mismatch) {
+    CGetBodyRange req;
+    req.hashBlock = uint256S("0x303");
+    req.nStartIndex = 0;
+    req.nCount = 1;
+
+    CBodyRange resp;
+    resp.hashBlock = uint256S("0x999");  // a different block entirely
+    resp.nStartIndex = req.nStartIndex;
+    resp.vBodies = {MakeBodyTx(1)};
+
+    BOOST_CHECK(!ValidateBodyRangeResponse(req, resp));
+}
+
+BOOST_AUTO_TEST_CASE(validate_response_rejects_a_start_index_mismatch) {
+    CGetBodyRange req;
+    req.hashBlock = uint256S("0x304");
+    req.nStartIndex = 3;
+    req.nCount = 1;
+
+    CBodyRange resp;
+    resp.hashBlock = req.hashBlock;
+    resp.nStartIndex = 0;  // does not echo the request
+    resp.vBodies = {MakeBodyTx(1)};
+
+    BOOST_CHECK(!ValidateBodyRangeResponse(req, resp));
+}
+
+// The over-delivery check's own boundary: exactly nCount bodies is a full,
+// non-truncated delivery and must be ACCEPTED, not rejected -- proves the
+// check is `>` (strictly more than asked), not `>=` (mutation-found gap:
+// every other passing-response test here uses fewer than nCount, so a `>=`
+// mutant that wrongly rejects an exact, legitimate full delivery survived
+// undetected until this case was added).
+BOOST_AUTO_TEST_CASE(validate_response_accepts_exactly_ncount_bodies) {
+    CGetBodyRange req;
+    req.hashBlock = uint256S("0x3045");
+    req.nStartIndex = 0;
+    req.nCount = 2;
+
+    CBodyRange resp;
+    resp.hashBlock = req.hashBlock;
+    resp.nStartIndex = req.nStartIndex;
+    resp.vBodies = {MakeBodyTx(1), MakeBodyTx(2)};  // exactly nCount, not fewer
+
+    BOOST_CHECK(ValidateBodyRangeResponse(req, resp));
+}
+
+BOOST_AUTO_TEST_CASE(validate_response_rejects_over_delivery) {
+    CGetBodyRange req;
+    req.hashBlock = uint256S("0x305");
+    req.nStartIndex = 0;
+    req.nCount = 1;
+
+    CBodyRange resp;
+    resp.hashBlock = req.hashBlock;
+    resp.nStartIndex = req.nStartIndex;
+    resp.vBodies = {MakeBodyTx(1), MakeBodyTx(2)};  // 2 > nCount==1
+
+    BOOST_CHECK(!ValidateBodyRangeResponse(req, resp));
+}
+
+BOOST_AUTO_TEST_CASE(validate_response_rejects_a_null_body_entry) {
+    CGetBodyRange req;
+    req.hashBlock = uint256S("0x306");
+    req.nStartIndex = 0;
+    req.nCount = 2;
+
+    CBodyRange resp;
+    resp.hashBlock = req.hashBlock;
+    resp.nStartIndex = req.nStartIndex;
+    resp.vBodies = {MakeBodyTx(1), CTransactionRef()};  // a hole
+
+    BOOST_CHECK(!ValidateBodyRangeResponse(req, resp));
+}
+
+// 2.2.4: the aggregate-cap-and-eligibility decision, pure and testable
+// without CNodeState/CAnnouncerRing/g_body_retry_state scaffolding.
+BOOST_AUTO_TEST_CASE(should_request_allows_an_eligible_ready_uncapped_candidate) {
+    BOOST_CHECK(ShouldRequestBodyRange(/*fWasAnnounced=*/true, /*nNow=*/1000, /*nNextAttempt=*/500,
+                                         /*nInFlight=*/2, /*nMaxInFlight=*/10));
+}
+
+BOOST_AUTO_TEST_CASE(should_request_refuses_a_peer_that_never_announced) {
+    BOOST_CHECK(!ShouldRequestBodyRange(/*fWasAnnounced=*/false, /*nNow=*/1000, /*nNextAttempt=*/500,
+                                          /*nInFlight=*/2, /*nMaxInFlight=*/10));
+}
+
+BOOST_AUTO_TEST_CASE(should_request_refuses_before_the_backoff_deadline) {
+    BOOST_CHECK(!ShouldRequestBodyRange(/*fWasAnnounced=*/true, /*nNow=*/499, /*nNextAttempt=*/500,
+                                          /*nInFlight=*/2, /*nMaxInFlight=*/10));
+}
+
+BOOST_AUTO_TEST_CASE(should_request_allows_exactly_at_the_backoff_deadline) {
+    // Boundary: nNow == nNextAttempt must be allowed, not just nNow > nNextAttempt --
+    // matches net_processing.cpp's existing whole-block retry boundary
+    // (`nNowRetry < retry.nNextAttempt` skips; the equal case falls through).
+    BOOST_CHECK(ShouldRequestBodyRange(/*fWasAnnounced=*/true, /*nNow=*/500, /*nNextAttempt=*/500,
+                                         /*nInFlight=*/2, /*nMaxInFlight=*/10));
+}
+
+BOOST_AUTO_TEST_CASE(should_request_refuses_once_the_aggregate_cap_is_saturated) {
+    BOOST_CHECK(!ShouldRequestBodyRange(/*fWasAnnounced=*/true, /*nNow=*/1000, /*nNextAttempt=*/500,
+                                          /*nInFlight=*/10, /*nMaxInFlight=*/10));
+}
+
+BOOST_AUTO_TEST_CASE(should_request_allows_one_below_the_aggregate_cap) {
+    BOOST_CHECK(ShouldRequestBodyRange(/*fWasAnnounced=*/true, /*nNow=*/1000, /*nNextAttempt=*/500,
+                                         /*nInFlight=*/9, /*nMaxInFlight=*/10));
+}
+
+// 2.2.4: NextBodyRetryBackoffMicros -- the exact arithmetic 1.3.6/H-2's
+// original whole-block g_body_retry_state site used inline, factored out
+// so 2.2.4's own GETBODYRANGE call site (net_processing.cpp) reuses it
+// rather than duplicating the shift/clamp a second time.
+BOOST_AUTO_TEST_CASE(backoff_doubles_per_attempt_before_the_shift_cap) {
+    int64_t base = 1000000;
+    int64_t max = 30000000;
+    BOOST_CHECK_EQUAL(NextBodyRetryBackoffMicros(1, base, max), base);          // 1s
+    BOOST_CHECK_EQUAL(NextBodyRetryBackoffMicros(2, base, max), base * 2);      // 2s
+    BOOST_CHECK_EQUAL(NextBodyRetryBackoffMicros(3, base, max), base * 4);      // 4s
+    BOOST_CHECK_EQUAL(NextBodyRetryBackoffMicros(4, base, max), base * 8);      // 8s
+    BOOST_CHECK_EQUAL(NextBodyRetryBackoffMicros(5, base, max), base * 16);     // 16s
+}
+
+// Attempt 6 and beyond shift by the same clamped 5 -- base*32 (32s) here,
+// with the ceiling raised so it's the SHIFT clamp under test, not the max.
+BOOST_AUTO_TEST_CASE(backoff_shift_is_clamped_past_six_attempts) {
+    int64_t base = 1000000;
+    int64_t max = 60000000;
+    BOOST_CHECK_EQUAL(NextBodyRetryBackoffMicros(6, base, max), base * 32);
+    BOOST_CHECK_EQUAL(NextBodyRetryBackoffMicros(7, base, max), base * 32);
+    BOOST_CHECK_EQUAL(NextBodyRetryBackoffMicros(100, base, max), base * 32);
+}
+
+BOOST_AUTO_TEST_CASE(backoff_is_clamped_to_the_max) {
+    int64_t base = 1000000;
+    int64_t max = 30000000;
+    BOOST_CHECK_EQUAL(NextBodyRetryBackoffMicros(5, base, max), 16000000); // under max, unclamped
+    BOOST_CHECK_EQUAL(NextBodyRetryBackoffMicros(6, base, max), max);     // 32s would exceed 30s max
+}
+
 BOOST_AUTO_TEST_SUITE_END()
