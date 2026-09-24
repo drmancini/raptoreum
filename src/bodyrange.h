@@ -240,4 +240,28 @@ bool ShouldRequestBodyRange(bool fWasAnnounced, int64_t nNow, int64_t nNextAttem
  *  call site's own order. */
 int64_t NextBodyRetryBackoffMicros(unsigned int nAttempts, int64_t nBaseMicros, int64_t nMaxMicros);
 
+/** 2.2.4: is an in-flight GETBODYRANGE request against a peer stale enough
+ *  to reap -- a peer that stays CONNECTED but never answers at all is not
+ *  caught by any existing mechanism: `PeerLogicValidation::FinalizeNode`
+ *  only frees a `mapBodyRangeInFlight` slot on disconnect, and the existing
+ *  whole-block stalling/download timeouts (`BLOCK_STALLING_TIMEOUT`,
+ *  `BLOCK_DOWNLOAD_TIMEOUT_*`) are driven by `state.nBlocksInFlight` /
+ *  `vBlocksInFlight`, which a GETBODYRANGE request never touches
+ *  (`mapBodyRangeInFlight` is a wholly separate accounting structure, only
+ *  ever populated/cleared by 2.2.4's own code). Left unreaped, a single
+ *  silently-unresponsive-but-connected peer permanently narrows the
+ *  aggregate cap (`nBodyRangeInFlight`) by one slot for as long as it stays
+ *  connected -- across enough such peers, exhausts it entirely.
+ *
+ *  Pure, taking every input as a plain value (this project's own established
+ *  split, matching `ShouldRequestBodyRange`) -- `nStaleAfterMicros` is the
+ *  caller's own choice of how long is too long; net_processing.cpp's own
+ *  caller reuses `BODY_RETRY_MAX_MICROS` (the existing backoff ceiling)
+ *  rather than a new constant: "longer than the longest gap this mechanism
+ *  would ever wait between its OWN retries" is already an established
+ *  notion of "too long" here, not an invented one -- matching build-plan.md
+ *  2.2.4's own "not new backoff logic" instruction in spirit, even though
+ *  this isn't backoff arithmetic itself. */
+bool IsBodyRangeRequestStale(int64_t nRequestTime, int64_t nNow, int64_t nStaleAfterMicros);
+
 #endif // BITCOIN_BODYRANGE_H

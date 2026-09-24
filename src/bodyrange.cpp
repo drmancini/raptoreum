@@ -82,3 +82,7 @@ int64_t NextBodyRetryBackoffMicros(unsigned int nAttempts, int64_t nBaseMicros, 
     int64_t nBackoff = nBaseMicros << std::min(nAttempts - 1, 5U);
     return std::min(nBackoff, nMaxMicros);
 }
+
+bool IsBodyRangeRequestStale(int64_t nRequestTime, int64_t nNow, int64_t nStaleAfterMicros) {
+    return nNow - nRequestTime > nStaleAfterMicros;
+}
