@@ -688,4 +688,31 @@ BOOST_AUTO_TEST_CASE(backoff_is_clamped_to_the_max) {
     BOOST_CHECK_EQUAL(NextBodyRetryBackoffMicros(6, base, max), max);     // 32s would exceed 30s max
 }
 
+// 2.2.4: IsBodyRangeRequestStale -- the reaper check for a connected-but-
+// silent peer holding an aggregate-cap slot forever (no existing mechanism
+// catches this: FinalizeNode only frees it on disconnect, and the
+// whole-block stalling timeouts don't apply to mapBodyRangeInFlight at all).
+BOOST_AUTO_TEST_CASE(stale_check_allows_a_fresh_request_to_stand) {
+    BOOST_CHECK(!IsBodyRangeRequestStale(/*nRequestTime=*/1000, /*nNow=*/1500,
+                                          /*nStaleAfterMicros=*/30000000));
+}
+
+BOOST_AUTO_TEST_CASE(stale_check_allows_a_request_exactly_at_the_boundary) {
+    // Boundary: nNow - nRequestTime == nStaleAfterMicros must NOT be stale
+    // yet -- only strictly past it is (matches ShouldRequestBodyRange's own
+    // "equal is not yet expired" convention for its backoff boundary).
+    BOOST_CHECK(!IsBodyRangeRequestStale(/*nRequestTime=*/0, /*nNow=*/30000000,
+                                          /*nStaleAfterMicros=*/30000000));
+}
+
+BOOST_AUTO_TEST_CASE(stale_check_reaps_a_request_one_micro_past_the_boundary) {
+    BOOST_CHECK(IsBodyRangeRequestStale(/*nRequestTime=*/0, /*nNow=*/30000001,
+                                         /*nStaleAfterMicros=*/30000000));
+}
+
+BOOST_AUTO_TEST_CASE(stale_check_reaps_a_long_silent_request) {
+    BOOST_CHECK(IsBodyRangeRequestStale(/*nRequestTime=*/0, /*nNow=*/600000000,
+                                         /*nStaleAfterMicros=*/30000000));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

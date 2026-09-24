@@ -5342,6 +5342,28 @@ bool PeerLogicValidation::SendMessages(CNode *pto) {
         // C1, not built here). The aggregate cap (nBodyRangeInFlight vs.
         // -maxbodyrangeinflight) is checked per candidate, last, by
         // ShouldRequestBodyRange (bodyrange.h).
+        if (gArgs.GetBoolArg("-fetchbodyrange", false)) {
+            // 2.2.4: reap any in-flight request stuck against a peer that
+            // stayed CONNECTED but never answered at all -- IsBodyRangeRequestStale's
+            // own doc (bodyrange.h) explains why nothing else catches this.
+            // Runs on every peer's SendMessages pass (not gated on THIS
+            // peer's own vBodyBlocks/CanReceiveCommitments eligibility below),
+            // since a stale slot can be held against any peer while a wholly
+            // different peer is the one currently calling SendMessages.
+            // mapBodyRangePartial is left alone -- bodies already received
+            // and shape-validated are still good for whichever peer resumes
+            // the fetch (matches FinalizeNode's own disconnect-cleanup
+            // convention).
+            for (auto it = mapBodyRangeInFlight.begin(); it != mapBodyRangeInFlight.end();) {
+                if (IsBodyRangeRequestStale(it->second.nRequestTime, nNow, BODY_RETRY_MAX_MICROS)) {
+                    it = mapBodyRangeInFlight.erase(it);
+                    nBodyRangeInFlight--;
+                } else {
+                    ++it;
+                }
+            }
+        }
+
         if (gArgs.GetBoolArg("-fetchbodyrange", false) && !pto->fClient && pto->CanRelay() &&
             !vBodyBlocks.empty() && CanReceiveCommitments(pto->nServices)) {
             unsigned int nMaxBodyRangeInFlight =
