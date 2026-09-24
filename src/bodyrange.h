@@ -152,4 +152,92 @@ GetBodyRangeValidation ValidateGetBodyRange(const CGetBodyRange &request, FlatFi
 void BuildBodyRangeResponse(const CGetBodyRange &request, const FlatFilePos &pos,
                              uint64_t nByteCeiling, CBodyRange &respOut);
 
+/** 2.2.4 (the fetching CLIENT's own counterpart to ValidateGetBodyRange,
+ *  build-plan.md's 2.2 row): checks a BODYRANGE response's WIRE SHAPE
+ *  against the CGetBodyRange that solicited it, before any attempt to
+ *  MaterialiseBlock the bodies it carries. Purely a shape check -- it does
+ *  NOT know whether this exact request was ever actually sent to the peer
+ *  that answered (the caller's own in-flight bookkeeping's job, since that
+ *  needs a NodeId this function has no reason to depend on) and does NOT
+ *  validate the bodies' own content against the block's committed
+ *  identifiers (MaterialiseBlock's job, once this passes).
+ *
+ *  Fails (returns false) if:
+ *   - `response.hashBlock` does not echo `request.hashBlock` -- an honest
+ *     server always echoes what it actually served (bodyrange.h's own
+ *     CBodyRange::hashBlock doc, F-143's "response-must-echo" rule); a
+ *     mismatch here is never innocent for THIS specific request/response
+ *     pairing, whatever else might explain a stale or reordered message;
+ *   - `response.nStartIndex` does not echo `request.nStartIndex` -- there
+ *     is no wire reason it should ever legitimately differ;
+ *   - `response.vBodies.size()` exceeds `request.nCount` -- over-delivery.
+ *     `BuildBodyRangeResponse`'s own truncate-only continuation contract
+ *     can only ever return FEWER bodies than asked for, never more, so
+ *     this can only mean the response was not built by that function (or
+ *     wasn't for this request);
+ *   - any entry in `response.vBodies` is a null `CTransactionRef` -- a
+ *     genuine mid-range read failure on the SERVING side truncates rather
+ *     than leaving a hole (bodyrange.h's own `BuildBodyRangeResponse` doc,
+ *     F-147's deferred requirement) -- enforced here, on the reading side,
+ *     since nothing about how a response is BUILT changes for 2.2.4.
+ *
+ *  An EMPTY `vBodies` (an honest miss, per `CBodyRange`'s own doc) always
+ *  passes this shape check: it echoes hashBlock/nStartIndex like any other
+ *  honest response and zero bodies is never over-delivery. Telling an
+ *  honest miss apart from a withholding announcer is the CALLER's own job
+ *  (2.2.4's announcer-ring classification), not this function's. */
+bool ValidateBodyRangeResponse(const CGetBodyRange &request, const CBodyRange &response);
+
+/** 2.2.4 (build-plan.md's 2.2 row): the default aggregate cap on in-flight
+ *  GETBODYRANGE requests across ALL peers at once (net_processing.cpp's own
+ *  fetching client) -- not per-peer, a separate, still-unbuilt concern.
+ *  Shared between net_processing.cpp (the cap's own enforcement) and
+ *  init.cpp (the -maxbodyrangeinflight help text default), matching
+ *  DEFAULT_CHECKBLOCKS's own cross-file placement (validation.h). Single-
+ *  source fetching has no reason to chase many bodies at once, so the
+ *  default is conservative. */
+static const unsigned int DEFAULT_MAX_BODYRANGE_INFLIGHT = 16;
+
+/** 2.2.4: the aggregate concurrent-chase cap's own eligibility check for a
+ *  single (peer, block) candidate -- pure decision logic, deliberately
+ *  taking every input as a plain value rather than reaching into
+ *  CNodeState/CAnnouncerRing/g_body_retry_state itself, so it is testable
+ *  without any net_processing.cpp scaffolding (this project's own
+ *  established split, matching ValidateGetBodyRange/BuildBodyRangeResponse).
+ *
+ *  `fWasAnnounced`: the candidate peer's own CAnnouncerRing::WasAnnounced
+ *  verdict for this block -- 2.2.4 is single-source only (no multi-source
+ *  scoring, a later phase, build-plan.md's own scope note), so a peer that
+ *  never announced this hash is never a candidate, however otherwise idle.
+ *  `nNow`/`nNextAttempt`: the re-keyed g_body_retry_state entry for this
+ *  exact (peer, hash) pair -- reuses net_processing.cpp's EXISTING backoff
+ *  arithmetic unchanged (only what the map is keyed on changed, per
+ *  build-plan.md's 2.2.4 row); this function does not compute a backoff
+ *  itself, it only asks whether the existing `nNextAttempt` has passed.
+ *  `nInFlight`/`nMaxInFlight`: the aggregate cap, checked LAST since it is a
+ *  global resource limit unrelated to this specific peer/hash pair's own
+ *  eligibility -- a peer that is otherwise perfectly eligible still does
+ *  not get a request once the cap is saturated. */
+bool ShouldRequestBodyRange(bool fWasAnnounced, int64_t nNow, int64_t nNextAttempt,
+                             unsigned int nInFlight, unsigned int nMaxInFlight);
+
+/** B3's per-block exponential backoff (docs/transaction-decoupling.md SS14.8:
+ *  "must not key off accumulated work"), re-keyed to (peer, hash) rather
+ *  than a bare hash (net_processing.cpp's own re-keyed g_body_retry_state --
+ *  build-plan.md's 2.2.4 row: "re-keying the existing g_body_retry_state
+ *  backoff to body-ranges, not new backoff logic"). This is the SAME
+ *  arithmetic 1.3.6/H-2's original whole-block call site used inline
+ *  (`BODY_RETRY_BASE_MICROS << std::min(nAttempts - 1, 5U)`, clamped to
+ *  `nMaxMicros`) -- reused verbatim, not reinvented, factored out here as a
+ *  named, independently testable function rather than copy-pasted inline a
+ *  second time at 2.2.4's own single-source GETBODYRANGE call site
+ *  (SendMessages), which is this function's only real caller today: the
+ *  original whole-block site no longer backs off at all (its own comment,
+ *  net_processing.cpp -- that failure mode moved entirely to the
+ *  GETBODYRANGE path once a commitment-only block's missing body became
+ *  THIS mechanism's job instead). `nAttempts` must be >= 1 -- the caller
+ *  increments its own counter before calling, matching the original inline
+ *  call site's own order. */
+int64_t NextBodyRetryBackoffMicros(unsigned int nAttempts, int64_t nBaseMicros, int64_t nMaxMicros);
+
 #endif // BITCOIN_BODYRANGE_H

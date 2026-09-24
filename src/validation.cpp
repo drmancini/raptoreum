@@ -5046,6 +5046,107 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock> &pblock, CVali
     return true;
 }
 
+// 2.2.4 (build-plan.md's 2.2 row, F-139's own spec, F-133/F-135's crash-
+// ordering discipline applied to a SECOND call site): the body-ARRIVAL
+// write path. AcceptBlock's own SaveBodyToDisk always runs against a
+// CBlock this binary already holds whole -- the only shape any accept path
+// produces today (a real commitment-only relay/accept is 4.1's own still-
+// unbuilt job). This is the write path for the genuinely different case
+// 2.2's own fetch protocol exists for: a pindex whose commitments were
+// accepted from something OTHER than a full local CBlock, so no body
+// record was ever written for it, and bytes are now arriving separately,
+// fetched over GETBODYRANGE.
+bool CChainState::ProcessFetchedBodyRange(CBlockIndex *pindexNew, const CCommitmentBlock &commitments,
+                                          const std::vector<CTransactionRef> &bodies,
+                                          CValidationState &state, const CChainParams &chainparams) {
+    AssertLockHeld(cs_main);
+    assert(pindexNew != nullptr);
+
+    if (!(pindexNew->nStatus & BLOCK_HAVE_DATA) || HaveBodies(pindexNew)) {
+        // Not this function's job: either the commitments themselves are
+        // not yet known (nothing to materialise against -- this function
+        // never discovers a block, only fills one in), or the bodies are
+        // already held (a stale/duplicate/unsolicited arrival). The
+        // caller's own in-flight bookkeeping should already have filtered
+        // this out; this is a second, independent guard, not the only one.
+        // A no-op, not a failure -- state is left valid.
+        return false;
+    }
+
+    // MaterialiseBlock's own hash check (primitives/block.cpp): every body
+    // must match the identifier commitments already committed this block
+    // to. A failure here is the ANSWERING PEER's fault, not a fact about
+    // the block -- corruptionIn=true (mirrored from CValidationState::DoS,
+    // consensus/validation.h) is what keeps the guard below from marking
+    // BLOCK_FAILED_VALID over a single bad answer; the caller (which has
+    // the NodeId this function deliberately does not) decides what a
+    // CorruptionPossible() failure means for the peer that supplied it.
+    CBlock materialised;
+    if (!MaterialiseBlock(commitments, bodies, materialised)) {
+        return state.DoS(20, false, REJECT_INVALID, "bodyrange-hash-mismatch", /*corruptionIn=*/true,
+                         "fetched bodies do not match the block's committed identifiers");
+    }
+
+    // The body-dependent rows a commitment-only accept could not run --
+    // CheckCommitmentBlock/ContextualCheckCommitmentBlock (or this
+    // function's own caller's real-world equivalent) already covered every
+    // commitment-checkable row; what CheckBlock/ContextualCheckBlock's full
+    // form newly runs here is genuinely body-dependent: per-body
+    // CheckTransaction/ContextualCheckTransaction, the real accurate sigop
+    // count, the real serialized-byte size limit (CheckCommitmentBlock's own
+    // doc: its count-only bound is necessary but not sufficient), and the
+    // aggregate input-count limit. fCheckPOW=false: PoW was already verified
+    // when the header itself was accepted (pindexNew could not exist
+    // otherwise). fCheckMerkleRoot=false: the materialised block's merkle
+    // root over real tx hashes is PROVABLY identical to the identifier-list
+    // merkle root a commitment-only accept already verified -- MaterialiseBlock
+    // itself enforces bodies[i]->GetHash() == commitments.vCommitments[i] for
+    // every i, so the two merkle inputs are the same ordered hash list by
+    // construction; re-checking it here would be redundant, not additional
+    // safety. Matches AcceptBlock's own precedent of always running both full
+    // forms regardless of what a commitment-only pass already did -- the
+    // remaining redundant rows here (ContextualCheckBlock's own per-tx-loop
+    // coinbase-height/CbTx checks) are cheap and left unskipped rather than
+    // threading a second set of flags through it.
+    if (!CheckBlock(materialised, state, chainparams.GetConsensus(), pindexNew->nHeight,
+                    /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/false) ||
+        !ContextualCheckBlock(materialised, state, chainparams.GetConsensus(), pindexNew->pprev)) {
+        if (state.IsInvalid() && !state.CorruptionPossible()) {
+            pindexNew->nStatus |= BLOCK_FAILED_VALID;
+            setDirtyBlockIndex.insert(pindexNew);
+        }
+        return false;
+    }
+
+    // F-133/F-135's crash-ordering discipline, applied here: the body bytes
+    // must be durably written BEFORE anything claims them. SaveBodyToDisk
+    // (this file, static) is AcceptBlock's own unconditional write path,
+    // reused as-is rather than duplicated -- it already does exactly
+    // "extract vtx[1..], compute the exact size, FindBodyPos, WriteBodyRecord".
+    FlatFilePos bodyPos = SaveBodyToDisk(materialised);
+    if (bodyPos.IsNull()) {
+        return state.Error(strprintf("%s: Failed to find position to write fetched bodies to disk", __func__));
+    }
+
+    // Position and BLOCK_HAVE_BODY_RECORD together, exactly
+    // ReceivedBlockTransactions's own unconditional ordering for this pair
+    // (F-135) -- "we know where these bytes are", true the instant the write
+    // above succeeded.
+    pindexNew->nBodyFile = bodyPos.nFile;
+    pindexNew->nBodyPos = bodyPos.nPos;
+    pindexNew->nStatus |= BLOCK_HAVE_BODY_RECORD;
+    RecordBodyPositionByHash(pindexNew->GetBlockHash(), bodyPos, /*fServeable=*/true);
+    setDirtyBlockIndex.insert(pindexNew);
+
+    // BLOCK_HAVE_BODIES itself, the descendant-unparking walk, and the
+    // index's own re-affirmation (redundant with the line above, harmless --
+    // RecordBodyPositionByHash's own doc) are ReceivedBlockBodies's job,
+    // reused rather than duplicated -- the exact function AcceptBlock's own
+    // withhold-then-arrival path already uses for this half of the sequence.
+    ReceivedBlockBodies(pindexNew);
+    return true;
+}
+
 bool ChainstateManager::ProcessNewBlock(const CChainParams &chainparams, const std::shared_ptr<const CBlock> pblock,
                                         bool fForceProcessing, bool *fNewBlock) {
     AssertLockNotHeld(cs_main);

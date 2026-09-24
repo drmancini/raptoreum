@@ -322,27 +322,70 @@ namespace {
     std::map <uint256, std::pair<NodeId, std::list<QueuedBlock>::iterator>> mapBlocksInFlight
     GUARDED_BY(cs_main);
 
-    /** 1.3.6 (H-2, Mike, 2026-09-20): per-block backoff for a body that keeps
-     *  getting delivered without ever resolving (a corrupt/rejected body once
-     *  Phase 2's real fetch protocol exists; today only reachable through the
-     *  -perfwithholdcount test harness). The existing per-peer stall/timeout
-     *  checks (BLOCK_STALLING_TIMEOUT, BLOCK_DOWNLOAD_TIMEOUT_*) only fire on
-     *  SILENCE -- MarkBlockAsReceived frees the in-flight slot on every
-     *  response regardless of outcome, so a peer that keeps answering but
-     *  never resolves the gap never triggers either timeout. Measured without
-     *  this: an unbounded, unpaced re-request loop (low thousands of
-     *  requests/second for a single block). Memory-only and self-cleaning
-     *  (erased the moment a block resolves, in FindNextBlocksToDownload
-     *  below) -- never persisted, never marks a block invalid, matching
-     *  build-plan row 1.3.6's own requirement. */
+    /** 1.3.6 (H-2, Mike, 2026-09-20): per-(peer, block) backoff for a body
+     *  that keeps getting requested without ever resolving. The existing
+     *  per-peer stall/timeout checks (BLOCK_STALLING_TIMEOUT,
+     *  BLOCK_DOWNLOAD_TIMEOUT_*) only fire on SILENCE -- MarkBlockAsReceived
+     *  frees the in-flight slot on every response regardless of outcome, so
+     *  a peer that keeps answering but never resolves the gap never triggers
+     *  either timeout. Measured without this: an unbounded, unpaced
+     *  re-request loop (low thousands of requests/second for a single
+     *  block). Memory-only and self-cleaning (erased the moment a block
+     *  resolves, in FindNextBlocksToDownload below) -- never persisted,
+     *  never marks a block invalid, matching build-plan row 1.3.6's own
+     *  requirement.
+     *
+     *  2.2.4 (build-plan.md's 2.2 row): RE-KEYED from a bare block hash to
+     *  (peer, hash) -- this mechanism's own real job (a body that keeps
+     *  getting delivered/requested without resolving) moved from the
+     *  whole-block MSG_BLOCK GETDATA path (1.3.6's original, only reachable
+     *  in practice through the -perfwithholdcount harness, since a real
+     *  MSG_BLOCK delivery always carries bodies) to the new single-source
+     *  GETBODYRANGE fetch path below, which is genuinely per-peer: a body
+     *  one peer fails to deliver must not silently back off a DIFFERENT peer
+     *  that also announced it (ShouldRequestBodyRange, bodyrange.h). The
+     *  backoff ARITHMETIC itself (BODY_RETRY_BASE_MICROS's doubling, capped
+     *  at BODY_RETRY_MAX_MICROS) is unchanged -- only what the map is keyed
+     *  on. */
     struct BodyRetryState {
         int64_t nNextAttempt = 0;
         unsigned int nAttempts = 0;
     };
-    std::map <uint256, BodyRetryState> g_body_retry_state
+    std::map <std::pair<NodeId, uint256>, BodyRetryState> g_body_retry_state
     GUARDED_BY(cs_main);
     static const int64_t BODY_RETRY_BASE_MICROS = 1000000;    // 1s
     static const int64_t BODY_RETRY_MAX_MICROS = 30000000;    // 30s cap
+
+    /** 2.2.4: the aggregate concurrent-chase cap -- bounds the total number
+     *  of in-flight GETBODYRANGE requests across ALL peers at once, not
+     *  per-peer (a separate, already-noted concern this phase does not
+     *  build). Config-driven, matching this file's own -servebodyrange
+     *  precedent for a still-developing 2.2.x feature; the default
+     *  (DEFAULT_MAX_BODYRANGE_INFLIGHT, bodyrange.h -- shared with init.cpp's
+     *  own help text) is conservative since single-source fetching has no
+     *  reason to chase many bodies at once. */
+    unsigned int nBodyRangeInFlight
+    GUARDED_BY(cs_main) = 0;
+
+    /** 2.2.4: one in-flight GETBODYRANGE request -- single-source, so at
+     *  most one entry per block hash at a time (a second peer is never asked
+     *  for the same block while one fetch is already outstanding; that is
+     *  multi-source scoring, a later phase). */
+    struct BodyRangeInFlight {
+        NodeId peer;
+        uint32_t nStartIndex;
+        uint32_t nCount;
+        int64_t nRequestTime;
+    };
+    std::map <uint256, BodyRangeInFlight> mapBodyRangeInFlight
+    GUARDED_BY(cs_main);
+
+    /** 2.2.4: bodies accumulated so far for a block whose full range needed
+     *  more than one chunk (the server's own truncate-only continuation
+     *  contract, bodyrange.h) -- keyed by hash, matching mapBodyRangeInFlight
+     *  (single-source: one accumulation in progress per block). */
+    std::map <uint256, std::vector<CTransactionRef>> mapBodyRangePartial
+    GUARDED_BY(cs_main);
 
     /** Stack of nodes which we have set to announce using compact blocks */
     std::list <NodeId> lNodesAnnouncingHeaderAndIDs
@@ -874,6 +917,7 @@ namespace {
 /** Update pindexLastCommonBlock and add not-in-flight missing successors to vBlocks, until it has
  *  at most count entries. */
     void FindNextBlocksToDownload(NodeId nodeid, unsigned int count, std::vector<const CBlockIndex *> &vBlocks,
+                                  std::vector<const CBlockIndex *> &vBodyBlocks,
                                   NodeId &nodeStaller, const Consensus::Params &consensusParams)
 
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
@@ -958,9 +1002,37 @@ namespace {
                                 // 1.3.6 (H-2): resolved -- forget any backoff state for it.
                                 // L-5 (F-119, full-arc adversarial review): erase() on a key the map
                                 // doesn't hold (map empty or otherwise) is already a safe no-op.
-                                g_body_retry_state.erase(pindex->GetBlockHash());
+                                // 2.2.4: re-keyed to (peer, hash) -- see g_body_retry_state's own
+                                // comment above.
+                                g_body_retry_state.erase({nodeid, pindex->GetBlockHash()});
+                            } else if (pindex->nStatus & BLOCK_HAVE_DATA) {
+                                // 2.2.4 (build-plan.md's 2.2 row): commitments already known,
+                                // only the body is missing -- this is now the NEW single-source
+                                // GETBODYRANGE fetch path's job (the "Message: getbodyrange"
+                                // section in SendMessages, below), not a redundant whole-block
+                                // GETDATA(MSG_BLOCK) that would re-download the commitments too.
+                                // Still counts as "behind the gap" and against the download
+                                // window, exactly as it did when this branch was folded into the
+                                // one below -- a peer stuck this way must still be able to stall
+                                // the peer-eviction/staller logic the way any other unresolved
+                                // gap does.
+                                fBehindGap = true;
+                                if (pindex->nHeight > nWindowEnd) {
+                                    if (vBlocks.size() == 0 && waitingfor != nodeid) {
+                                        nodeStaller = waitingfor;
+                                    }
+                                    return;
+                                }
+                                if (vBodyBlocks.size() < count) {
+                                    vBodyBlocks.push_back(pindex);
+                                }
                             } else if (mapBlocksInFlight.count(pindex->GetBlockHash()) == 0) {
-                                // The block is not already downloaded, and not yet in flight.
+                                // The block's commitments are not known at all -- ordinary
+                                // whole-block GETDATA(MSG_BLOCK), unchanged. g_body_retry_state's
+                                // own backoff does not apply here (2.2.4): that mechanism exists
+                                // for a body that keeps getting delivered/requested without ever
+                                // resolving an already-known commitment -- a block that is simply
+                                // not yet received has no such failure mode of its own.
                                 fBehindGap = true;
                                 if (pindex->nHeight > nWindowEnd) {
                                     // We reached the end of the window.
@@ -970,19 +1042,6 @@ namespace {
                                     }
                                     return;
                                 }
-                                // 1.3.6 (H-2): skip a block still cooling down from a
-                                // prior delivery that didn't resolve it -- see
-                                // g_body_retry_state's own comment above. A first-ever
-                                // request (nNextAttempt == 0) always goes through.
-                                int64_t nNowRetry = GetTimeMicros();
-                                BodyRetryState &retry = g_body_retry_state[pindex->GetBlockHash()];
-                                if (nNowRetry < retry.nNextAttempt) {
-                                    continue;
-                                }
-                                retry.nAttempts++;
-                                int64_t nBackoff = BODY_RETRY_BASE_MICROS
-                                                   << std::min(retry.nAttempts - 1, 5U);
-                                retry.nNextAttempt = nNowRetry + std::min(nBackoff, BODY_RETRY_MAX_MICROS);
                                 vBlocks.push_back(pindex);
                                 if (vBlocks.size() == count) {
                                     return;
@@ -1194,6 +1253,21 @@ void PeerLogicValidation::FinalizeNode(NodeId nodeid, bool &fUpdateConnectionTim
     for (const QueuedBlock &entry: state->vBlocksInFlight) {
         mapBlocksInFlight.erase(entry.hash);
     }
+    // 2.2.4: a GETBODYRANGE request outstanding against this peer can never
+    // be answered now -- free its aggregate-cap slot (nBodyRangeInFlight)
+    // and its single-source hash slot (mapBodyRangeInFlight), or that block
+    // could never be re-attempted, and a leaked slot would permanently
+    // narrow the cap for every other fetch. mapBodyRangePartial is left
+    // alone: bodies already received and shape-validated from this peer are
+    // still good, whichever peer answers the resumption.
+    for (auto it = mapBodyRangeInFlight.begin(); it != mapBodyRangeInFlight.end();) {
+        if (it->second.peer == nodeid) {
+            it = mapBodyRangeInFlight.erase(it);
+            nBodyRangeInFlight--;
+        } else {
+            ++it;
+        }
+    }
     EraseOrphansFor(nodeid);
     nPreferredDownload -= state->fPreferredDownload;
     nPeersWithValidatedDownloads -= (state->nBlocksInFlightValidHeaders != 0);
@@ -1209,6 +1283,11 @@ void PeerLogicValidation::FinalizeNode(NodeId nodeid, bool &fUpdateConnectionTim
         assert(nPreferredDownload == 0);
         assert(nPeersWithValidatedDownloads == 0);
         assert(g_outbound_peers_with_protect_from_disconnect == 0);
+        // 2.2.4: every mapBodyRangeInFlight entry names a peer, so once
+        // every peer is gone, none can remain -- same reasoning as
+        // mapBlocksInFlight above.
+        assert(mapBodyRangeInFlight.empty());
+        assert(nBodyRangeInFlight == 0);
     }
     LogPrint(BCLog::NET, "Cleared nodestate for peer=%d\n", nodeid);
 }
@@ -3385,6 +3464,98 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
         return true;
     }
 
+    if (strCommand == NetMsgType::BODYRANGE) {
+        // 2.2.4 (build-plan.md's 2.2 row): the fetching CLIENT's own
+        // response handler -- matches against this SPECIFIC peer's own
+        // in-flight request (single-source: a response from anyone else is
+        // stale/unsolicited, not a legitimate second source, and is simply
+        // ignored, not misbehaviour -- it could be a genuinely late answer
+        // to a request this node has since moved on from), validates the
+        // wire shape (ValidateBodyRangeResponse, bodyrange.h), accumulates
+        // across chunks, and on completion runs the arrival write path
+        // (ProcessFetchedBodyRange, validation.h).
+        CBodyRange resp;
+        vRecv >> resp;
+
+        LOCK(cs_main);
+
+        auto it = mapBodyRangeInFlight.find(resp.hashBlock);
+        if (it == mapBodyRangeInFlight.end() || it->second.peer != pfrom->GetId()) {
+            return true;
+        }
+        CGetBodyRange req;
+        req.hashBlock = resp.hashBlock;
+        req.nStartIndex = it->second.nStartIndex;
+        req.nCount = it->second.nCount;
+
+        if (!ValidateBodyRangeResponse(req, resp)) {
+            Misbehaving(pfrom->GetId(), 20,
+                        strprintf("Peer %d sent us a malformed bodyrange response", pfrom->GetId()));
+            mapBodyRangeInFlight.erase(it);
+            nBodyRangeInFlight--;
+            return true;
+        }
+        mapBodyRangeInFlight.erase(it);
+        nBodyRangeInFlight--;
+
+        if (resp.vBodies.empty()) {
+            // An honest miss (bodyrange.h's own CBodyRange doc: no fFound
+            // field, a miss IS vBodies.empty()) -- the block is withheld or
+            // this peer never had it. Not misbehaviour by itself (F-139's
+            // own regime split governs whether an ANNOUNCER staying silent
+            // on the tip path should be punished -- deferred here, see
+            // findings). g_body_retry_state's own backoff (already advanced
+            // when this request was sent) is what paces the next attempt,
+            // to this or another peer.
+            return true;
+        }
+
+        std::vector<CTransactionRef> &partial = mapBodyRangePartial[resp.hashBlock];
+        partial.insert(partial.end(), resp.vBodies.begin(), resp.vBodies.end());
+
+        CBlockIndex *pindex = LookupBlockIndex(resp.hashBlock);
+        if (pindex == nullptr) {
+            mapBodyRangePartial.erase(resp.hashBlock);
+            return true;
+        }
+        unsigned int nWanted = pindex->nTx > 0 ? (unsigned int) (pindex->nTx - 1) : 0;
+        if (partial.size() < nWanted) {
+            // More chunks needed -- the "Message: getbodyrange" section in
+            // SendMessages picks this back up (mapBodyRangeInFlight no
+            // longer names this hash), resuming from partial.size().
+            return true;
+        }
+
+        CCommitmentBlock commitments;
+        if (!ReadCommitmentBlockFromDisk(commitments, pindex, chainparams.GetConsensus())) {
+            mapBodyRangePartial.erase(resp.hashBlock);
+            return true;
+        }
+
+        CValidationState state;
+        bool ok = ::ChainstateActive().ProcessFetchedBodyRange(pindex, commitments, partial, state, chainparams);
+        mapBodyRangePartial.erase(resp.hashBlock);
+
+        if (!ok) {
+            if (state.CorruptionPossible()) {
+                // This specific peer's answer didn't match the block's own
+                // committed identifiers -- that peer's fault, not a fact
+                // about the block (ProcessFetchedBodyRange's own doc).
+                Misbehaving(pfrom->GetId(), 100,
+                            strprintf("Peer %d answered getbodyrange with bodies that do not match %s",
+                                     pfrom->GetId(), resp.hashBlock.ToString()));
+            }
+            // A genuine body-dependent validation failure already stamped
+            // BLOCK_FAILED_VALID inside ProcessFetchedBodyRange -- nothing
+            // further to do here either way.
+            return true;
+        }
+
+        CValidationState activateState;
+        ::ChainstateActive().ActivateBestChain(activateState, chainparams, nullptr);
+        return true;
+    }
+
     if (strCommand == NetMsgType::GETHEADERS) {
         CBlockLocator locator;
         uint256 hashStop;
@@ -5129,13 +5300,23 @@ bool PeerLogicValidation::SendMessages(CNode *pto) {
         // Message: getdata (blocks)
         //
         std::vector <CInv> vGetData;
+        std::vector<const CBlockIndex *> vBodyBlocks;
         if (!pto->fClient && pto->CanRelay() &&
             ((fFetch && !pto->m_limited_node) || !::ChainstateActive().IsInitialBlockDownload()) &&
             state.nBlocksInFlight < MAX_BLOCKS_IN_TRANSIT_PER_PEER) {
             std::vector<const CBlockIndex *> vToDownload;
             NodeId staller = -1;
+            // 2.2.4: vBodyBlocks is filled alongside vToDownload -- commitment-
+            // only candidates for THIS peer, discovered by the same ancestor
+            // walk. Known limitation, recorded not fixed: while this peer's
+            // whole-block-fetch budget (MAX_BLOCKS_IN_TRANSIT_PER_PEER) is
+            // saturated, this whole call (and so vBodyBlocks) is skipped --
+            // body-range discovery for this peer waits for a future
+            // SendMessages pass once that budget frees up. Not a correctness
+            // bug (self-correcting the very next call), just a documented
+            // simplification.
             FindNextBlocksToDownload(pto->GetId(), MAX_BLOCKS_IN_TRANSIT_PER_PEER - state.nBlocksInFlight, vToDownload,
-                                     staller, consensusParams);
+                                     vBodyBlocks, staller, consensusParams);
             for (const CBlockIndex *pindex: vToDownload) {
                 vGetData.push_back(CInv(MSG_BLOCK, pindex->GetBlockHash()));
                 MarkBlockAsInFlight(m_mempool, pto->GetId(), pindex->GetBlockHash(), pindex);
@@ -5147,6 +5328,84 @@ bool PeerLogicValidation::SendMessages(CNode *pto) {
                     State(staller)->nStallingSince = nNow;
                     LogPrint(BCLog::NET, "Stall started peer=%d\n", staller);
                 }
+            }
+        }
+
+        //
+        // Message: getbodyrange (2.2.4, build-plan.md's 2.2 row)
+        //
+        // Single-source: at most one CGetBodyRange in flight per block hash
+        // at a time (mapBodyRangeInFlight's own doc), chosen from whichever
+        // peer's announcer ring says it plausibly has this block --
+        // "the announcer that's currently the best/only known source"
+        // (multi-source scoring/selection among several is a later phase,
+        // C1, not built here). The aggregate cap (nBodyRangeInFlight vs.
+        // -maxbodyrangeinflight) is checked per candidate, last, by
+        // ShouldRequestBodyRange (bodyrange.h).
+        if (gArgs.GetBoolArg("-fetchbodyrange", false) && !pto->fClient && pto->CanRelay() &&
+            !vBodyBlocks.empty() && CanReceiveCommitments(pto->nServices)) {
+            unsigned int nMaxBodyRangeInFlight =
+                (unsigned int) gArgs.GetArg("-maxbodyrangeinflight", DEFAULT_MAX_BODYRANGE_INFLIGHT);
+            for (const CBlockIndex *pindex: vBodyBlocks) {
+                uint256 hash = pindex->GetBlockHash();
+                if (mapBodyRangeInFlight.count(hash)) {
+                    // Single-source: a fetch for this block is already
+                    // outstanding, against this peer or another.
+                    continue;
+                }
+
+                bool fWasAnnounced = state.announcerRing.WasAnnounced(hash, ::ChainActive().Height(),
+                                                                       ANNOUNCER_RING_DEPTH);
+                auto retryKey = std::make_pair(pto->GetId(), hash);
+                BodyRetryState &retry = g_body_retry_state[retryKey];
+                if (!ShouldRequestBodyRange(fWasAnnounced, nNow, retry.nNextAttempt,
+                                            nBodyRangeInFlight, nMaxBodyRangeInFlight)) {
+                    continue;
+                }
+
+                // pindex->nTx is the commitment-level count (coinbase +
+                // bodies), set unconditionally by ReceivedBlockTransactions
+                // regardless of whether bodies are held (F-135) -- always
+                // available for a block that reached this branch at all
+                // (BLOCK_HAVE_DATA is set). Resume from wherever a prior
+                // partial chunk left off (the server's own truncate-only
+                // continuation contract, bodyrange.h).
+                unsigned int nWanted = pindex->nTx > 0 ? (unsigned int) (pindex->nTx - 1) : 0;
+                std::vector<CTransactionRef> &partial = mapBodyRangePartial[hash];
+                if (nWanted == 0 || partial.size() >= nWanted) {
+                    // Nothing left to ask for -- a coinbase-only block (never
+                    // reachable in practice, ValidateGetBodyRange's own
+                    // coinbase-only BAN tier means an honest server would
+                    // refuse this anyway) or a fully-accumulated partial
+                    // result still waiting on ProcessFetchedBodyRange from a
+                    // response this loop hasn't caught up to yet.
+                    continue;
+                }
+
+                CGetBodyRange req;
+                req.hashBlock = hash;
+                req.nStartIndex = (uint32_t) partial.size();
+                req.nCount = nWanted - (uint32_t) partial.size();
+
+                // bodyrange.h's own NextBodyRetryBackoffMicros -- the exact
+                // arithmetic 1.3.6/H-2's whole-block g_body_retry_state
+                // already used, reused verbatim per build-plan.md 2.2.4's
+                // own "not new backoff logic" instruction.
+                retry.nAttempts++;
+                retry.nNextAttempt = nNow + NextBodyRetryBackoffMicros(retry.nAttempts, BODY_RETRY_BASE_MICROS,
+                                                                        BODY_RETRY_MAX_MICROS);
+
+                BodyRangeInFlight inFlight;
+                inFlight.peer = pto->GetId();
+                inFlight.nStartIndex = req.nStartIndex;
+                inFlight.nCount = req.nCount;
+                inFlight.nRequestTime = nNow;
+                mapBodyRangeInFlight[hash] = inFlight;
+                nBodyRangeInFlight++;
+
+                connman->PushMessage(pto, msgMaker.Make(NetMsgType::GETBODYRANGE, req));
+                LogPrint(BCLog::NET, "Requesting body range for %s [%u, %u) peer=%d\n", hash.ToString(),
+                         req.nStartIndex, req.nStartIndex + req.nCount, pto->GetId());
             }
         }
 

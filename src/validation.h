@@ -865,6 +865,41 @@ public:
     AcceptBlock(const std::shared_ptr<const CBlock> &pblock, CValidationState &state, const CChainParams &chainparams,
                 CBlockIndex **ppindex, bool fRequested, const FlatFilePos *dbp, bool *fNewBlock);
 
+    /** 2.2.4 (build-plan.md's 2.2 row, F-139's own spec): the body-ARRIVAL
+     *  write path -- turns bodies fetched over the wire (GETBODYRANGE) into
+     *  a durably stored, indexed, connectable block, for a `pindexNew` whose
+     *  commitments are already known (`BLOCK_HAVE_DATA` set) but whose body
+     *  record does not yet exist (`GetBodyPos().IsNull()`) -- the FIRST body
+     *  write for this block, unlike the private `ReceivedBlockBodies` (which
+     *  assumes `SaveBodyToDisk` already wrote the record at initial accept,
+     *  the only shape the existing `-perfwithholdbody` harness produces).
+     *
+     *  `commitments` is the caller's own already-known commitment view for
+     *  this block (coinbase + committed identifier list) -- today's real
+     *  caller (net_processing.cpp) sources it via `ReadCommitmentBlockFromDisk`
+     *  (this file), 2.2.4's first real production caller of that previously
+     *  unused "boundary, not yet the real contract" API (its own doc). `bodies`
+     *  is what a peer answered a `CGetBodyRange` with,
+     *  already passed through `ValidateBodyRangeResponse` (bodyrange.h) by
+     *  the caller -- this function does its OWN, separate content
+     *  validation (`MaterialiseBlock`'s hash check, then the body-dependent
+     *  `CheckBlock`/`ContextualCheckBlock` rows) and does not trust the
+     *  wire-shape check alone.
+     *
+     *  Returns false on any validation failure, mutating `pindexNew` only
+     *  when `state.CorruptionPossible()` is also false (a genuine consensus
+     *  violation, not just this specific peer's answer being wrong) --
+     *  mirrors `AcceptBlock`'s own `IsInvalid() && !CorruptionPossible()`
+     *  gate on `BLOCK_FAILED_VALID`. The caller decides what a
+     *  `CorruptionPossible()` failure means for the PEER that supplied it
+     *  (net_processing.cpp's own job, not this function's -- it has no
+     *  `NodeId` to act on). */
+    bool ProcessFetchedBodyRange(CBlockIndex *pindexNew, const CCommitmentBlock &commitments,
+                                 const std::vector<CTransactionRef> &bodies,
+                                 CValidationState &state, const CChainParams &chainparams)
+
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
     // Block (dis)connection on a given view:
     DisconnectResult DisconnectBlock(const CBlock &block, const CBlockIndex *pindex, CCoinsViewCache &view,
                                      CAssetsCache *assetsCache = nullptr);
