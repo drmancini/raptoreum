@@ -19,6 +19,7 @@
 #include <consensus/validation.h>
 #include <key.h>
 #include <keystore.h>
+#include <llmq/quorums_blockprocessor.h>
 #include <node/context.h>
 #include <primitives/block.h>
 #include <pubkey.h>
@@ -2027,6 +2028,47 @@ BOOST_AUTO_TEST_CASE(process_fetched_body_range_is_a_noop_when_bodies_are_alread
     BOOST_CHECK(state.IsValid());  // a no-op, not a rejection
     BOOST_CHECK_EQUAL(pindex->GetBodyPos().nFile, posBefore.nFile);
     BOOST_CHECK_EQUAL(pindex->GetBodyPos().nPos, posBefore.nPos);
+}
+
+// F-161 (4.1.1, the F-160 audit's own highest-severity finding):
+// CQuorumBlockProcessor::UpgradeDB (llmq/quorums_blockprocessor.cpp) walks
+// the WHOLE active chain from height 1, gating its per-block
+// ReadBlockFromDisk on `fPruneMode && !(pindex->nStatus & BLOCK_HAVE_DATA)`
+// -- the wrong bit (a commitment-only block also has BLOCK_HAVE_DATA set,
+// the same F-36-class conflation already fixed everywhere else in this
+// project) AND the wrong condition (only checked under fPruneMode at all,
+// so a non-traditionally-pruned node with a body-missing active-chain
+// block -- not reachable via any real accept path today, F-109's own
+// exclusion filter keeps a commitment-only block off ::ChainActive()
+// entirely, but exactly what a future body-retention window would
+// produce -- skips the check and crashes). Constructed the way this
+// file's own precedent handles a state no real path produces yet
+// (SimulateBodyRecordNeverWritten's "clobber to a future-real-path state"
+// technique): accept a block for real (genuine bodies, genuinely
+// connected), then retroactively withhold it (PerfWithholdGuard makes the
+// underlying ReadBlockFromDisk fail, matching what a real body-retention
+// eviction would produce) while clearing BLOCK_HAVE_BODIES to match --
+// the block stays on the active chain throughout, since clearing a status
+// bit after connection doesn't disconnect it.
+BOOST_AUTO_TEST_CASE(quorum_upgrade_db_does_not_crash_on_a_body_missing_active_chain_block) {
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock block = CreateAndProcessBlock({spendTx}, coinbaseKey);
+    uint256 hash = block.GetHash();
+    CBlockIndex *pindex = LookupBlockIndex(hash);
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(::ChainActive().Contains(pindex));
+    BOOST_REQUIRE(HaveBodies(pindex));
+
+    PerfWithholdGuard guard(hash);
+    pindex->nStatus &= ~BLOCK_HAVE_BODIES;
+    BOOST_REQUIRE(!HaveBodies(pindex));
+    BOOST_REQUIRE(::ChainActive().Contains(pindex));
+
+    // UpgradeDB has never run in this fresh fixture's evoDb (no test
+    // anywhere calls it -- confirmed by grep, only init.cpp's real startup
+    // path does), so this genuinely walks from height 1 rather than
+    // early-returning on an already-set marker.
+    BOOST_CHECK(!llmq::quorumBlockProcessor->UpgradeDB());
 }
 
 BOOST_AUTO_TEST_SUITE_END()
