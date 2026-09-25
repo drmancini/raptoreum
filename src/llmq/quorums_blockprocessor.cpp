@@ -304,8 +304,24 @@ namespace llmq {
         if (::ChainActive().Height() >= 1) {
             auto pindex = ::ChainActive()[1];
             while (pindex) {
-                if (fPruneMode && !(pindex->nStatus & BLOCK_HAVE_DATA)) {
-                    // Too late, we already pruned blocks we needed to reprocess commitments
+                // F-161 (4.1.1, F-160's own highest-severity finding): this
+                // used to check `fPruneMode && !(pindex->nStatus &
+                // BLOCK_HAVE_DATA)` -- the WRONG bit (a commitment-only
+                // block also has BLOCK_HAVE_DATA set, the same F-36-class
+                // conflation already fixed everywhere else in this
+                // project) and the wrong condition (only checked under
+                // fPruneMode at all, so a body-missing active-chain block
+                // outside traditional prune mode skipped this guard
+                // entirely and hit the hard assert below). HaveBodies is
+                // the correct predicate regardless of WHY the bodies are
+                // gone -- traditional pruning (which already clears
+                // BLOCK_HAVE_BODIES alongside BLOCK_HAVE_DATA,
+                // validation.cpp's PruneOneBlockFile) or a future
+                // body-retention window (not yet built) -- so this no
+                // longer needs its own fPruneMode gate at all.
+                if (!HaveBodies(pindex)) {
+                    // Too late, we don't have this block's bodies and need
+                    // them to reprocess commitments.
                     return false;
                 }
                 CBlock block;
