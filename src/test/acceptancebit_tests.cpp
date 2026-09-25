@@ -2071,4 +2071,41 @@ BOOST_AUTO_TEST_CASE(quorum_upgrade_db_does_not_crash_on_a_body_missing_active_c
     BOOST_CHECK(!llmq::quorumBlockProcessor->UpgradeDB());
 }
 
+// F-163 (4.1.1, F-160's own named A1 site): GetTransaction (validation.cpp)
+// read straight from blk*.dat with no HaveBodies guard -- not a crash risk
+// today (ReadBlockFromDisk already fails gracefully on a genuine miss), but
+// a real correctness gap: blk*.dat always holds the real bytes regardless
+// of BLOCK_HAVE_BODIES today (SaveBlockToDisk writes unconditionally,
+// F-134/F-135), so the pre-fix code would happily materialise and return a
+// transaction from a block the index claims NOT to hold bodies for --
+// proven directly here, not just asserted: the same real bytes are still
+// on disk throughout this test (nothing touches blk*.dat), so a fix
+// regression would make this test's own final check fail by finding the
+// transaction anyway, not by crashing.
+BOOST_AUTO_TEST_CASE(get_transaction_respects_have_bodies_even_though_the_read_would_succeed) {
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock block = CreateAndProcessBlock({spendTx}, coinbaseKey);
+    uint256 hash = block.GetHash();
+    uint256 txHash = spendTx.GetHash();
+    CBlockIndex *pindex = LookupBlockIndex(hash);
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(HaveBodies(pindex));
+
+    uint256 hashBlockOut;
+    CTransactionRef found = GetTransaction(pindex, nullptr, txHash, Params().GetConsensus(), hashBlockOut);
+    BOOST_REQUIRE(found != nullptr);
+    BOOST_CHECK(found->GetHash() == txHash);
+
+    // Clear the bit -- the real bytes are untouched, matching what a
+    // future body-retention window withdrawing bodies from an
+    // already-connected block would look like from GetTransaction's own
+    // vantage point.
+    pindex->nStatus &= ~BLOCK_HAVE_BODIES;
+    BOOST_REQUIRE(!HaveBodies(pindex));
+
+    uint256 hashBlockOut2;
+    CTransactionRef foundAfter = GetTransaction(pindex, nullptr, txHash, Params().GetConsensus(), hashBlockOut2);
+    BOOST_CHECK(foundAfter == nullptr);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

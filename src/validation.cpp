@@ -1087,6 +1087,18 @@ GetTransaction(const CBlockIndex *const block_index, const CTxMemPool *const mem
     LOCK(cs_main);
 
     if (block_index) {
+        // F-163 (4.1.1, F-160): the design doc's own named A1 site --
+        // without this, blk*.dat always holding the real bytes regardless
+        // of BLOCK_HAVE_BODIES today (SaveBlockToDisk writes
+        // unconditionally, F-134/F-135) means this would happily
+        // materialise and return a transaction from a block the index
+        // claims NOT to hold bodies for, violating §14.1 rule 3's own
+        // wording ("no network-triggered path may materialise a block
+        // without consulting HaveBodies") even though nothing crashes
+        // today (ReadBlockFromDisk fails gracefully on a genuine miss).
+        if (!HaveBodies(block_index)) {
+            return nullptr;
+        }
         CBlock block;
         if (ReadBlockFromDisk(block, block_index, consensusParams)) {
             for (const auto &tx: block.vtx) {
