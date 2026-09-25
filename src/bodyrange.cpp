@@ -103,3 +103,7 @@ bool IsBodyRangeRequestStale(int64_t nRequestTime, int64_t nNow, int64_t nStaleA
 bool HasOutstandingBlockDownloadWork(size_t nWholeBlockCandidates, size_t nBodyRangeCandidates) {
     return nWholeBlockCandidates > 0 || nBodyRangeCandidates > 0;
 }
+
+bool IsBodyRangeChunkAligned(size_t nAccumulatedSoFar, uint32_t nResponseStartIndex) {
+    return nAccumulatedSoFar == nResponseStartIndex;
+}

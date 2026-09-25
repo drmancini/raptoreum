@@ -380,28 +380,37 @@ namespace {
     std::map <uint256, BodyRangeInFlight> mapBodyRangeInFlight
     GUARDED_BY(cs_main);
 
-    /** 2.2.4: bodies accumulated so far for a block whose full range needed
-     *  more than one chunk (the server's own truncate-only continuation
-     *  contract, bodyrange.h) -- keyed by hash, matching mapBodyRangeInFlight
-     *  (single-source: one accumulation in progress per block). */
-    std::map <uint256, std::vector<CTransactionRef>> mapBodyRangePartial
-    GUARDED_BY(cs_main);
-
-    /** F-158 (independent review, LOW): mapBodyRangePartial had no
-     *  disconnect/abandonment cleanup at all, unlike its sibling maps
-     *  (mapBodyRangeInFlight, g_body_retry_state), which got exactly this
-     *  treatment in F-155/F-157 -- a fetch abandoned because its only
-     *  announcer disconnected, the block reorged away, or it resolved
-     *  through some other path entirely kept its accumulated bodies in
-     *  memory for the process lifetime. Rather than per-peer tracking
-     *  (mapBodyRangePartial deliberately has none -- a completing chunk can
-     *  come from a different peer than an earlier one, by design), tracks
-     *  the last time each entry was created or extended, matching
-     *  mapBodyRangeInFlight's own nRequestTime/IsBodyRangeRequestStale
-     *  pattern -- reaped in the SAME throttled maintenance pass, alongside
-     *  an immediate reap for the common, cheaply-detectable case (the block
-     *  already has its bodies via a different path). */
-    std::map <uint256, int64_t> mapBodyRangePartialLastTouched
+    /** F-159 (second independent review, folding F-158's two-map design
+     *  into one): bodies accumulated so far for a block whose full range
+     *  needed more than one chunk (the server's own truncate-only
+     *  continuation contract, bodyrange.h) -- keyed by hash, matching
+     *  mapBodyRangeInFlight (single-source: one accumulation in progress
+     *  per block).
+     *
+     *  F-158 originally split this into mapBodyRangePartial (the bodies)
+     *  and a separate mapBodyRangePartialLastTouched (a staleness
+     *  timestamp), paired only by convention at each call site
+     *  (EraseBodyRangePartial below). That split itself caused a real LOW
+     *  bug (F-159): the request-tracking site in SendMessages read
+     *  mapBodyRangePartial via operator[], which silently creates an empty
+     *  entry with NO corresponding LastTouched entry -- an entry the
+     *  LastTouched-keyed reaper below could never see or reap. Merged into
+     *  one struct in one map so the two can no longer drift apart by
+     *  construction, not by discipline.
+     *
+     *  Also now caches `commitments` -- F-159's own CONFIRMED MEDIUM:
+     *  ReadCommitmentBlockFromDisk (a full block deserialize plus a rehash
+     *  of every transaction) was re-run on EVERY chunk arrival under
+     *  cs_main, not once per fetch, exactly the "disk I/O held under
+     *  cs_main" class this project's own serving side (F-149) explicitly
+     *  refused. Read once, on the first chunk that creates this entry, and
+     *  reused for every later chunk of the SAME accumulation. */
+    struct BodyRangeAccumulation {
+        std::vector<CTransactionRef> vBodies;
+        CCommitmentBlock commitments;
+        int64_t nLastTouched = 0;
+    };
+    std::map <uint256, BodyRangeAccumulation> mapBodyRangePartial
     GUARDED_BY(cs_main);
 
     /** F-158: how long an accumulation may sit untouched before it's
@@ -445,17 +454,15 @@ namespace {
         return mapBodyRangeInFlight.erase(it);
     }
 
-    /** F-158: mapBodyRangePartial and mapBodyRangePartialLastTouched must
-     *  always move together (same reasoning as EraseBodyRangeInFlight above
-     *  for mapBodyRangeInFlight/nBodyRangeInFlight) -- factored into one
-     *  place so every one of this pair's several call sites (the BODYRANGE
-     *  handler's three erase points, the new abandonment reaper below)
-     *  can't drift out of sync with each other. */
+    /** F-159: named wrapper kept for call-site readability even though
+     *  F-159's own merge (mapBodyRangePartial's own doc above) means this is
+     *  now a single erase -- matches EraseBodyRangeInFlight's own style, and
+     *  gives any future second structure added alongside this one the same
+     *  single choke point F-158's own split lacked. */
     static void EraseBodyRangePartial(const uint256 &hash)
 
     EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
         mapBodyRangePartial.erase(hash);
-        mapBodyRangePartialLastTouched.erase(hash);
     }
 
     /** F-157: throttles the stale-in-flight-request reap (bodyrange.h's
@@ -3704,64 +3711,93 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
                 return true;
             }
 
-            // F-158 (independent review, CONFIRMED HIGH): read commitments
-            // and validate THIS CHUNK's own hashes against the correct
-            // slice BEFORE it ever joins mapBodyRangePartial -- a buffer
-            // that can be, and F-155/F-157 deliberately keep across, more
-            // than one contributing peer over a multi-chunk fetch. Doing
-            // this only once at completion (the original shape) meant a bad
-            // chunk from a peer that had already disconnected could sit in
-            // the buffer until an unrelated, honest peer completed the
-            // range and was misbehaved for it -- ValidateBodyRangeChunkHashes's
-            // own doc (bodyrange.h) has the full attack shape. This does
-            // mean a disk read per chunk rather than once per full fetch;
-            // acceptable given the aggregate cap keeps concurrent fetches
-            // small (DEFAULT_MAX_BODYRANGE_INFLIGHT).
-            CCommitmentBlock commitments;
-            if (!ReadCommitmentBlockFromDisk(commitments, pindex, chainparams.GetConsensus())) {
-                EraseBodyRangePartial(resp.hashBlock);
-                return true;
+            // F-159 (second independent review of F-158, CONFIRMED MEDIUM):
+            // commitments are read from disk ONCE per accumulation -- on the
+            // chunk that first creates this hash's entry -- and cached in it
+            // (mapBodyRangePartial's own doc), not re-read on every later
+            // chunk. F-158's own version called ReadCommitmentBlockFromDisk
+            // (a full block deserialize plus a rehash of every transaction)
+            // unconditionally per chunk, under cs_main, exactly the "disk
+            // I/O held under cs_main" class F-149 already refused on the
+            // serving side -- at this project's own ~110MB/700k-tx target
+            // scale with 1MiB chunks, that was ~110 reads+rehashes per
+            // fetch instead of 1.
+            auto accIt = mapBodyRangePartial.find(resp.hashBlock);
+            if (accIt == mapBodyRangePartial.end()) {
+                CCommitmentBlock commitments;
+                if (!ReadCommitmentBlockFromDisk(commitments, pindex, chainparams.GetConsensus())) {
+                    return true;
+                }
+                BodyRangeAccumulation acc;
+                acc.commitments = commitments;
+                acc.nLastTouched = GetTimeMicros();
+                accIt = mapBodyRangePartial.emplace(resp.hashBlock, std::move(acc)).first;
             }
-            if (!ValidateBodyRangeChunkHashes(commitments, resp.nStartIndex, resp.vBodies)) {
+            BodyRangeAccumulation &acc = accIt->second;
+
+            if (!ValidateBodyRangeChunkHashes(acc.commitments, resp.nStartIndex, resp.vBodies)) {
                 // THIS peer's own chunk, checked against the correct slice,
                 // independent of whatever a possibly-different peer
                 // contributed earlier -- unambiguously this peer's fault.
-                // mapBodyRangePartial is deliberately left untouched: the
+                // acc.vBodies is deliberately left untouched: the
                 // already-validated prefix (if any) is still good, and the
                 // next SendMessages pass re-requests exactly the still-
-                // missing range starting from partial.size().
+                // missing range starting from acc.vBodies.size().
                 Misbehaving(pfrom->GetId(), 100,
                             strprintf("Peer %d sent a bodyrange chunk that does not match %s",
                                      pfrom->GetId(), resp.hashBlock.ToString()));
                 return true;
             }
 
-            std::vector<CTransactionRef> &partial = mapBodyRangePartial[resp.hashBlock];
-            partial.insert(partial.end(), resp.vBodies.begin(), resp.vBodies.end());
-            mapBodyRangePartialLastTouched[resp.hashBlock] = GetTimeMicros();
+            // F-159 (second independent review, CONFIRMED MEDIUM -- a
+            // timing race, not a malicious peer): resp.nStartIndex was
+            // already checked against what mapBodyRangeInFlight recorded
+            // being ASKED (ValidateBodyRangeResponse above), never against
+            // this buffer's own CURRENT size -- if the buffer was reset
+            // between this request being issued and this response
+            // arriving (the abandonment reaper is one such path, guarded
+            // separately below, but this check is the durable one: it
+            // catches misalignment regardless of WHAT reset the buffer),
+            // an honestly-answered, hash-valid chunk would otherwise get
+            // appended at the wrong logical offset, silently corrupting
+            // the assembly and eventually getting an entirely innocent
+            // LATER peer banned when MaterialiseBlock failed on it. This
+            // is not that peer's fault either -- discard without
+            // misbehaving; the next SendMessages pass re-requests
+            // whatever the buffer's actual current state needs.
+            if (!IsBodyRangeChunkAligned(acc.vBodies.size(), resp.nStartIndex)) {
+                return true;
+            }
 
-            if (partial.size() < BodyRangeWantedCount(pindex)) {
+            acc.vBodies.insert(acc.vBodies.end(), resp.vBodies.begin(), resp.vBodies.end());
+            acc.nLastTouched = GetTimeMicros();
+
+            if (acc.vBodies.size() < BodyRangeWantedCount(pindex)) {
                 // More chunks needed -- the "Message: getbodyrange" section
                 // in SendMessages picks this back up (mapBodyRangeInFlight
-                // no longer names this hash), resuming from partial.size().
+                // no longer names this hash), resuming from
+                // acc.vBodies.size().
                 return true;
             }
 
             CValidationState state;
-            bool ok = ::ChainstateActive().ProcessFetchedBodyRange(pindex, commitments, partial, state, chainparams);
+            bool ok = ::ChainstateActive().ProcessFetchedBodyRange(pindex, acc.commitments, acc.vBodies, state,
+                                                                    chainparams);
             EraseBodyRangePartial(resp.hashBlock);
 
             if (!ok) {
                 if (state.CorruptionPossible()) {
                     // Every chunk's hashes were already validated on arrival
-                    // above (ValidateBodyRangeChunkHashes), so
-                    // MaterialiseBlock's own equivalent check inside
-                    // ProcessFetchedBodyRange can no longer actually fail in
-                    // the normal case -- this branch is now defense-in-depth
-                    // for a caller that reached this point some other way,
-                    // matching F-157's own precedent of a check the current
-                    // call pattern can no longer trip, kept for the same
-                    // reason (cheap, and removing it buys nothing).
+                    // above (ValidateBodyRangeChunkHashes) AND appended only
+                    // at its own correct offset (the alignment guard just
+                    // above, F-159), so MaterialiseBlock's own equivalent
+                    // check inside ProcessFetchedBodyRange can no longer
+                    // actually fail in the normal case -- this branch is now
+                    // defense-in-depth for a caller that reached this point
+                    // some other way, matching F-157's own precedent of a
+                    // check the current call pattern can no longer trip,
+                    // kept for the same reason (cheap, and removing it buys
+                    // nothing).
                     Misbehaving(pfrom->GetId(), 100,
                                 strprintf("Peer %d answered getbodyrange with bodies that do not match %s",
                                          pfrom->GetId(), resp.hashBlock.ToString()));
@@ -5610,19 +5646,38 @@ bool PeerLogicValidation::SendMessages(CNode *pto) {
             // abandonment reaper -- unlike mapBodyRangeInFlight above,
             // deliberately NOT swept on disconnect (no per-peer attribution
             // exists for a cross-peer accumulation buffer by design), so a
-            // TTL is this map's only cleanup mechanism. Two conditions,
+            // TTL is this map's only cleanup mechanism. Three conditions,
             // checked per entry: (1) immediate reap if the block already has
             // its bodies via a different path entirely (HaveBodies) -- cheap
             // to detect, no reason to wait out the TTL; (2) TTL reap
             // (BODY_RANGE_PARTIAL_STALE_MICROS) for the general case (peer
             // gone with no other announcer, block reorged away) that has no
-            // single cheap predicate of its own.
-            for (auto it = mapBodyRangePartialLastTouched.begin(); it != mapBodyRangePartialLastTouched.end();) {
+            // single cheap predicate of its own; (3) F-159 (second
+            // independent review of F-158, CONFIRMED MEDIUM): never reap a
+            // hash with a LIVE mapBodyRangeInFlight entry, regardless of its
+            // own TTL -- doing so raced against the response-arrival
+            // handler's own append (resp.nStartIndex is validated against
+            // what mapBodyRangeInFlight recorded being ASKED, never against
+            // the buffer's own current size), silently misaligning an
+            // honestly-answered chunk to the wrong offset and getting the
+            // LAST, entirely honest peer banned when MaterialiseBlock later
+            // failed on the corrupted assembly -- no malicious peer
+            // required, purely a timing race between two independent TTLs.
+            // This is a second, defense-in-depth guard: the append site
+            // itself (the BODYRANGE handler) also now verifies
+            // acc.vBodies.size() == resp.nStartIndex before ever appending,
+            // so misalignment can no longer occur even if this guard is
+            // ever bypassed by some other future reap path.
+            for (auto it = mapBodyRangePartial.begin(); it != mapBodyRangePartial.end();) {
+                if (mapBodyRangeInFlight.count(it->first)) {
+                    ++it;
+                    continue;
+                }
                 const CBlockIndex *pindexPartial = LookupBlockIndex(it->first);
                 bool fResolvedElsewhere = pindexPartial != nullptr && HaveBodies(pindexPartial);
-                if (fResolvedElsewhere || IsBodyRangeRequestStale(it->second, nNow, BODY_RANGE_PARTIAL_STALE_MICROS)) {
-                    mapBodyRangePartial.erase(it->first);
-                    it = mapBodyRangePartialLastTouched.erase(it);
+                if (fResolvedElsewhere ||
+                    IsBodyRangeRequestStale(it->second.nLastTouched, nNow, BODY_RANGE_PARTIAL_STALE_MICROS)) {
+                    it = mapBodyRangePartial.erase(it);
                 } else {
                     ++it;
                 }
@@ -5641,19 +5696,20 @@ bool PeerLogicValidation::SendMessages(CNode *pto) {
                     continue;
                 }
 
-                bool fWasAnnounced = state.announcerRing.WasAnnounced(hash, ::ChainActive().Height(),
-                                                                       ANNOUNCER_RING_DEPTH);
-                auto retryKey = std::make_pair(pto->GetId(), hash);
-                BodyRetryState &retry = g_body_retry_state[retryKey];
-                if (!ShouldRequestBodyRange(fWasAnnounced, nNow, retry.nNextAttempt,
-                                            nBodyRangeInFlight, nMaxBodyRangeInFlight)) {
-                    continue;
-                }
-
                 // Resume from wherever a prior partial chunk left off (the
                 // server's own truncate-only continuation contract,
                 // bodyrange.h). BodyRangeWantedCount's own doc explains the
                 // nTx/coinbase-indexing reasoning.
+                //
+                // F-159 (second independent review of F-158, LOW): this
+                // empty-block completion branch moved BEFORE the
+                // fWasAnnounced/ShouldRequestBodyRange eligibility check
+                // below -- F-158's own version ran it after, so a
+                // coinbase-only block evicted from the announcer ring
+                // (F-154's own documented long-catch-up accountability
+                // gap) or blocked by the aggregate cap/backoff never got
+                // completed, even though this branch needs no peer,
+                // announcement, or wire round trip at all.
                 unsigned int nWanted = BodyRangeWantedCount(pindex);
                 if (nWanted == 0) {
                     // F-158 (independent review, MEDIUM): an empty
@@ -5693,8 +5749,32 @@ bool PeerLogicValidation::SendMessages(CNode *pto) {
                     }
                     continue;
                 }
-                std::vector<CTransactionRef> &partial = mapBodyRangePartial[hash];
-                if (partial.size() >= nWanted) {
+
+                bool fWasAnnounced = state.announcerRing.WasAnnounced(hash, ::ChainActive().Height(),
+                                                                       ANNOUNCER_RING_DEPTH);
+                auto retryKey = std::make_pair(pto->GetId(), hash);
+                BodyRetryState &retry = g_body_retry_state[retryKey];
+                if (!ShouldRequestBodyRange(fWasAnnounced, nNow, retry.nNextAttempt,
+                                            nBodyRangeInFlight, nMaxBodyRangeInFlight)) {
+                    continue;
+                }
+                // F-159 (second independent review, LOW): find(), not
+                // operator[] -- the request-tracking site never has real
+                // data to record before a response actually arrives, so it
+                // must not create an entry of its own. F-158's own
+                // operator[] here silently created an empty
+                // mapBodyRangePartial entry with no corresponding
+                // LastTouched entry, which the (then LastTouched-keyed)
+                // reaper could never see or reap -- orphaned for the
+                // process lifetime by a request that got a miss or no
+                // answer at all. F-159's merge (mapBodyRangePartial's own
+                // doc) means an orphan like this would now at least be
+                // reachable by the reaper regardless, but not creating one
+                // in the first place is the more direct fix.
+                auto accIt = mapBodyRangePartial.find(hash);
+                unsigned int nHave =
+                    (accIt != mapBodyRangePartial.end()) ? (unsigned int) accIt->second.vBodies.size() : 0;
+                if (nHave >= nWanted) {
                     // A fully-accumulated partial result still waiting on
                     // ProcessFetchedBodyRange from a response this loop
                     // hasn't caught up to yet.
@@ -5703,8 +5783,8 @@ bool PeerLogicValidation::SendMessages(CNode *pto) {
 
                 CGetBodyRange req;
                 req.hashBlock = hash;
-                req.nStartIndex = (uint32_t) partial.size();
-                req.nCount = nWanted - (uint32_t) partial.size();
+                req.nStartIndex = nHave;
+                req.nCount = nWanted - nHave;
 
                 // bodyrange.h's own NextBodyRetryBackoffMicros -- the exact
                 // arithmetic 1.3.6/H-2's whole-block g_body_retry_state
