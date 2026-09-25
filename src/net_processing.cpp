@@ -387,6 +387,30 @@ namespace {
     std::map <uint256, std::vector<CTransactionRef>> mapBodyRangePartial
     GUARDED_BY(cs_main);
 
+    /** F-158 (independent review, LOW): mapBodyRangePartial had no
+     *  disconnect/abandonment cleanup at all, unlike its sibling maps
+     *  (mapBodyRangeInFlight, g_body_retry_state), which got exactly this
+     *  treatment in F-155/F-157 -- a fetch abandoned because its only
+     *  announcer disconnected, the block reorged away, or it resolved
+     *  through some other path entirely kept its accumulated bodies in
+     *  memory for the process lifetime. Rather than per-peer tracking
+     *  (mapBodyRangePartial deliberately has none -- a completing chunk can
+     *  come from a different peer than an earlier one, by design), tracks
+     *  the last time each entry was created or extended, matching
+     *  mapBodyRangeInFlight's own nRequestTime/IsBodyRangeRequestStale
+     *  pattern -- reaped in the SAME throttled maintenance pass, alongside
+     *  an immediate reap for the common, cheaply-detectable case (the block
+     *  already has its bodies via a different path). */
+    std::map <uint256, int64_t> mapBodyRangePartialLastTouched
+    GUARDED_BY(cs_main);
+
+    /** F-158: how long an accumulation may sit untouched before it's
+     *  considered abandoned rather than merely between backoff-paced
+     *  chunks -- generous relative to BODY_RETRY_MAX_MICROS (the single
+     *  worst-case gap between two chunk attempts) since a multi-chunk fetch
+     *  can legitimately need several such gaps in a row under real backoff. */
+    static const int64_t BODY_RANGE_PARTIAL_STALE_MICROS = 10 * BODY_RETRY_MAX_MICROS; // 5 minutes
+
     /** F-157 (Fable review of F-155/F-156): "bodies wanted" for a
      *  commitment-only pindex -- the same one-liner was duplicated at both
      *  the BODYRANGE response handler and the getbodyrange-issuing
@@ -419,6 +443,19 @@ namespace {
     EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
         nBodyRangeInFlight--;
         return mapBodyRangeInFlight.erase(it);
+    }
+
+    /** F-158: mapBodyRangePartial and mapBodyRangePartialLastTouched must
+     *  always move together (same reasoning as EraseBodyRangeInFlight above
+     *  for mapBodyRangeInFlight/nBodyRangeInFlight) -- factored into one
+     *  place so every one of this pair's several call sites (the BODYRANGE
+     *  handler's three erase points, the new abandonment reaper below)
+     *  can't drift out of sync with each other. */
+    static void EraseBodyRangePartial(const uint256 &hash)
+
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        mapBodyRangePartial.erase(hash);
+        mapBodyRangePartialLastTouched.erase(hash);
     }
 
     /** F-157: throttles the stale-in-flight-request reap (bodyrange.h's
@@ -966,6 +1003,7 @@ namespace {
  *  at most count entries. */
     void FindNextBlocksToDownload(NodeId nodeid, unsigned int count, std::vector<const CBlockIndex *> &vBlocks,
                                   std::vector<const CBlockIndex *> &vBodyBlocks,
+                                  bool fFetchBodyRangeCapable,
                                   NodeId &nodeStaller, const Consensus::Params &consensusParams)
 
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
@@ -1053,7 +1091,7 @@ namespace {
                                 // 2.2.4: re-keyed to (peer, hash) -- see g_body_retry_state's own
                                 // comment above.
                                 g_body_retry_state.erase({nodeid, pindex->GetBlockHash()});
-                            } else if (pindex->nStatus & BLOCK_HAVE_DATA) {
+                            } else if (pindex->nStatus & BLOCK_HAVE_DATA && fFetchBodyRangeCapable) {
                                 // 2.2.4 (build-plan.md's 2.2 row): commitments already known,
                                 // only the body is missing -- this is now the NEW single-source
                                 // GETBODYRANGE fetch path's job (the "Message: getbodyrange"
@@ -1064,6 +1102,20 @@ namespace {
                                 // one below -- a peer stuck this way must still be able to stall
                                 // the peer-eviction/staller logic the way any other unresolved
                                 // gap does.
+                                //
+                                // F-158 (independent review, CONFIRMED MEDIUM): this branch is
+                                // now gated on fFetchBodyRangeCapable -- when -fetchbodyrange is
+                                // off (the DEFAULT) or this specific peer lacks NODE_COMMITMENTS
+                                // (CanReceiveCommitments), nothing will EVER pick this block up
+                                // from vBodyBlocks (the getbodyrange-issuing SendMessages section
+                                // is itself gated the same way), so the original, unconditional
+                                // version of this branch permanently stranded such a block --
+                                // verified directly via feature_body_refetch.py, which passed at
+                                // the parent commit and hung (stuck, only the initial getdatas,
+                                // no re-request) at this branch's introduction. The fallback
+                                // below (the ELSE of this condition, falling through to the
+                                // whole-block branch) restores 1.3.6/H-2's original, already-
+                                // proven-live re-request mechanism for exactly this case.
                                 fBehindGap = true;
                                 if (pindex->nHeight > nWindowEnd) {
                                     // F-157 (Fable review): HasOutstandingBlockDownloadWork
@@ -1087,12 +1139,17 @@ namespace {
                                     vBodyBlocks.push_back(pindex);
                                 }
                             } else if (mapBlocksInFlight.count(pindex->GetBlockHash()) == 0) {
-                                // The block's commitments are not known at all -- ordinary
-                                // whole-block GETDATA(MSG_BLOCK), unchanged. g_body_retry_state's
-                                // own backoff does not apply here (2.2.4): that mechanism exists
-                                // for a body that keeps getting delivered/requested without ever
-                                // resolving an already-known commitment -- a block that is simply
-                                // not yet received has no such failure mode of its own.
+                                // Reached only when NOT (resolved) and NOT (commitments known AND
+                                // fFetchBodyRangeCapable) -- i.e. either the block's commitments
+                                // are not known at all, OR they ARE known but the body is missing
+                                // and this peer/config can't use the GETBODYRANGE path
+                                // (fFetchBodyRangeCapable == false, F-158's own fallback). Both
+                                // need the SAME ordinary whole-block GETDATA(MSG_BLOCK) 1.3.6/H-2
+                                // already built and proved live, unchanged from before 2.2.4
+                                // existed -- including reusing g_body_retry_state's own backoff
+                                // below for the fallback sub-case too (re-keyed to (peer, hash) by
+                                // F-155, which works identically here: this function already runs
+                                // per-node).
                                 fBehindGap = true;
                                 if (pindex->nHeight > nWindowEnd) {
                                     // We reached the end of the window.
@@ -1106,6 +1163,31 @@ namespace {
                                         nodeStaller = waitingfor;
                                     }
                                     return;
+                                }
+                                // F-158 (independent review, part of the CONFIRMED MEDIUM fix):
+                                // 1.3.6/H-2's own retry-backoff, RESTORED here -- F-155 removed
+                                // it on the premise that the whole-block re-delivery failure mode
+                                // "moved entirely to the GETBODYRANGE path" and this branch could
+                                // no longer be reached for a commitment-known/body-missing block.
+                                // That premise is false whenever fFetchBodyRangeCapable is false
+                                // (this branch's own new fallback role) -- without backoff here,
+                                // a commitment-known block that keeps re-arriving without
+                                // resolving (the exact shape -perfwithholdcount simulates, and
+                                // feature_body_refetch.py exercises) reproduces 1.3.6's own
+                                // original bug: an unbounded, unpaced re-request loop. Skip
+                                // (`continue`) a block still cooling down from a prior delivery
+                                // that didn't resolve it; a first-ever request (nNextAttempt == 0)
+                                // always goes through.
+                                if (pindex->nStatus & BLOCK_HAVE_DATA) {
+                                    int64_t nNowRetry = GetTimeMicros();
+                                    BodyRetryState &retry = g_body_retry_state[{nodeid, pindex->GetBlockHash()}];
+                                    if (nNowRetry < retry.nNextAttempt) {
+                                        continue;
+                                    }
+                                    retry.nAttempts++;
+                                    int64_t nBackoff = BODY_RETRY_BASE_MICROS
+                                                       << std::min(retry.nAttempts - 1, 5U);
+                                    retry.nNextAttempt = nNowRetry + std::min(nBackoff, BODY_RETRY_MAX_MICROS);
                                 }
                                 vBlocks.push_back(pindex);
                                 if (vBlocks.size() == count) {
@@ -1323,8 +1405,16 @@ void PeerLogicValidation::FinalizeNode(NodeId nodeid, bool &fUpdateConnectionTim
     // and its single-source hash slot (mapBodyRangeInFlight), or that block
     // could never be re-attempted, and a leaked slot would permanently
     // narrow the cap for every other fetch. mapBodyRangePartial is left
-    // alone: bodies already received and shape-validated from this peer are
-    // still good, whichever peer answers the resumption.
+    // alone HERE (no per-peer attribution exists for it by design -- a
+    // completing chunk can come from a different peer than an earlier one)
+    // -- not because it needs no cleanup at all: each chunk's own CONTENT is
+    // now validated against the block's committed identifiers the moment it
+    // arrives, before ever joining this buffer (F-158's own
+    // ValidateBodyRangeChunkHashes, bodyrange.h -- this comment previously
+    // conflated that with the wire-shape check ValidateBodyRangeResponse
+    // does, a real gap an independent review found), and the buffer's own
+    // abandonment cleanup is a separate, time-based sweep in SendMessages's
+    // periodic maintenance pass (F-158), not this peer-keyed cleanup.
     for (auto it = mapBodyRangeInFlight.begin(); it != mapBodyRangeInFlight.end();) {
         if (it->second.peer == nodeid) {
             it = EraseBodyRangeInFlight(it);
@@ -3608,14 +3698,48 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
                 return true;
             }
 
-            std::vector<CTransactionRef> &partial = mapBodyRangePartial[resp.hashBlock];
-            partial.insert(partial.end(), resp.vBodies.begin(), resp.vBodies.end());
-
             CBlockIndex *pindex = LookupBlockIndex(resp.hashBlock);
             if (pindex == nullptr) {
-                mapBodyRangePartial.erase(resp.hashBlock);
+                EraseBodyRangePartial(resp.hashBlock);
                 return true;
             }
+
+            // F-158 (independent review, CONFIRMED HIGH): read commitments
+            // and validate THIS CHUNK's own hashes against the correct
+            // slice BEFORE it ever joins mapBodyRangePartial -- a buffer
+            // that can be, and F-155/F-157 deliberately keep across, more
+            // than one contributing peer over a multi-chunk fetch. Doing
+            // this only once at completion (the original shape) meant a bad
+            // chunk from a peer that had already disconnected could sit in
+            // the buffer until an unrelated, honest peer completed the
+            // range and was misbehaved for it -- ValidateBodyRangeChunkHashes's
+            // own doc (bodyrange.h) has the full attack shape. This does
+            // mean a disk read per chunk rather than once per full fetch;
+            // acceptable given the aggregate cap keeps concurrent fetches
+            // small (DEFAULT_MAX_BODYRANGE_INFLIGHT).
+            CCommitmentBlock commitments;
+            if (!ReadCommitmentBlockFromDisk(commitments, pindex, chainparams.GetConsensus())) {
+                EraseBodyRangePartial(resp.hashBlock);
+                return true;
+            }
+            if (!ValidateBodyRangeChunkHashes(commitments, resp.nStartIndex, resp.vBodies)) {
+                // THIS peer's own chunk, checked against the correct slice,
+                // independent of whatever a possibly-different peer
+                // contributed earlier -- unambiguously this peer's fault.
+                // mapBodyRangePartial is deliberately left untouched: the
+                // already-validated prefix (if any) is still good, and the
+                // next SendMessages pass re-requests exactly the still-
+                // missing range starting from partial.size().
+                Misbehaving(pfrom->GetId(), 100,
+                            strprintf("Peer %d sent a bodyrange chunk that does not match %s",
+                                     pfrom->GetId(), resp.hashBlock.ToString()));
+                return true;
+            }
+
+            std::vector<CTransactionRef> &partial = mapBodyRangePartial[resp.hashBlock];
+            partial.insert(partial.end(), resp.vBodies.begin(), resp.vBodies.end());
+            mapBodyRangePartialLastTouched[resp.hashBlock] = GetTimeMicros();
+
             if (partial.size() < BodyRangeWantedCount(pindex)) {
                 // More chunks needed -- the "Message: getbodyrange" section
                 // in SendMessages picks this back up (mapBodyRangeInFlight
@@ -3623,22 +3747,21 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
                 return true;
             }
 
-            CCommitmentBlock commitments;
-            if (!ReadCommitmentBlockFromDisk(commitments, pindex, chainparams.GetConsensus())) {
-                mapBodyRangePartial.erase(resp.hashBlock);
-                return true;
-            }
-
             CValidationState state;
             bool ok = ::ChainstateActive().ProcessFetchedBodyRange(pindex, commitments, partial, state, chainparams);
-            mapBodyRangePartial.erase(resp.hashBlock);
+            EraseBodyRangePartial(resp.hashBlock);
 
             if (!ok) {
                 if (state.CorruptionPossible()) {
-                    // This specific peer's answer didn't match the block's
-                    // own committed identifiers -- that peer's fault, not a
-                    // fact about the block (ProcessFetchedBodyRange's own
-                    // doc).
+                    // Every chunk's hashes were already validated on arrival
+                    // above (ValidateBodyRangeChunkHashes), so
+                    // MaterialiseBlock's own equivalent check inside
+                    // ProcessFetchedBodyRange can no longer actually fail in
+                    // the normal case -- this branch is now defense-in-depth
+                    // for a caller that reached this point some other way,
+                    // matching F-157's own precedent of a check the current
+                    // call pattern can no longer trip, kept for the same
+                    // reason (cheap, and removing it buys nothing).
                     Misbehaving(pfrom->GetId(), 100,
                                 strprintf("Peer %d answered getbodyrange with bodies that do not match %s",
                                          pfrom->GetId(), resp.hashBlock.ToString()));
@@ -5418,8 +5541,23 @@ bool PeerLogicValidation::SendMessages(CNode *pto) {
             // SendMessages pass once that budget frees up. Not a correctness
             // bug (self-correcting the very next call), just a documented
             // simplification.
+            //
+            // F-158 (independent review, CONFIRMED MEDIUM): fFetchBodyRangeCapable
+            // -- whether a commitment-known/body-missing block for THIS peer
+            // will ever actually be picked up from vBodyBlocks. Both halves
+            // matter: -fetchbodyrange off (the DEFAULT) means the
+            // getbodyrange-issuing section below never runs at all; this
+            // SPECIFIC peer lacking NODE_COMMITMENTS (CanReceiveCommitments)
+            // means it individually can never answer a GETBODYRANGE even
+            // when the feature is on. Either way, routing such a block to
+            // vBodyBlocks instead of the ordinary whole-block GETDATA path
+            // would strand it with no re-request mechanism at all --
+            // verified directly (feature_body_refetch.py: passes at the
+            // parent commit, hangs at this regression's introduction).
+            bool fFetchBodyRangeCapable =
+                gArgs.GetBoolArg("-fetchbodyrange", false) && CanReceiveCommitments(pto->nServices);
             FindNextBlocksToDownload(pto->GetId(), MAX_BLOCKS_IN_TRANSIT_PER_PEER - state.nBlocksInFlight, vToDownload,
-                                     vBodyBlocks, staller, consensusParams);
+                                     vBodyBlocks, fFetchBodyRangeCapable, staller, consensusParams);
             for (const CBlockIndex *pindex: vToDownload) {
                 vGetData.push_back(CInv(MSG_BLOCK, pindex->GetBlockHash()));
                 MarkBlockAsInFlight(m_mempool, pto->GetId(), pindex->GetBlockHash(), pindex);
@@ -5450,10 +5588,6 @@ bool PeerLogicValidation::SendMessages(CNode *pto) {
             // 2.2.4: reap any in-flight request stuck against a peer that
             // stayed CONNECTED but never answered at all -- IsBodyRangeRequestStale's
             // own doc (bodyrange.h) explains why nothing else catches this.
-            // mapBodyRangePartial is left alone -- bodies already received
-            // and shape-validated are still good for whichever peer resumes
-            // the fetch (matches FinalizeNode's own disconnect-cleanup
-            // convention).
             //
             // F-157 (Fable review): throttled to BODY_RANGE_MAINTENANCE_INTERVAL_MICROS
             // rather than running unconditionally on EVERY connected peer's
@@ -5468,6 +5602,27 @@ bool PeerLogicValidation::SendMessages(CNode *pto) {
             for (auto it = mapBodyRangeInFlight.begin(); it != mapBodyRangeInFlight.end();) {
                 if (IsBodyRangeRequestStale(it->second.nRequestTime, nNow, BODY_RETRY_MAX_MICROS)) {
                     it = EraseBodyRangeInFlight(it);
+                } else {
+                    ++it;
+                }
+            }
+            // F-158 (independent review, LOW): mapBodyRangePartial's own
+            // abandonment reaper -- unlike mapBodyRangeInFlight above,
+            // deliberately NOT swept on disconnect (no per-peer attribution
+            // exists for a cross-peer accumulation buffer by design), so a
+            // TTL is this map's only cleanup mechanism. Two conditions,
+            // checked per entry: (1) immediate reap if the block already has
+            // its bodies via a different path entirely (HaveBodies) -- cheap
+            // to detect, no reason to wait out the TTL; (2) TTL reap
+            // (BODY_RANGE_PARTIAL_STALE_MICROS) for the general case (peer
+            // gone with no other announcer, block reorged away) that has no
+            // single cheap predicate of its own.
+            for (auto it = mapBodyRangePartialLastTouched.begin(); it != mapBodyRangePartialLastTouched.end();) {
+                const CBlockIndex *pindexPartial = LookupBlockIndex(it->first);
+                bool fResolvedElsewhere = pindexPartial != nullptr && HaveBodies(pindexPartial);
+                if (fResolvedElsewhere || IsBodyRangeRequestStale(it->second, nNow, BODY_RANGE_PARTIAL_STALE_MICROS)) {
+                    mapBodyRangePartial.erase(it->first);
+                    it = mapBodyRangePartialLastTouched.erase(it);
                 } else {
                     ++it;
                 }
@@ -5500,14 +5655,49 @@ bool PeerLogicValidation::SendMessages(CNode *pto) {
                 // bodyrange.h). BodyRangeWantedCount's own doc explains the
                 // nTx/coinbase-indexing reasoning.
                 unsigned int nWanted = BodyRangeWantedCount(pindex);
+                if (nWanted == 0) {
+                    // F-158 (independent review, MEDIUM): an empty
+                    // (coinbase-only) commitment-only block needs no wire
+                    // round trip at all -- MaterialiseBlock already accepts
+                    // bodies.size()==0==vCommitments.size(). The previous
+                    // comment here called this "never reachable in
+                    // practice" (reasoning: an honest server would BAN a
+                    // GETBODYRANGE request for it) -- true of the SERVER
+                    // side, irrelevant to the CLIENT side: this project's
+                    // own harness routinely produces coinbase-only blocks,
+                    // and Raptoreum mines genuinely empty ones on mainnet.
+                    // Without this, such a block's body was never completed
+                    // by ANY mechanism once -fetchbodyrange routed it away
+                    // from the whole-block GETDATA fallback.
+                    //
+                    // Deliberately does NOT call ActivateBestChain here:
+                    // SendMessages holds cs_main for the rest of its own
+                    // body via a bare, unscoped TRY_LOCK (line ~5029) --
+                    // calling it from here would reproduce the exact F-157
+                    // bug class this same finding's own fix just closed
+                    // elsewhere in this file, and restructuring
+                    // SendMessages's own locking is out of scope for this
+                    // fix. ProcessFetchedBodyRange alone still makes the
+                    // block genuinely connectable (status bits set, body
+                    // durably written) -- the next block this node accepts
+                    // for ANY reason (routine network traffic, at most one
+                    // block interval away) calls ActivateBestChain itself
+                    // and picks it up, matching how a real network never
+                    // sits idle long enough for this to matter in practice.
+                    CCommitmentBlock commitments;
+                    CBlockIndex *pindexMutable = LookupBlockIndex(hash);
+                    if (pindexMutable != nullptr &&
+                        ReadCommitmentBlockFromDisk(commitments, pindexMutable, consensusParams)) {
+                        CValidationState state;
+                        ::ChainstateActive().ProcessFetchedBodyRange(pindexMutable, commitments, {}, state, Params());
+                    }
+                    continue;
+                }
                 std::vector<CTransactionRef> &partial = mapBodyRangePartial[hash];
-                if (nWanted == 0 || partial.size() >= nWanted) {
-                    // Nothing left to ask for -- a coinbase-only block (never
-                    // reachable in practice, ValidateGetBodyRange's own
-                    // coinbase-only BAN tier means an honest server would
-                    // refuse this anyway) or a fully-accumulated partial
-                    // result still waiting on ProcessFetchedBodyRange from a
-                    // response this loop hasn't caught up to yet.
+                if (partial.size() >= nWanted) {
+                    // A fully-accumulated partial result still waiting on
+                    // ProcessFetchedBodyRange from a response this loop
+                    // hasn't caught up to yet.
                     continue;
                 }
 

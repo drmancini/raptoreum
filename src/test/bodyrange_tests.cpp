@@ -622,6 +622,112 @@ BOOST_AUTO_TEST_CASE(validate_response_rejects_a_null_body_entry) {
     BOOST_CHECK(!ValidateBodyRangeResponse(req, resp));
 }
 
+// F-158 (independent review, CONFIRMED HIGH): per-chunk content validation
+// against the block's own committed identifiers -- the fix for cross-peer
+// ban misattribution. This is deliberately a SEPARATE check from
+// ValidateBodyRangeResponse's own wire-shape check above: content
+// correctness must be provable for THIS SPECIFIC CHUNK, from THIS SPECIFIC
+// PEER, before it ever joins a cross-peer accumulation buffer another
+// peer's earlier (or later) chunk also feeds.
+BOOST_AUTO_TEST_CASE(chunk_hashes_accepts_a_chunk_matching_the_correct_slice) {
+    CTransactionRef tx0 = MakeBodyTx(1);
+    CTransactionRef tx1 = MakeBodyTx(2);
+    CTransactionRef tx2 = MakeBodyTx(3);
+    CCommitmentBlock commitments;
+    commitments.vCommitments = {tx0->GetHash(), tx1->GetHash(), tx2->GetHash()};
+
+    // A chunk starting at index 1 must be checked against vCommitments[1..],
+    // not vCommitments[0..] -- the exact off-by-one class MaterialiseBlock's
+    // own full-list check would never exercise, since it always starts at 0.
+    std::vector<CTransactionRef> chunk = {tx1, tx2};
+    BOOST_CHECK(ValidateBodyRangeChunkHashes(commitments, /*nStartIndex=*/1, chunk));
+}
+
+BOOST_AUTO_TEST_CASE(chunk_hashes_accepts_a_chunk_starting_at_zero) {
+    CTransactionRef tx0 = MakeBodyTx(1);
+    CTransactionRef tx1 = MakeBodyTx(2);
+    CCommitmentBlock commitments;
+    commitments.vCommitments = {tx0->GetHash(), tx1->GetHash()};
+
+    std::vector<CTransactionRef> chunk = {tx0, tx1};
+    BOOST_CHECK(ValidateBodyRangeChunkHashes(commitments, /*nStartIndex=*/0, chunk));
+}
+
+BOOST_AUTO_TEST_CASE(chunk_hashes_rejects_a_single_wrong_hash_in_the_chunk) {
+    CTransactionRef tx0 = MakeBodyTx(1);
+    CTransactionRef tx1 = MakeBodyTx(2);
+    CTransactionRef wrongTx = MakeBodyTx(99);  // does not match commitments[1]
+    CCommitmentBlock commitments;
+    commitments.vCommitments = {tx0->GetHash(), tx1->GetHash()};
+
+    std::vector<CTransactionRef> chunk = {tx0, wrongTx};
+    BOOST_CHECK(!ValidateBodyRangeChunkHashes(commitments, /*nStartIndex=*/0, chunk));
+}
+
+// The precise scenario the fix exists for: peer A's earlier chunk (index 0)
+// was already validated and kept; peer B's chunk (index 1) is bad. Only
+// index 1's slice must be checked here -- peer A's already-accepted data is
+// never re-examined by this call, matching how the real call site only
+// validates the NEW chunk, not the whole accumulated buffer.
+BOOST_AUTO_TEST_CASE(chunk_hashes_rejects_a_bad_completing_chunk_independent_of_the_prior_chunk) {
+    CTransactionRef tx0 = MakeBodyTx(1);    // peer A's earlier, honest chunk
+    CTransactionRef tx1 = MakeBodyTx(2);    // the real, expected completion
+    CTransactionRef badTx = MakeBodyTx(66); // peer B's bad completing chunk
+    CCommitmentBlock commitments;
+    commitments.vCommitments = {tx0->GetHash(), tx1->GetHash()};
+
+    std::vector<CTransactionRef> completingChunk = {badTx};
+    BOOST_CHECK(!ValidateBodyRangeChunkHashes(commitments, /*nStartIndex=*/1, completingChunk));
+}
+
+BOOST_AUTO_TEST_CASE(chunk_hashes_rejects_a_null_entry) {
+    CTransactionRef tx0 = MakeBodyTx(1);
+    CCommitmentBlock commitments;
+    commitments.vCommitments = {tx0->GetHash(), uint256S("0x999")};
+
+    std::vector<CTransactionRef> chunk = {tx0, CTransactionRef()};
+    BOOST_CHECK(!ValidateBodyRangeChunkHashes(commitments, /*nStartIndex=*/0, chunk));
+}
+
+BOOST_AUTO_TEST_CASE(chunk_hashes_rejects_a_chunk_running_past_the_committed_list) {
+    CTransactionRef tx0 = MakeBodyTx(1);
+    CTransactionRef tx1 = MakeBodyTx(2);
+    CCommitmentBlock commitments;
+    commitments.vCommitments = {tx0->GetHash()};  // only one committed identifier
+
+    // nStartIndex=0 with 2 bodies would run past a 1-entry commitment list.
+    std::vector<CTransactionRef> chunk = {tx0, tx1};
+    BOOST_CHECK(!ValidateBodyRangeChunkHashes(commitments, /*nStartIndex=*/0, chunk));
+}
+
+// Mutation-found gap (this file's own build, F-158): the test above relies
+// on the per-element loop's own hash comparison reading past
+// vCommitments's real backing storage via operator[] (undefined behaviour)
+// -- removing the explicit bounds check entirely still made that test
+// pass, coincidentally, because the out-of-bounds read happened to compare
+// unequal to tx1's hash rather than crashing or matching. That proves
+// nothing about the bounds check itself. This test isolates the guard
+// deterministically: an EMPTY chunk means the per-element loop runs ZERO
+// iterations regardless of whether the bounds check exists -- no
+// out-of-bounds read of any kind occurs either way -- so only the explicit
+// `nStartIndex + chunkBodies.size() > commitments.vCommitments.size()`
+// guard itself can catch nStartIndex already sitting past the list's end.
+BOOST_AUTO_TEST_CASE(chunk_hashes_rejects_an_out_of_range_start_index_with_an_empty_chunk) {
+    CCommitmentBlock commitments;
+    commitments.vCommitments = {uint256S("0x1")};  // size 1
+
+    std::vector<CTransactionRef> chunk;  // empty -- the per-element loop never runs
+    BOOST_CHECK(!ValidateBodyRangeChunkHashes(commitments, /*nStartIndex=*/5, chunk));
+}
+
+BOOST_AUTO_TEST_CASE(chunk_hashes_accepts_an_empty_chunk) {
+    CCommitmentBlock commitments;
+    commitments.vCommitments = {uint256S("0x1")};
+
+    std::vector<CTransactionRef> chunk;
+    BOOST_CHECK(ValidateBodyRangeChunkHashes(commitments, /*nStartIndex=*/1, chunk));
+}
+
 // 2.2.4: the aggregate-cap-and-eligibility decision, pure and testable
 // without CNodeState/CAnnouncerRing/g_body_retry_state scaffolding.
 BOOST_AUTO_TEST_CASE(should_request_allows_an_eligible_ready_uncapped_candidate) {

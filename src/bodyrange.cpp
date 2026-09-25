@@ -64,6 +64,19 @@ bool ValidateBodyRangeResponse(const CGetBodyRange &request, const CBodyRange &r
     return true;
 }
 
+bool ValidateBodyRangeChunkHashes(const CCommitmentBlock &commitments, uint32_t nStartIndex,
+                                  const std::vector<CTransactionRef> &chunkBodies) {
+    if ((uint64_t) nStartIndex + chunkBodies.size() > commitments.vCommitments.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < chunkBodies.size(); i++) {
+        if (!chunkBodies[i] || chunkBodies[i]->GetHash() != commitments.vCommitments[nStartIndex + i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool ShouldRequestBodyRange(bool fWasAnnounced, int64_t nNow, int64_t nNextAttempt,
                              unsigned int nInFlight, unsigned int nMaxInFlight) {
     if (!fWasAnnounced) {
