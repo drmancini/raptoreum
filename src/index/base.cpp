@@ -116,6 +116,30 @@ void BaseIndex::ThreadSync() {
                 last_locator_write_time = current_time;
             }
 
+            // F-166 (4.1.1, F-160's own HIGH-severity finding among the
+            // remaining named gaps): a windowed node's catch-up sync loop
+            // can't proceed past a body-missing block -- stop syncing here
+            // (log, return) rather than escalating to FatalError, which
+            // aborts the WHOLE NODE, not just this index. That distinction
+            // matters here specifically: unlike a genuine disk-read
+            // failure below (corruption, a real bug -- still fatal, kept
+            // as-is), "bodies not held yet" is an ordinary, expected state
+            // for a windowed node and must not take the node down. This is
+            // the shared fix point for BOTH TxIndex and BlockFilterIndex
+            // (both derive from BaseIndex and share this one call site) --
+            // BaseIndex's own live BlockConnected path (below) needs no
+            // equivalent guard, confirmed by reading it: it's always
+            // handed an already-full in-memory CBlock by its caller, never
+            // reads disk itself. Not reachable today (no accept path
+            // produces a body-missing block on the active chain this loop
+            // would ever reach, no body-retention window exists yet to
+            // remove bodies from one after the fact) -- future-proofing,
+            // matching F-160's own classification.
+            if (!HaveBodies(pindex)) {
+                LogPrintf("%s: bodies not held for block %s, pausing sync (will resume once available)\n",
+                          GetName(), pindex->GetBlockHash().ToString());
+                return;
+            }
             CBlock block;
             if (!ReadBlockFromDisk(block, pindex, consensus_params)) {
                 FatalError("%s: Failed to read block %s from disk",
