@@ -5275,11 +5275,34 @@ bool PeerLogicValidation::SendMessages(CNode *pto) {
                         }
                     }
                     if (!fGotBlockFromCache) {
-                        CBlock block;
-                        bool ret = ReadBlockFromDisk(block, pBestIndex, consensusParams);
-                        assert(ret);
-                        CBlockHeaderAndShortTxIDs cmpctblock(block);
-                        connman->PushMessage(pto, msgMaker.Make(NetMsgType::CMPCTBLOCK, cmpctblock));
+                        // F-162 (4.1.1, F-160's own finding): guard before
+                        // ReadBlockFromDisk, matching every other site in
+                        // this file (ProcessGetBlockData, GETBLOCKTXN).
+                        // Not reachable today -- pBestIndex is invariantly
+                        // a ::ChainActive() member (this same loop bails
+                        // via fRevertToInv on any header not on
+                        // ::ChainActive(), above), and everything connected
+                        // has bodies by construction (no accept path exists
+                        // yet that connects a body-missing block, and no
+                        // body-retention window exists yet to remove
+                        // bodies from one after the fact) -- but the
+                        // hard assert below would otherwise reproduce A1's
+                        // own crash class the moment either of those
+                        // becomes real. Skip this specific compact-block
+                        // send rather than crash; the header itself was
+                        // already queued above, and the peer's own normal
+                        // getdata/getheaders-driven re-request recovers
+                        // the body separately.
+                        if (!HaveBodies(pBestIndex)) {
+                            LogPrint(BCLog::NET, "%s: skipping header-and-ids for %s to peer=%d, bodies not held\n",
+                                     __func__, pBestIndex->GetBlockHash().ToString(), pto->GetId());
+                        } else {
+                            CBlock block;
+                            bool ret = ReadBlockFromDisk(block, pBestIndex, consensusParams);
+                            assert(ret);
+                            CBlockHeaderAndShortTxIDs cmpctblock(block);
+                            connman->PushMessage(pto, msgMaker.Make(NetMsgType::CMPCTBLOCK, cmpctblock));
+                        }
                     }
                     state.pindexBestHeaderSent = pBestIndex;
                 } else if (state.fPreferHeaders) {
