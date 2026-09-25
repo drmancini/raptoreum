@@ -243,6 +243,12 @@ static bool rest_block(HTTPRequest *req,
         if (IsBlockPruned(pblockindex))
             return RESTERR(req, HTTP_NOT_FOUND, hashStr + " not available (pruned data)");
 
+        // F-164 (4.1.1, F-160): IsBlockPruned checks the wrong bit for a
+        // commitment-only block -- see rpc/blockchain.cpp's GetBlockChecked
+        // for the full reasoning, the same fix applied here.
+        if (!HaveBodies(pblockindex))
+            return RESTERR(req, HTTP_NOT_FOUND, hashStr + " not available (bodies not held)");
+
         if (!ReadBlockFromDisk(block, pblockindex, Params().GetConsensus()))
             return RESTERR(req, HTTP_NOT_FOUND, hashStr + " not found");
     }
