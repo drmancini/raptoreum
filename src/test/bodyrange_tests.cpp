@@ -842,4 +842,34 @@ BOOST_AUTO_TEST_CASE(outstanding_work_false_when_neither_kind_exists) {
     BOOST_CHECK(!HasOutstandingBlockDownloadWork(/*nWholeBlockCandidates=*/0, /*nBodyRangeCandidates=*/0));
 }
 
+// F-159 (second independent review of F-158, CONFIRMED MEDIUM): the
+// buffer-alignment guard, isolated from net_processing.cpp's own untested
+// scaffolding. The regression this exists for: a response can pass
+// ValidateBodyRangeResponse (it echoes what THIS REQUEST asked for) while
+// still landing on a buffer whose own size has since changed for an
+// unrelated reason (the abandonment reaper being one such cause).
+BOOST_AUTO_TEST_CASE(chunk_aligned_when_response_start_matches_buffer_size) {
+    BOOST_CHECK(IsBodyRangeChunkAligned(/*nAccumulatedSoFar=*/5, /*nResponseStartIndex=*/5));
+}
+
+BOOST_AUTO_TEST_CASE(chunk_aligned_at_the_very_first_chunk) {
+    BOOST_CHECK(IsBodyRangeChunkAligned(/*nAccumulatedSoFar=*/0, /*nResponseStartIndex=*/0));
+}
+
+BOOST_AUTO_TEST_CASE(chunk_not_aligned_when_buffer_was_reset_mid_fetch) {
+    // The exact race: buffer held 5 validated bodies, was reset to 0 (e.g.
+    // by a reaper unaware a request for [5, 5+k) was still outstanding),
+    // and the honest response for that original request now arrives.
+    BOOST_CHECK(!IsBodyRangeChunkAligned(/*nAccumulatedSoFar=*/0, /*nResponseStartIndex=*/5));
+}
+
+BOOST_AUTO_TEST_CASE(chunk_not_aligned_when_response_lags_behind_the_buffer) {
+    BOOST_CHECK(!IsBodyRangeChunkAligned(/*nAccumulatedSoFar=*/10, /*nResponseStartIndex=*/3));
+}
+
+BOOST_AUTO_TEST_CASE(chunk_not_aligned_off_by_one_either_direction) {
+    BOOST_CHECK(!IsBodyRangeChunkAligned(/*nAccumulatedSoFar=*/5, /*nResponseStartIndex=*/4));
+    BOOST_CHECK(!IsBodyRangeChunkAligned(/*nAccumulatedSoFar=*/5, /*nResponseStartIndex=*/6));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

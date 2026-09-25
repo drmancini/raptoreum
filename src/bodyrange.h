@@ -320,4 +320,22 @@ bool IsBodyRangeRequestStale(int64_t nRequestTime, int64_t nNow, int64_t nStaleA
  *  found anything for this peer to do. */
 bool HasOutstandingBlockDownloadWork(size_t nWholeBlockCandidates, size_t nBodyRangeCandidates);
 
+/** F-159 (second independent review of F-158, CONFIRMED MEDIUM): whether a
+ *  chunk response is positioned to append cleanly onto a cross-peer
+ *  accumulation buffer's own CURRENT size -- distinct from
+ *  ValidateBodyRangeResponse's own nStartIndex check, which only confirms
+ *  the response echoes what THIS SPECIFIC REQUEST asked for
+ *  (mapBodyRangeInFlight's own recorded value), never whether the
+ *  accumulation buffer itself still matches that expectation. If the
+ *  buffer was reset between this request being issued and this response
+ *  arriving (the abandonment reaper racing a still-outstanding request is
+ *  one such path, though a dedicated guard there closes that specific
+ *  case too) -- an honestly-answered, hash-valid chunk appended at
+ *  `end()` regardless would silently land at the wrong logical offset,
+ *  corrupting the assembly for a LATER, entirely innocent peer to be
+ *  banned over. Pure, taking both sizes as plain values (this project's
+ *  own established split) so the guard is testable and mutation-provable
+ *  independent of any net_processing.cpp scaffolding. */
+bool IsBodyRangeChunkAligned(size_t nAccumulatedSoFar, uint32_t nResponseStartIndex);
+
 #endif // BITCOIN_BODYRANGE_H
