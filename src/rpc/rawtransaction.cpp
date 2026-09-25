@@ -541,6 +541,10 @@ static UniValue gettxoutproof(const JSONRPCRequest &request) {
         }
     }
 
+    if (!HaveBodies(pblockindex)) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Block not available (bodies not held)");
+    }
+
     CBlock block;
     if (!ReadBlockFromDisk(block, pblockindex, Params().GetConsensus())) {
         throw JSONRPCError(RPC_INTERNAL_ERROR, "Can't read block from disk");

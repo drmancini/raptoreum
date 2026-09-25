@@ -24,15 +24,19 @@
 #include <primitives/block.h>
 #include <pubkey.h>
 #include <fs.h>
+#include <rpc/client.h>
+#include <rpc/server.h>
 #include <script/script.h>
 #include <script/sign.h>
 #include <script/standard.h>
 #include <streams.h>
 #include <txmempool.h>
+#include <util/ref.h>
 #include <util/system.h>
 #include <validation.h>
 #include <test/test_raptoreum.h>
 
+#include <boost/algorithm/string.hpp>
 #include <boost/test/unit_test.hpp>
 
 // F7 (test review precedent, txvalidation_tests.cpp/blockbudget_tests.cpp):
@@ -47,6 +51,32 @@ struct PerfWithholdGuard {
 
     ~PerfWithholdGuard() { g_perf_withhold_hashes.erase(hash); }
 };
+
+// F-168 (4.1.1 closeout): a minimal CallRPC, same technique as
+// rpc_tests.cpp's RPCTestingSetup::CallRPC (CLI-style string args ->
+// RPCConvertValues -> tableRPC.execute), reimplemented here rather than
+// shared because that class is private to rpc_tests.cpp and this file's
+// fixture is TestChain100Setup, not RPCTestingSetup -- TestingSetup's own
+// constructor already calls RegisterAllCoreRPCCommands(tableRPC), which
+// TestChain100Setup inherits transitively, so no separate registration is
+// needed here.
+static UniValue CallRPCForTest(NodeContext &node, const std::string &args) {
+    std::vector<std::string> vArgs;
+    boost::split(vArgs, args, boost::is_any_of(" \t"));
+    std::string strMethod = vArgs[0];
+    vArgs.erase(vArgs.begin());
+    util::Ref context{node};
+    JSONRPCRequest request(context);
+    request.strMethod = strMethod;
+    request.params = RPCConvertValues(strMethod, vArgs);
+    request.fHelp = false;
+    if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+    try {
+        return tableRPC.execute(request);
+    } catch (const UniValue &objError) {
+        throw std::runtime_error(find_value(objError, "message").get_str());
+    }
+}
 
 BOOST_FIXTURE_TEST_SUITE(acceptancebit_tests, TestChain100Setup)
 
@@ -2106,6 +2136,66 @@ BOOST_AUTO_TEST_CASE(get_transaction_respects_have_bodies_even_though_the_read_w
     uint256 hashBlockOut2;
     CTransactionRef foundAfter = GetTransaction(pindex, nullptr, txHash, Params().GetConsensus(), hashBlockOut2);
     BOOST_CHECK(foundAfter == nullptr);
+}
+
+// F-168 (4.1.1 closeout, item 2): gettxoutproof (rpc/rawtransaction.cpp)
+// reads straight from blk*.dat with no HaveBodies guard ahead of it -- same
+// shape and same fix as F-163's GetTransaction, and the same reason a
+// PerfWithholdGuard isn't needed to prove it: blk*.dat holds the real bytes
+// unconditionally today (F-110), so clearing BLOCK_HAVE_BODIES alone is
+// enough to distinguish "checks the bit" from "happened to fail because the
+// bytes were genuinely gone" -- nothing here touches blk*.dat, so a fix
+// regression would make the final call succeed again, not crash.
+BOOST_AUTO_TEST_CASE(gettxoutproof_respects_have_bodies_even_though_the_read_would_succeed) {
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock block = CreateAndProcessBlock({spendTx}, coinbaseKey);
+    uint256 hash = block.GetHash();
+    uint256 txHash = spendTx.GetHash();
+    CBlockIndex *pindex = LookupBlockIndex(hash);
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(HaveBodies(pindex));
+
+    const std::string cmd = "gettxoutproof [\"" + txHash.ToString() + "\"] " + hash.ToString();
+    BOOST_CHECK_NO_THROW(CallRPCForTest(m_node, cmd));
+
+    pindex->nStatus &= ~BLOCK_HAVE_BODIES;
+    BOOST_REQUIRE(!HaveBodies(pindex));
+
+    BOOST_CHECK_EXCEPTION(CallRPCForTest(m_node, cmd), std::runtime_error,
+                          [](const std::runtime_error &e) {
+                              return std::string(e.what()).find("bodies not held") != std::string::npos;
+                          });
+
+    // Restore before the fixture tears down -- matches this file's own
+    // convention (verifydb_stops_at_a_bodies_gap_..., quorum_upgrade_db_...)
+    // of leaving the index consistent with the still-present real bytes.
+    pindex->nStatus |= BLOCK_HAVE_BODIES;
+    BOOST_REQUIRE(HaveBodies(pindex));
+}
+
+// F-168 (4.1.1 closeout, item 3): the `smartnode payments` RPC
+// (rpc/smartnode.cpp) has the identical unguarded-read shape, same fix, same
+// no-PerfWithholdGuard-needed reasoning as gettxoutproof above.
+BOOST_AUTO_TEST_CASE(smartnode_payments_respects_have_bodies_even_though_the_read_would_succeed) {
+    CBlock block = CreateAndProcessBlock({}, coinbaseKey);
+    uint256 hash = block.GetHash();
+    CBlockIndex *pindex = LookupBlockIndex(hash);
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(HaveBodies(pindex));
+
+    const std::string cmd = "smartnode payments " + hash.ToString() + " 1";
+    BOOST_CHECK_NO_THROW(CallRPCForTest(m_node, cmd));
+
+    pindex->nStatus &= ~BLOCK_HAVE_BODIES;
+    BOOST_REQUIRE(!HaveBodies(pindex));
+
+    BOOST_CHECK_EXCEPTION(CallRPCForTest(m_node, cmd), std::runtime_error,
+                          [](const std::runtime_error &e) {
+                              return std::string(e.what()).find("bodies not held") != std::string::npos;
+                          });
+
+    pindex->nStatus |= BLOCK_HAVE_BODIES;
+    BOOST_REQUIRE(HaveBodies(pindex));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

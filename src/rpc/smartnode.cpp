@@ -404,6 +404,10 @@ UniValue smartnode_payments(const JSONRPCRequest &request) {
 
     while (vecPayments.size() < uint64_t(std::abs(nCount)) && pindex != nullptr) {
 
+        if (!HaveBodies(pindex)) {
+            throw JSONRPCError(RPC_MISC_ERROR, "Block not available (bodies not held)");
+        }
+
         CBlock block;
         if (!ReadBlockFromDisk(block, pindex, Params().GetConsensus())) {
             throw JSONRPCError(RPC_INTERNAL_ERROR, "Can't read block from disk");
