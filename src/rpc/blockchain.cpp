@@ -1099,6 +1099,18 @@ static CBlock GetBlockChecked(const CBlockIndex *pblockindex) {
         throw JSONRPCError(RPC_MISC_ERROR, "Block not available (pruned data)");
     }
 
+    // F-164 (4.1.1, F-160): IsBlockPruned checks BLOCK_HAVE_DATA, not
+    // HaveBodies -- a commitment-only block has BLOCK_HAVE_DATA set too
+    // (the same F-36-class conflation already fixed everywhere else), so
+    // it would slip past the check above. Not reachable today (no accept
+    // path produces this state, no body-retention window exists yet to
+    // remove bodies after the fact) -- future-proofing, and a shared fix
+    // point: this helper serves getblock/getblockheader and every other
+    // RPC that calls it (4 call sites at last count), not just one.
+    if (!HaveBodies(pblockindex)) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Block not available (bodies not held)");
+    }
+
     if (!ReadBlockFromDisk(block, pblockindex, Params().GetConsensus())) {
         // Block not found on disk. This could be because we have the block
         // header in our index but don't have the block (for example if a
