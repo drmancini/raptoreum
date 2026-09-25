@@ -225,6 +225,18 @@ BASE_SCRIPTS = [
     'feature_blocksdir.py',
     'feature_config_args.py',
     'feature_help.py',
+    # F-158 (independent review of F-155/F-156/F-157): these two prove the
+    # decoupling fetch client's own regression classes directly (a
+    # commitment-only block's body must always be re-fetchable by SOME
+    # mechanism, and a permanently-unresolved one must be paced, not
+    # hammered) -- specific to this branch (perf/throughput-rig)'s own
+    # -perfwithhold* test-only flags, matching feature_characterise_*.py's
+    # own precedent of being rig-specific rather than upstream-portable.
+    # Neither was wired in before F-158 -- the exact gap that let this
+    # finding's own CONFIRMED MEDIUM regression ship undetected despite a
+    # full green C++ suite.
+    'feature_body_refetch.py',
+    'feature_body_refetch_backoff.py',
     # Don't append tests at the end to avoid merge conflicts
     # Put them in a random line within the section that fits their approximate run-time
 ]

@@ -7,6 +7,7 @@
 
 #include <blockencodings.h>
 #include <flatfile.h>
+#include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <serialize.h>
 #include <uint256.h>
@@ -187,6 +188,46 @@ void BuildBodyRangeResponse(const CGetBodyRange &request, const FlatFilePos &pos
  *  honest miss apart from a withholding announcer is the CALLER's own job
  *  (2.2.4's announcer-ring classification), not this function's. */
 bool ValidateBodyRangeResponse(const CGetBodyRange &request, const CBodyRange &response);
+
+/** F-158 (independent second-model review of F-155/F-156/F-157, CONFIRMED
+ *  HIGH): `ValidateBodyRangeResponse` above deliberately does NOT validate a
+ *  chunk's body content against the block's committed identifiers -- that
+ *  was left to `MaterialiseBlock`, run once at completion over the WHOLE
+ *  accumulated `mapBodyRangePartial` buffer. That buffer is keyed only by
+ *  block hash, with no record of which peer contributed which chunk (a
+ *  block whose full body needs more than one GETBODYRANGE round trip can be
+ *  completed by a DIFFERENT peer than the one who supplied an earlier
+ *  chunk -- single-source only means one request in flight at a time per
+ *  hash, not one peer for a hash's entire lifetime). Consequence: an
+ *  attacker answers an early chunk with bad data then disconnects (or
+ *  simply lets its own in-flight slot get reaped) -- FinalizeNode/the
+ *  reaper both deliberately keep `mapBodyRangePartial` on the theory that
+ *  bodies already received are "already shape-validated" and so still
+ *  good, but shape validation (`ValidateBodyRangeResponse`) was never
+ *  CONTENT validation. An honest peer later completes the range;
+ *  `MaterialiseBlock`'s own hash check fails on the COMBINED data; the
+ *  completion-time `Misbehaving(pfrom, 100, ...)` call bans the honest
+ *  completing peer for the departed attacker's bad chunk.
+ *
+ *  Fixed by validating each chunk's own hashes against the correct SLICE of
+ *  `commitments.vCommitments` (`nStartIndex .. nStartIndex+chunkBodies.size()`)
+ *  the moment it arrives, before it is ever appended to the cross-peer
+ *  accumulation buffer -- the same per-tx hash check `MaterialiseBlock`
+ *  (primitives/block.cpp) already does over a block's FULL body list,
+ *  applied incrementally per chunk instead of once at the end. A failure
+ *  here is unambiguously the CURRENTLY-ANSWERING peer's fault (this exact
+ *  chunk, from this exact response, checked before touching any
+ *  previously-accumulated data from a possibly-different peer) -- the
+ *  caller can misbehave that peer directly and, since earlier chunks were
+ *  already validated at their OWN arrival time, keep the still-good prefix
+ *  and simply not append the bad chunk, rather than discarding everything
+ *  accumulated so far. Once every chunk has passed this check on arrival,
+ *  `MaterialiseBlock`'s own final check at completion is provably
+ *  redundant (same predicate, already applied to every element) --
+ *  matching F-157's own precedent of a defense-in-depth check the current
+ *  call pattern can no longer actually trip. */
+bool ValidateBodyRangeChunkHashes(const CCommitmentBlock &commitments, uint32_t nStartIndex,
+                                  const std::vector<CTransactionRef> &chunkBodies);
 
 /** 2.2.4 (build-plan.md's 2.2 row): the default aggregate cap on in-flight
  *  GETBODYRANGE requests across ALL peers at once (net_processing.cpp's own
