@@ -233,6 +233,20 @@ bool CZMQPublishRawBlockNotifier::NotifyBlock(const CBlockIndex *pindex) {
     CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
     {
         LOCK(cs_main);
+        // F-165 (4.1.1, F-160): three ZMQ notifiers in this file all read a
+        // block with no HaveBodies guard -- not a crash risk (already
+        // checked, gracefully declines), but the design doc's own §14.1
+        // rule 3 wording applies here too: don't materialise without
+        // consulting it. Not reachable today (no accept path produces a
+        // body-missing block this notifier would ever be triggered for --
+        // it fires from UpdatedBlockTip, which only runs for blocks that
+        // already connected, and connecting requires bodies by
+        // construction) -- future-proofing, matching F-160's own
+        // classification.
+        if (!HaveBodies(pindex)) {
+            zmqError("Block bodies not held");
+            return false;
+        }
         CBlock block;
         if (!ReadBlockFromDisk(block, pindex, consensusParams)) {
             zmqError("Can't read block from disk");
@@ -253,6 +267,13 @@ bool CZMQPublishRawChainLockNotifier::NotifyChainLock(const CBlockIndex *pindex,
     CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
     {
         LOCK(cs_main);
+        // F-165 (4.1.1, F-160): see CZMQPublishRawBlockNotifier::NotifyBlock
+        // above for the full reasoning -- same guard, same classification
+        // (future-proofing, not reachable today).
+        if (!HaveBodies(pindex)) {
+            zmqError("Block bodies not held");
+            return false;
+        }
         CBlock block;
         if (!ReadBlockFromDisk(block, pindex, consensusParams)) {
             zmqError("Can't read block from disk");
@@ -273,6 +294,13 @@ bool CZMQPublishRawChainLockSigNotifier::NotifyChainLock(const CBlockIndex *pind
     CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
     {
         LOCK(cs_main);
+        // F-165 (4.1.1, F-160): see CZMQPublishRawBlockNotifier::NotifyBlock
+        // above for the full reasoning -- same guard, same classification
+        // (future-proofing, not reachable today).
+        if (!HaveBodies(pindex)) {
+            zmqError("Block bodies not held");
+            return false;
+        }
         CBlock block;
         if (!ReadBlockFromDisk(block, pindex, consensusParams)) {
             zmqError("Can't read block from disk");
