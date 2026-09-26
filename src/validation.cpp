@@ -4974,6 +4974,17 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock> &pblock, CVali
         return error("%s: %s", __func__, FormatStateMessage(state));
     }
 
+    // 1.3.6 (F-111): evaluated exactly once per AcceptBlock call and reused
+    // below -- PerfWithholdBodies decrements a shared, attempt-counted global
+    // when -perfwithholdcount is set, so calling it more than once per accept
+    // would silently burn through the count faster than once per delivery,
+    // as three separate call sites here originally did. Moved here, ahead of
+    // its original position just below "Write block to history file" --
+    // still evaluated exactly once either way -- so the relay check
+    // immediately below has an accurate answer to work with (F-183, 4.1.3;
+    // see that check's own comment for why).
+    bool fWithholdBodies = PerfWithholdBodies(pindex);
+
     // Header is valid/has work, merkle tree is good...RELAY NOW
     // (but if it does not build on our best tip, let the SendMessages loop relay it)
     //
@@ -4983,17 +4994,29 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock> &pblock, CVali
     // fetch protocol doesn't exist yet, F-105) -- but once it does, announcing a
     // commitment-only accept would advertise bodies this node cannot yet serve
     // once most_recent_block's single-entry cache is evicted by the next block.
-    if (!IsInitialBlockDownload() && m_chain.Tip() == pindex->pprev && HaveBodies(pindex))
+    //
+    // F-183 (4.1.3, confirm-and-test round): this originally read
+    // HaveBodies(pindex) -- the PERSISTED status bit -- at a point in this
+    // function strictly BEFORE anything ever sets BLOCK_HAVE_BODIES
+    // (ReceivedBlockTransactions, several lines below, is what actually
+    // raises it). For a genuinely fresh accept this made the guard
+    // permanently false: by the time HaveBodies(pindex) COULD read true,
+    // fAlreadyHave (above) would already have returned early, so this line
+    // is never reached in that state. NewPoWValidBlock therefore never
+    // fired for ANY block today -- a live regression from F-117, not "safe
+    // by construction" as F-160's own audit assumed -- found while building
+    // this row's own regression test (acceptancebit_tests.cpp,
+    // relay_signals_fire_for_an_ordinary_block), not a future-theoretical
+    // case. Fixed: check !fWithholdBodies instead -- the same real-vs-
+    // withheld decision this accept is about to turn into
+    // HaveBodies(pindex)'s real value a few lines below, just knowable
+    // earlier, moved up alongside it rather than left where the bit it
+    // wants isn't set yet.
+    if (!IsInitialBlockDownload() && m_chain.Tip() == pindex->pprev && !fWithholdBodies)
         GetMainSignals().NewPoWValidBlock(pindex, pblock);
 
     // Write block to history file
     if (fNewBlock) *fNewBlock = true;
-    // 1.3.6 (F-111): evaluated exactly once per AcceptBlock call and reused
-    // below -- PerfWithholdBodies decrements a shared, attempt-counted global
-    // when -perfwithholdcount is set, so calling it more than once per accept
-    // would silently burn through the count faster than once per delivery,
-    // as three separate call sites here originally did.
-    bool fWithholdBodies = PerfWithholdBodies(pindex);
     if (pindex->nStatus & BLOCK_HAVE_DATA && fWithholdBodies) {
         // Already stored, still withheld: nothing to do. Falling through would write
         // a second copy and re-stamp nSequenceId for this block and its descendants.

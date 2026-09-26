@@ -36,6 +36,7 @@
 #include <util/ref.h>
 #include <util/system.h>
 #include <validation.h>
+#include <validationinterface.h>
 #include <test/test_raptoreum.h>
 
 #include <boost/algorithm/string.hpp>
@@ -52,6 +53,37 @@ struct PerfWithholdGuard {
     }
 
     ~PerfWithholdGuard() { g_perf_withhold_hashes.erase(hash); }
+};
+
+// 4.1.3: build-plan.md's own 4.1.3 row claims NewPoWValidBlock (fast
+// compact-block announce, net_processing.cpp:1781) and UpdatedBlockTip's
+// INV/header announce (:1826) are "safe by construction" against a
+// commitment-only block -- both only ever run against a pindex/pblock that
+// is already fully connected or fully in memory. This spy records every
+// real call so a test can confirm that, not just reason about it.
+// NewPoWValidBlock fires synchronously (CMainSignals::NewPoWValidBlock
+// calls straight through, validationinterface.cpp); UpdatedBlockTip is
+// queued through CMainSignals' own scheduler client instead (unlike
+// NewPoWValidBlock, its dispatcher wraps the call in
+// m_schedulerClient.AddToProcessQueue) -- callers must
+// SyncWithValidationInterfaceQueue() before reading
+// spy.updatedBlockTipCalls, or a real call can still be sitting in the
+// queue, unobserved (found the hard way: an earlier version of this test
+// read updatedBlockTipCalls without draining the queue first and its own
+// positive control failed as a result).
+class RelayAtomicitySpy : public CValidationInterface {
+public:
+    std::vector<const CBlockIndex *> newPoWValidBlockCalls;
+    std::vector<const CBlockIndex *> updatedBlockTipCalls;
+
+protected:
+    void NewPoWValidBlock(const CBlockIndex *pindex, const std::shared_ptr<const CBlock> &) override {
+        newPoWValidBlockCalls.push_back(pindex);
+    }
+
+    void UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *, bool) override {
+        updatedBlockTipCalls.push_back(pindexNew);
+    }
 };
 
 // F-168 (4.1.1 closeout): a minimal CallRPC, same technique as
@@ -2404,6 +2436,92 @@ BOOST_AUTO_TEST_CASE(smartnode_payments_null_checks_previous_transaction_instead
 
     pindexSpent->nStatus |= BLOCK_HAVE_BODIES;
     BOOST_REQUIRE(HaveBodies(pindexSpent));
+}
+
+// 4.1.3 (F-183): relay atomicity -- "relay only what you can assemble"
+// (transaction-decoupling.md §14.1 rule 1). Confirms, rather than just
+// re-derives from source, that a commitment-only (withheld) block never
+// reaches either fast-relay signal. NewPoWValidBlock's own call site
+// (validation.cpp, F-117) already gates on HaveBodies(pindex) before firing
+// -- this proves that guard actually holds under a real PerfWithholdGuard
+// accept, not just that the source reads that way. UpdatedBlockTip is
+// proven safe by the OTHER route the design doc names: it only ever fires
+// for a block that genuinely became the new tip, and FindMostWorkChain's
+// own ancestor-walk guard (F-109) never lets a body-missing block become a
+// selectable candidate in the first place -- so pindexNew is never
+// body-missing at every real call this test observes, not merely never
+// equal to this one withheld block. UpdatedBlockTip is delivered via
+// CMainSignals' own scheduler queue (validationinterface.cpp), unlike
+// NewPoWValidBlock's direct/synchronous signal -- SyncWithValidationInterfaceQueue
+// drains it before this test reads spy.updatedBlockTipCalls.
+BOOST_AUTO_TEST_CASE(relay_signals_never_fire_for_a_commitment_only_block) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    const CChainParams &chainparams = Params();
+
+    RelayAtomicitySpy spy;
+    RegisterValidationInterface(&spy);
+
+    CBlock block = CreateBlock({}, coinbaseKey);
+    std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
+    uint256 hash = block.GetHash();
+
+    {
+        PerfWithholdGuard guard(hash);
+        bool fNewBlock = false;
+        BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblock, /*fForceProcessing=*/true, &fNewBlock));
+        BOOST_REQUIRE(fNewBlock);
+    }
+    SyncWithValidationInterfaceQueue();
+
+    const CBlockIndex *pindex = LookupBlockIndex(hash);
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(!HaveBodies(pindex));
+    // Never actually became the tip -- FindMostWorkChain's own guard, not
+    // this test's own construction, is what kept it out.
+    BOOST_REQUIRE(::ChainActive().Tip()->GetBlockHash() != hash);
+
+    for (const CBlockIndex *called: spy.newPoWValidBlockCalls) {
+        BOOST_CHECK(called != pindex);
+    }
+    for (const CBlockIndex *tipCalled: spy.updatedBlockTipCalls) {
+        BOOST_CHECK(HaveBodies(tipCalled));
+    }
+
+    UnregisterValidationInterface(&spy);
+}
+
+// Positive control for the test above, in its own fixture instance (a fresh
+// TestChain100Setup chain, not a continuation) rather than a second phase
+// of the same test: an ordinary block on top of the current tip DOES fire
+// NewPoWValidBlock and DOES become the new UpdatedBlockTip target. Without
+// this, relay_signals_never_fire_for_a_commitment_only_block's own checks
+// would pass vacuously if the signals never fired at all in this harness.
+BOOST_AUTO_TEST_CASE(relay_signals_fire_for_an_ordinary_block) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    const CChainParams &chainparams = Params();
+
+    RelayAtomicitySpy spy;
+    RegisterValidationInterface(&spy);
+
+    CBlock block = CreateBlock({}, coinbaseKey);
+    std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
+    uint256 hash = block.GetHash();
+    bool fNewBlock = false;
+    BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblock, /*fForceProcessing=*/true, &fNewBlock));
+    BOOST_REQUIRE(fNewBlock);
+    SyncWithValidationInterfaceQueue();
+
+    const CBlockIndex *pindex = LookupBlockIndex(hash);
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(HaveBodies(pindex));
+    BOOST_REQUIRE(::ChainActive().Tip()->GetBlockHash() == hash);
+
+    BOOST_CHECK(std::find(spy.newPoWValidBlockCalls.begin(), spy.newPoWValidBlockCalls.end(), pindex)
+                != spy.newPoWValidBlockCalls.end());
+    BOOST_CHECK(std::find(spy.updatedBlockTipCalls.begin(), spy.updatedBlockTipCalls.end(), pindex)
+                != spy.updatedBlockTipCalls.end());
+
+    UnregisterValidationInterface(&spy);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
