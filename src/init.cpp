@@ -2610,6 +2610,18 @@ bool AppInitMain(const util::Ref &context, NodeContext &node, interfaces::BlockA
 
     // if pruning, unset the service bit and perform the initial blockstore prune
     // after any wallet rescanning has taken place.
+    //
+    // TODO (4.1.3, F-184): this only unsets NODE_NETWORK for traditional
+    // whole-block `-prune` mode (fPruneMode). A node windowed on BODIES
+    // specifically (serving commitments/headers but not every block's full
+    // transactions) has no equivalent here, and needs one -- advertising
+    // NODE_NETWORK while unable to serve every body it claims to hold is
+    // the same false promise `-prune` already avoids for whole blocks.
+    // Deliberately NOT built now: there is no "this node is body-windowed"
+    // queryable state to gate on -- body-file pruning/retention does not
+    // exist yet (F-141/F-142: "no body-file pruning exists yet", confirmed
+    // again by F-160's own audit). Revisit once that lands; see
+    // docs/findings.md's F-184 entry for the tripwire.
     if (fPruneMode) {
         LogPrintf("Unsetting NODE_NETWORK on prune mode\n");
         nLocalServices = ServiceFlags(nLocalServices & ~NODE_NETWORK);
