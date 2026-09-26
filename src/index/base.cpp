@@ -173,7 +173,31 @@ void BaseIndex::ThreadSync() {
             // the locator first, matching the outer loop's own top-of-loop
             // interrupt-exit convention two screens up, which F-166's
             // version omitted.
-            while (!HaveBodies(pindex)) {
+            // F-180 (independent review of F-170's own retry loop, LOW):
+            // HaveBodies reads pindex->nStatus, a plain uint32_t (chain.h)
+            // written under cs_main everywhere else (validation.cpp) --
+            // reading it here with no lock at all is a genuine data race
+            // under the C++ memory model, even though it's a single aligned
+            // word unlikely to tear in practice. Wrapped in a brief
+            // LOCK(cs_main) per check (once per BODIES_RETRY_INTERVAL_MS,
+            // 1s) rather than switched to an atomic read: this thread holds
+            // no other lock at this point in the loop (the earlier
+            // LOCK(cs_main) scope above has already released), so there is
+            // no lock-ordering cycle possible here, and cs_main is a
+            // RecursiveMutex (validation.h) so even a caller that already
+            // holds it elsewhere in the call stack would not deadlock --
+            // the added contention is one global-lock acquisition per
+            // second while paused, negligible next to validation's own use
+            // of the same lock.
+            while (true) {
+                bool have_bodies;
+                {
+                    LOCK(cs_main);
+                    have_bodies = HaveBodies(pindex);
+                }
+                if (have_bodies) {
+                    break;
+                }
                 if (last_log_time + SYNC_LOG_INTERVAL < GetTime()) {
                     LogPrintf("%s: bodies not held for block %s (height %d), waiting for them to become available\n",
                               GetName(), pindex->GetBlockHash().ToString(), pindex->nHeight);
@@ -341,10 +365,14 @@ void BaseIndex::Stop() {
     // bounded time either way (m_synced reached, or an immediate `return;`
     // on a body-missing block). That guarantee no longer holds now that the
     // body-missing case retries instead of exiting, so Stop() must actually
-    // signal the thread before joining it, matching upstream Bitcoin Core's
-    // own BaseIndex::Stop() (which already does this) -- this call was
-    // missing here, latent and untriggered until this fix made ThreadSync
-    // capable of blocking past its own join() point.
+    // signal the thread before joining it. F-181 (independent review of
+    // F-170, LOW): the comment here previously claimed this matches
+    // "upstream Bitcoin Core's own BaseIndex::Stop()" -- it doesn't;
+    // upstream's Stop() has no Interrupt() call at all. The call itself is
+    // this tree's own (harmless, idempotent) addition, not a port of
+    // upstream behaviour -- this was simply missing here, latent and
+    // untriggered until this fix made ThreadSync capable of blocking past
+    // its own join() point.
     Interrupt();
 
     if (m_thread_sync.joinable()) {
