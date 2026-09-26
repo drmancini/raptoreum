@@ -437,6 +437,18 @@ UniValue smartnode_payments(const JSONRPCRequest &request) {
                 uint256 blockHashTmp;
                 CTransactionRef txPrev = GetTransaction(/* block_index */ nullptr, node.mempool, txin.prevout.hash,
                                                                           Params().GetConsensus(), blockHashTmp);
+                // F-178 (independent review of F-171/F-175, MEDIUM):
+                // GetTransaction can always return nullptr, and F-171's own
+                // (correct) HaveBodies guard on TxIndex::FindTx makes it a
+                // real, reachable case here -- an input whose previous
+                // transaction lives in a body-less block. Every other
+                // GetTransaction call site in this codebase null-checks; this
+                // one didn't.
+                if (!txPrev) {
+                    throw JSONRPCError(RPC_MISC_ERROR,
+                                       strprintf("Previous transaction %s not available (bodies not held)",
+                                                 txin.prevout.hash.ToString()));
+                }
                 nValueIn += txPrev->vout[txin.prevout.n].nValue;
             }
             nBlockFees += nValueIn - tx->GetValueOut();

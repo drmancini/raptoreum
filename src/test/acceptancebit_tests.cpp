@@ -17,6 +17,7 @@
 #include <chainparams.h>
 #include <coins.h>
 #include <consensus/validation.h>
+#include <index/txindex.h>
 #include <key.h>
 #include <keystore.h>
 #include <llmq/quorums_blockprocessor.h>
@@ -2337,6 +2338,72 @@ BOOST_AUTO_TEST_CASE(findblock_respects_have_bodies_even_though_the_read_would_s
 
     pindexTip->nStatus |= BLOCK_HAVE_BODIES;
     BOOST_REQUIRE(HaveBodies(pindexTip));
+}
+
+// F-178 (independent review of F-171/F-175, CONFIRMED MEDIUM): smartnode_
+// payments (rpc/smartnode.cpp) computes each non-coinbase transaction's fee
+// by resolving every input's previous transaction via
+// GetTransaction(nullptr, node.mempool, ...) and dereferencing the result --
+// `CTransactionRef txPrev = GetTransaction(...); nValueIn +=
+// txPrev->vout[...].nValue;` -- with no null check, unlike every other
+// GetTransaction call site in this codebase (rest.cpp, rawtransaction.cpp,
+// rpcevo.cpp, quorums_instantsend.cpp, ...). GetTransaction can always
+// return nullptr in principle, but F-171's own HaveBodies guard on
+// TxIndex::FindTx (the -txindex fallback GetTransaction's nullptr-block_index
+// branch relies on) makes it a real, reachable crash today: a windowed node
+// querying smartnode payments for a block whose spending transaction's
+// input comes from a body-less block now genuinely gets nullptr back
+// instead of the transaction.
+// RED verified manually, not encoded in this committed test (a null-pointer
+// dereference is undefined behaviour -- a process-ending SIGSEGV, not a C++
+// exception BOOST_CHECK_EXCEPTION could catch in-process, matching F-169's
+// own SIGABRT-can't-be-caught precedent): the fix was reverted, this test
+// was run standalone, and it reproduced a genuine SIGSEGV inside
+// smartnode_payments' own fee-calculation loop -- before the fix was
+// restored.
+BOOST_AUTO_TEST_CASE(smartnode_payments_null_checks_previous_transaction_instead_of_crashing) {
+    // m_coinbase_txns[0]'s own containing block -- found via the global
+    // g_txindex (already synced by TestChain100Setup, see
+    // test_raptoreum.cpp's TestChainSetup ctor) while its bodies are still
+    // held, before this test withholds them.
+    uint256 spentBlockHash;
+    CTransactionRef spentCoinbase;
+    BOOST_REQUIRE(g_txindex->FindTx(m_coinbase_txns[0]->GetHash(), spentBlockHash, spentCoinbase));
+    CBlockIndex *pindexSpent = LookupBlockIndex(spentBlockHash);
+    BOOST_REQUIRE(pindexSpent != nullptr);
+    BOOST_REQUIRE(HaveBodies(pindexSpent));
+
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock blockQ = CreateAndProcessBlock({spendTx}, coinbaseKey);
+    uint256 hashQ = blockQ.GetHash();
+    CBlockIndex *pindexQ = LookupBlockIndex(hashQ);
+    BOOST_REQUIRE(pindexQ != nullptr);
+    BOOST_REQUIRE(HaveBodies(pindexQ));
+
+    // Sanity: with both blocks' bodies held, the RPC succeeds today.
+    const std::string cmd = "smartnode payments " + hashQ.ToString() + " 1";
+    BOOST_CHECK_NO_THROW(CallRPCForTest(m_node, cmd));
+
+    // Withhold the SPENT block's bodies -- not blockQ's own -- so
+    // smartnode_payments' own HaveBodies guard on blockQ still passes (it
+    // reads blockQ fine) but resolving spendTx's input's previous
+    // transaction, which lives in the now body-less block, fails.
+    pindexSpent->nStatus &= ~BLOCK_HAVE_BODIES;
+    BOOST_REQUIRE(!HaveBodies(pindexSpent));
+    uint256 blockHashTmp;
+    // Sanity: GetTransaction genuinely returns nullptr now (via the
+    // -txindex fallback, F-171's guard), not just "this test's premise is
+    // wrong".
+    BOOST_REQUIRE(!GetTransaction(nullptr, m_node.mempool, m_coinbase_txns[0]->GetHash(),
+                                  Params().GetConsensus(), blockHashTmp));
+
+    BOOST_CHECK_EXCEPTION(CallRPCForTest(m_node, cmd), std::runtime_error,
+                          [](const std::runtime_error &e) {
+                              return std::string(e.what()).find("not available") != std::string::npos;
+                          });
+
+    pindexSpent->nStatus |= BLOCK_HAVE_BODIES;
+    BOOST_REQUIRE(HaveBodies(pindexSpent));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
