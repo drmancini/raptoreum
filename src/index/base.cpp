@@ -16,6 +16,12 @@ constexpr int64_t
 SYNC_LOG_INTERVAL = 30; // seconds
 constexpr int64_t
 SYNC_LOCATOR_WRITE_INTERVAL = 30; // seconds
+// F-170 (4.1.1 follow-up): how often ThreadSync rechecks HaveBodies on a
+// block it's blocked on. HaveBodies is a single in-memory status-bit check
+// (no disk I/O), so this can be short without meaningfully spinning; the
+// SYNC_LOG_INTERVAL-gated log line below still only prints every 30s.
+constexpr int64_t
+BODIES_RETRY_INTERVAL_MS = 1000; // milliseconds
 
 template<typename... Args>
 static void FatalError(const char *fmt, const Args &... args) {
@@ -119,26 +125,50 @@ void BaseIndex::ThreadSync() {
             // F-166 (4.1.1, F-160's own HIGH-severity finding among the
             // remaining named gaps): a windowed node's catch-up sync loop
             // can't proceed past a body-missing block -- stop syncing here
-            // (log, return) rather than escalating to FatalError, which
-            // aborts the WHOLE NODE, not just this index. That distinction
-            // matters here specifically: unlike a genuine disk-read
-            // failure below (corruption, a real bug -- still fatal, kept
-            // as-is), "bodies not held yet" is an ordinary, expected state
-            // for a windowed node and must not take the node down. This is
-            // the shared fix point for BOTH TxIndex and BlockFilterIndex
-            // (both derive from BaseIndex and share this one call site) --
-            // BaseIndex's own live BlockConnected path (below) needs no
-            // equivalent guard, confirmed by reading it: it's always
-            // handed an already-full in-memory CBlock by its caller, never
-            // reads disk itself. Not reachable today (no accept path
-            // produces a body-missing block on the active chain this loop
-            // would ever reach, no body-retention window exists yet to
-            // remove bodies from one after the fact) -- future-proofing,
-            // matching F-160's own classification.
-            if (!HaveBodies(pindex)) {
-                LogPrintf("%s: bodies not held for block %s, pausing sync (will resume once available)\n",
-                          GetName(), pindex->GetBlockHash().ToString());
-                return;
+            // rather than escalating to FatalError, which aborts the WHOLE
+            // NODE, not just this index. That distinction matters here
+            // specifically: unlike a genuine disk-read failure below
+            // (corruption, a real bug -- still fatal, kept as-is), "bodies
+            // not held yet" is an ordinary, expected state for a windowed
+            // node and must not take the node down. This is the shared fix
+            // point for BOTH TxIndex and BlockFilterIndex (both derive from
+            // BaseIndex and share this one call site) -- BaseIndex's own
+            // live BlockConnected path (below) needs no equivalent guard,
+            // confirmed by reading it: it's always handed an already-full
+            // in-memory CBlock by its caller, never reads disk itself. Not
+            // reachable today (no accept path produces a body-missing block
+            // on the active chain this loop would ever reach, no
+            // body-retention window exists yet to remove bodies from one
+            // after the fact) -- future-proofing, matching F-160's own
+            // classification.
+            //
+            // F-170 (independent review of F-166): F-166's own `return;`
+            // here, and its log line's claim of "pausing... will resume
+            // once available", did not match each other -- ThreadSync runs
+            // on m_thread_sync, spawned exactly once (Start()), with no
+            // restart mechanism anywhere; `return`ing here ends that thread
+            // permanently, m_synced never becomes true, and every future
+            // block is silently ignored by BlockConnected (which checks
+            // m_synced) forever. Fixed to actually retry: block on THIS
+            // pindex (not re-derived via NextSyncBlock, which would
+            // advance past it -- pindex here IS the stuck target) until
+            // either HaveBodies(pindex) becomes true or the thread is
+            // interrupted (shutdown), matching CThreadInterrupt's own
+            // sleep_for/return-on-interrupt convention used throughout this
+            // codebase (net.cpp, llmq/*). Interrupt exit now also writes
+            // the locator first, matching the outer loop's own top-of-loop
+            // interrupt-exit convention two screens up, which F-166's
+            // version omitted.
+            while (!HaveBodies(pindex)) {
+                if (last_log_time + SYNC_LOG_INTERVAL < GetTime()) {
+                    LogPrintf("%s: bodies not held for block %s (height %d), waiting for them to become available\n",
+                              GetName(), pindex->GetBlockHash().ToString(), pindex->nHeight);
+                    last_log_time = GetTime();
+                }
+                if (!m_interrupt.sleep_for(std::chrono::milliseconds(BODIES_RETRY_INTERVAL_MS))) {
+                    WriteBestBlock(pindex);
+                    return;
+                }
             }
             CBlock block;
             if (!ReadBlockFromDisk(block, pindex, consensus_params)) {
@@ -285,6 +315,19 @@ void BaseIndex::Start() {
 
 void BaseIndex::Stop() {
     UnregisterValidationInterface(this);
+
+    // F-170: ThreadSync can now block indefinitely inside its bodies-retry
+    // wait (see the loop above) with nothing but m_interrupt to wake it --
+    // under F-166's original code this join() always completed promptly on
+    // its own, since that thread was guaranteed to terminate itself within
+    // bounded time either way (m_synced reached, or an immediate `return;`
+    // on a body-missing block). That guarantee no longer holds now that the
+    // body-missing case retries instead of exiting, so Stop() must actually
+    // signal the thread before joining it, matching upstream Bitcoin Core's
+    // own BaseIndex::Stop() (which already does this) -- this call was
+    // missing here, latent and untriggered until this fix made ThreadSync
+    // capable of blocking past its own join() point.
+    Interrupt();
 
     if (m_thread_sync.joinable()) {
         m_thread_sync.join();

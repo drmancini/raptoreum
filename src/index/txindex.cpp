@@ -232,6 +232,30 @@ bool TxIndex::FindTx(const uint256 &tx_hash, uint256 &block_hash, CTransactionRe
     CBlockHeader header;
     try {
         file >> header;
+    } catch (const std::exception &e) {
+        return error("%s: Deserialize or I/O error - %s", __func__, e.what());
+    }
+
+    // F-171 (independent review of F-163): this reads blk*.dat directly via
+    // OpenBlockFile, bypassing ReadBlockFromDisk and therefore HaveBodies
+    // entirely -- undermining F-163's own guard on GetTransaction, whose
+    // txindex fallback calls straight into this function. The index's own
+    // tx-position record (m_db->ReadTxPos above) was written by WriteBlock
+    // back when the block genuinely had bodies; that says nothing about
+    // whether it still does now, which is exactly the gap a future
+    // body-retention window opens. Checked here, once the header (and so
+    // the block hash) is known but before the transaction bytes are
+    // extracted, so every caller is covered uniformly -- not just
+    // GetTransaction's fallback.
+    {
+        LOCK(cs_main);
+        const CBlockIndex *pindex = LookupBlockIndex(header.GetHash());
+        if (!pindex || !HaveBodies(pindex)) {
+            return error("%s: bodies not held for block %s", __func__, header.GetHash().ToString());
+        }
+    }
+
+    try {
         if (fseek(file.Get(), postx.nTxOffset, SEEK_CUR)) {
             return error("%s: fseek(...) failed", __func__);
         }
