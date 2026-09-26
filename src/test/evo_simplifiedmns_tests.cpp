@@ -8,6 +8,7 @@
 #include <bls/bls.h>
 #include <evo/simplifiedmns.h>
 #include <netbase.h>
+#include <validation.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -69,5 +70,42 @@ BOOST_AUTO_TEST_CASE(simplifiedmns_merkleroots)
 
         BOOST_CHECK(expectedMerkleRoot == calculatedMerkleRoot);
         }
+
+// F-172 (independent review of F-160/4.1.1): BuildSimplifiedMNListDiff
+// (evo/simplifiedmns.cpp) called ReadBlockFromDisk with no HaveBodies guard
+// -- reached from the P2P GETMNLISTDIFF handler and the protx diff RPC.
+// Already failed gracefully (returns false; the P2P caller Misbehaving(1)s
+// the requester) rather than crashing, so same no-PerfWithholdGuard-needed
+// reasoning as F-163/F-168/F-171: blk*.dat holds the real bytes
+// unconditionally under Phase 1 (F-110), so clearing BLOCK_HAVE_BODIES alone
+// is enough to prove the guard checks the bit rather than happening to fail
+// because the bytes were genuinely gone.
+BOOST_FIXTURE_TEST_CASE(buildsimplifiedmnlistdiff_respects_have_bodies_even_though_the_read_would_succeed, TestChain100Setup)
+{
+    CBlockIndex *pindexTip = ::ChainActive().Tip();
+    BOOST_REQUIRE(pindexTip != nullptr);
+    BOOST_REQUIRE(HaveBodies(pindexTip));
+
+    CSimplifiedMNListDiff mnListDiff;
+    std::string strError;
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(BuildSimplifiedMNListDiff(uint256(), pindexTip->GetBlockHash(), mnListDiff, strError));
+    }
+
+    pindexTip->nStatus &= ~BLOCK_HAVE_BODIES;
+    BOOST_REQUIRE(!HaveBodies(pindexTip));
+
+    CSimplifiedMNListDiff mnListDiff2;
+    std::string strError2;
+    {
+        LOCK(cs_main);
+        BOOST_CHECK(!BuildSimplifiedMNListDiff(uint256(), pindexTip->GetBlockHash(), mnListDiff2, strError2));
+    }
+    BOOST_CHECK(strError2.find("bodies not held") != std::string::npos);
+
+    pindexTip->nStatus |= BLOCK_HAVE_BODIES;
+    BOOST_REQUIRE(HaveBodies(pindexTip));
+}
 
 BOOST_AUTO_TEST_SUITE_END()
