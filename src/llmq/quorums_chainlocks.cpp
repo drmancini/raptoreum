@@ -14,6 +14,7 @@
 #include <smartnode/smartnode-sync.h>
 #include <net_processing.h>
 #include <scheduler.h>
+#include <shutdown.h>
 #include <spork.h>
 #include <txmempool.h>
 #include <ui_interface.h>
@@ -326,8 +327,18 @@ namespace llmq {
 
                 auto txids = GetBlockTxs(pindexWalk->GetBlockHash());
                 if (!txids) {
-                    pindexWalk = pindexWalk->pprev;
-                    continue;
+                    // F-182 (4.1.2): fail closed instead of fail open.
+                    // GetBlockTxs returns null precisely when its own
+                    // internal ReadBlockFromDisk (:454) failed -- this used
+                    // to skip to the parent and assume the block was safe,
+                    // the exact inverse of what a failed read should imply.
+                    // Mirrors this function's own not-safe-enough branch
+                    // three lines below (declines to sign via `return;`)
+                    // rather than inventing new behaviour.
+                    LogPrint(BCLog::CHAINLOCKS,
+                             "CChainLocksHandler::%s -- could not read block %s to check TX safety, not signing\n",
+                             __func__, pindexWalk->GetBlockHash().ToString());
+                    return;
                 }
 
                 for (auto &txid: *txids) {
@@ -548,8 +559,48 @@ namespace llmq {
                     if (!MarkConflictingBlock(state, params, jt->second)) {
                         LogPrintf("CChainLocksHandler::%s -- MarkConflictingBlock failed: %s\n", __func__,
                                   FormatStateMessage(state));
-                        // This should not have happened and we are in a state were it's not safe to continue anymore
-                        assert(false);
+                        // F-182/F-187 (4.1.2, corrected): this used to
+                        // assert(false) and take the whole node down with a
+                        // raw SIGABRT. The original comment claimed
+                        // MarkConflictingBlock's failure was "provably
+                        // unreachable" per 1.3.7/F-112's own invariant that
+                        // m_chain can never hold a commitment-only block --
+                        // true, but incomplete: that invariant only rules
+                        // out DisconnectTip's ReadBlockFromDisk failing for
+                        // MISSING BODIES. DisconnectTip
+                        // (validation.cpp) can also fail via DisconnectBlock
+                        // returning DISCONNECT_FAILED (corrupt/mismatched
+                        // undo data, checked directly this round) or
+                        // FlushStateToDisk(..., IF_NEEDED) failing -- both
+                        // real, reachable today, neither gated on bodies at
+                        // all. So this branch is NOT provably unreachable in
+                        // general; it is reachable exactly when something is
+                        // genuinely wrong with on-disk chain state, the same
+                        // class of failure this project's OTHER DisconnectTip
+                        // callers (F-167: ActivateBestChainStep's reorg loop)
+                        // already treat as fatal via AbortNode, not a
+                        // silent, graceful continue -- "core reorg machinery
+                        // mid-mutation of m_chain, no partial-reorg state to
+                        // pause into" (F-167's own words apply here
+                        // identically). FlushStateToDisk's own internal
+                        // failure paths already call AbortNode/StartShutdown
+                        // themselves before returning false, so that specific
+                        // cause needs no separate escalation here -- but
+                        // DisconnectBlock's DISCONNECT_FAILED paths
+                        // (corrupt undo data, EvoDB mismatch not already
+                        // caught) return false WITHOUT calling AbortNode, so
+                        // this call site is the one place that failure
+                        // becomes visible. Escalating here (rather than
+                        // BaseIndex::ThreadSync/F-166's pause-and-retry, which
+                        // is for an OPTIONAL subsystem, not the active
+                        // chain itself) matches the graceful-shutdown half of
+                        // AbortNode's own behaviour (log clearly, then
+                        // StartShutdown()) without the raw process-abort
+                        // assert(false) used to cause -- still a real
+                        // improvement over the original crash, just not a
+                        // silent decline.
+                        StartShutdown();
+                        return;
                     }
                     LogPrintf("CChainLocksHandler::%s -- CLSIG (%s) marked block %s as conflicting\n",
                               __func__, clsig->ToString(), jt->second->GetBlockHash().ToString());
