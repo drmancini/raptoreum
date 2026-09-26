@@ -404,13 +404,24 @@ UniValue smartnode_payments(const JSONRPCRequest &request) {
 
     while (vecPayments.size() < uint64_t(std::abs(nCount)) && pindex != nullptr) {
 
-        if (!HaveBodies(pindex)) {
-            throw JSONRPCError(RPC_MISC_ERROR, "Block not available (bodies not held)");
-        }
-
+        // F-175 (independent review of F-160/4.1.1): F-168's own guard and
+        // the read immediately below it ran with no cs_main held at all --
+        // the two LOCK(cs_main) scopes above (request.params[0].isNull()
+        // branch) already close before this loop starts. Inconsistent with
+        // every sibling site this campaign fixed (e.g. getblock's own
+        // LookupBlockIndex+GetBlockChecked pair, rpc/blockchain.cpp, both
+        // under one LOCK(cs_main)) -- harmless today (no body-pruning
+        // exists yet to race against), fixed for consistency while this
+        // code was already open, matching that same established shape.
         CBlock block;
-        if (!ReadBlockFromDisk(block, pindex, Params().GetConsensus())) {
-            throw JSONRPCError(RPC_INTERNAL_ERROR, "Can't read block from disk");
+        {
+            LOCK(cs_main);
+            if (!HaveBodies(pindex)) {
+                throw JSONRPCError(RPC_MISC_ERROR, "Block not available (bodies not held)");
+            }
+            if (!ReadBlockFromDisk(block, pindex, Params().GetConsensus())) {
+                throw JSONRPCError(RPC_INTERNAL_ERROR, "Can't read block from disk");
+            }
         }
 
         // Note: we have to actually calculate block reward from scratch instead of simply querying coinbase vout
