@@ -426,6 +426,41 @@ std::string gbt_update_name(const Update* update) {
     return s;
 }
 
+// 4.4.1 (F-191): see rpc/mining.h for the design rationale. Trivial by
+// design, kept as its own function purely for testability.
+bool WantsCommitmentModeTemplate(const std::set <std::string> &setClientRules) {
+    return setClientRules.find(GBT_RULE_COMMITMENTS) != setClientRules.end();
+}
+
+// 4.4.1 (F-191): see rpc/mining.h. Matches the pre-existing inline shape this
+// replaces field-for-field except "data", which is omitted in commitment
+// mode.
+UniValue BuildGBTTransactionEntry(const CTransaction &tx, const std::map <uint256, int64_t> &setTxIndex,
+                                  CAmount nFee, CAmount nSpecialTxFee, int64_t nSigOps, bool fCommitmentMode) {
+    UniValue entry(UniValue::VOBJ);
+
+    if (!fCommitmentMode) {
+        entry.pushKV("data", EncodeHexTx(tx));
+    }
+
+    entry.pushKV("hash", tx.GetHash().GetHex());
+
+    UniValue deps(UniValue::VARR);
+    for (const CTxIn &in: tx.vin) {
+        auto it = setTxIndex.find(in.prevout.hash);
+        if (it != setTxIndex.end()) {
+            deps.push_back(it->second);
+        }
+    }
+    entry.pushKV("depends", deps);
+
+    entry.pushKV("fee", nFee);
+    entry.pushKV("specialTxfee", nSpecialTxFee);
+    entry.pushKV("sigops", nSigOps);
+
+    return entry;
+}
+
 static UniValue getblocktemplate(const JSONRPCRequest &request) {
     RPCHelpMan{"getblocktemplate",
                "\nIf the request parameters include a 'mode' key, that is used to explicitly select between the default 'template' request or a 'proposal'.\n"
@@ -719,6 +754,12 @@ static UniValue getblocktemplate(const JSONRPCRequest &request) {
     UniValue aCaps(UniValue::VARR);
     aCaps.push_back("proposal");
 
+    // 4.4.1 (F-191): commitment-mode, negotiated via the existing rules
+    // channel exactly like a BIP9 softfork rule -- see rpc/mining.h for the
+    // full design rationale. CreateNewBlock/pblocktemplate above are
+    // completely unaffected; only this array's own per-entry shape changes.
+    const bool fCommitmentMode = WantsCommitmentModeTemplate(setClientRules);
+
     UniValue transactions(UniValue::VARR);
     std::map <uint256, int64_t> setTxIndex;
     int i = 0;
@@ -730,25 +771,11 @@ static UniValue getblocktemplate(const JSONRPCRequest &request) {
         if (tx.IsCoinBase())
             continue;
 
-        UniValue entry(UniValue::VOBJ);
-
-        entry.pushKV("data", EncodeHexTx(tx));
-
-        entry.pushKV("hash", txHash.GetHex());
-
-        UniValue deps(UniValue::VARR);
-        for (const CTxIn &in: tx.vin) {
-            if (setTxIndex.count(in.prevout.hash))
-                deps.push_back(setTxIndex[in.prevout.hash]);
-        }
-        entry.pushKV("depends", deps);
-
         int index_in_template = i - 1;
-        entry.pushKV("fee", pblocktemplate->vTxFees[index_in_template]);
-        entry.pushKV("specialTxfee", pblocktemplate->vSpecialTxFees[index_in_template]);
-        entry.pushKV("sigops", pblocktemplate->vTxSigOps[index_in_template]);
-
-        transactions.push_back(entry);
+        transactions.push_back(BuildGBTTransactionEntry(tx, setTxIndex, pblocktemplate->vTxFees[index_in_template],
+                                                          pblocktemplate->vSpecialTxFees[index_in_template],
+                                                          pblocktemplate->vTxSigOps[index_in_template],
+                                                          fCommitmentMode));
     }
 
     UniValue aux(UniValue::VOBJ);
@@ -803,6 +830,15 @@ static UniValue getblocktemplate(const JSONRPCRequest &request) {
                 break;
             }
         }
+    }
+    // 4.4.1 (F-191): commitment-mode is not a versionbit deployment (it
+    // changes only this RPC response's own serialization, never
+    // pblock->nVersion or consensus state), so it is echoed back here
+    // directly rather than through the Updates()/EUpdate loop above --
+    // confirming to the client that its request was honored, matching that
+    // loop's own established convention of echoing an accepted rule.
+    if (fCommitmentMode) {
+        aRules.push_back(GBT_RULE_COMMITMENTS);
     }
     result.pushKV("version", pblock->nVersion);
     result.pushKV("rules", aRules);
