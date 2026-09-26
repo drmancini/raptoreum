@@ -10,10 +10,12 @@
 #include <consensus/validation.h>
 #include <validation.h>
 #include <smartnode/smartnode-payments.h>
+#include <core_io.h>
 #include <miner.h>
 #include <policy/policy.h>
 #include <pow.h>
 #include <pubkey.h>
+#include <rpc/mining.h>
 #include <script/standard.h>
 #include <txmempool.h>
 #include <uint256.h>
@@ -671,5 +673,86 @@ BOOST_AUTO_TEST_CASE(CreateNewBlock_validity)
 
                 fCheckpointsEnabled = true;
         }
+
+// F-191 (4.4.1): getblocktemplate negotiates commitment-mode the same way it
+// already negotiates BIP9 softfork rules -- via its own client-declared
+// `rules` request array, parsed into setClientRules (rpc/mining.cpp). This is
+// that negotiation decision, kept as its own trivial function specifically so
+// it is directly unit-testable without a live RPC dispatch (which needs a
+// connected peer and IBD-complete state neither this suite nor
+// acceptancebit_tests' fixture provide cheaply -- verified instead by direct
+// reading that getblocktemplate computes and threads this flag correctly, the
+// same convention this project already applies to net_processing.cpp's own
+// untested dispatch glue, e.g. F-149/F-152/F-162).
+BOOST_AUTO_TEST_CASE(wants_commitment_mode_template_reads_the_negotiated_rule) {
+    std::set<std::string> none;
+    BOOST_CHECK(!WantsCommitmentModeTemplate(none));
+
+    std::set<std::string> unrelated = {"segwit"};
+    BOOST_CHECK(!WantsCommitmentModeTemplate(unrelated));
+
+    std::set<std::string> negotiated = {GBT_RULE_COMMITMENTS};
+    BOOST_CHECK(WantsCommitmentModeTemplate(negotiated));
+
+    std::set<std::string> alongsideOthers = {"segwit", GBT_RULE_COMMITMENTS};
+    BOOST_CHECK(WantsCommitmentModeTemplate(alongsideOthers));
+}
+
+// F-191 (4.4.1): the "transactions" array entry commitment-mode changes --
+// "data" (full transaction bytes) is omitted; everything else a pool needs
+// (the bare identifier via "hash", "depends", "fee", "specialTxfee",
+// "sigops") stays. "hash" is already the bare 32-byte identifier a miner
+// needs to compute the merkle root -- mining hardware never sees transaction
+// bytes at all, only the 80-byte header -- so nothing about how a miner turns
+// this into a mined header changes; "data" was only ever needed later, to
+// reconstruct a submittable full block, which commitment-mode's own
+// submitblock path (4.4.2, not built here) does from bodies the submitting
+// node already holds instead.
+BOOST_AUTO_TEST_CASE(gbt_transaction_entry_omits_data_only_in_commitment_mode) {
+    CMutableTransaction dependency;
+    dependency.vout.resize(1);
+    dependency.vout[0].nValue = 1 * COIN;
+    CTransaction dependencyTx(dependency);
+
+    CMutableTransaction spend;
+    spend.vin.resize(1);
+    spend.vin[0].prevout = COutPoint(dependencyTx.GetHash(), 0);
+    spend.vout.resize(1);
+    spend.vout[0].nValue = 1 * COIN;
+    CTransaction spendTx(spend);
+
+    std::map<uint256, int64_t> setTxIndex;
+    setTxIndex[dependencyTx.GetHash()] = 0;
+    setTxIndex[spendTx.GetHash()] = 1;
+
+    const CAmount nFee = 12345;
+    const CAmount nSpecialTxFee = 6789;
+    const int64_t nSigOps = 4;
+
+    UniValue full = BuildGBTTransactionEntry(spendTx, setTxIndex, nFee, nSpecialTxFee, nSigOps,
+                                              /*fCommitmentMode=*/false);
+    BOOST_CHECK(find_value(full, "data").isStr());
+    BOOST_CHECK_EQUAL(find_value(full, "data").get_str(), EncodeHexTx(spendTx));
+    BOOST_CHECK_EQUAL(find_value(full, "hash").get_str(), spendTx.GetHash().GetHex());
+    UniValue fullDeps = find_value(full, "depends");
+    BOOST_REQUIRE(fullDeps.isArray());
+    BOOST_REQUIRE_EQUAL(fullDeps.size(), 1U);
+    BOOST_CHECK_EQUAL(fullDeps[0].get_int64(), 0);
+    BOOST_CHECK_EQUAL(find_value(full, "fee").get_int64(), nFee);
+    BOOST_CHECK_EQUAL(find_value(full, "specialTxfee").get_int64(), nSpecialTxFee);
+    BOOST_CHECK_EQUAL(find_value(full, "sigops").get_int64(), nSigOps);
+
+    UniValue commitment = BuildGBTTransactionEntry(spendTx, setTxIndex, nFee, nSpecialTxFee, nSigOps,
+                                                    /*fCommitmentMode=*/true);
+    BOOST_CHECK(find_value(commitment, "data").isNull());
+    BOOST_CHECK_EQUAL(find_value(commitment, "hash").get_str(), spendTx.GetHash().GetHex());
+    UniValue commitDeps = find_value(commitment, "depends");
+    BOOST_REQUIRE(commitDeps.isArray());
+    BOOST_REQUIRE_EQUAL(commitDeps.size(), 1U);
+    BOOST_CHECK_EQUAL(commitDeps[0].get_int64(), 0);
+    BOOST_CHECK_EQUAL(find_value(commitment, "fee").get_int64(), nFee);
+    BOOST_CHECK_EQUAL(find_value(commitment, "specialTxfee").get_int64(), nSpecialTxFee);
+    BOOST_CHECK_EQUAL(find_value(commitment, "sigops").get_int64(), nSigOps);
+}
 
 BOOST_AUTO_TEST_SUITE_END()
