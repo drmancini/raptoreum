@@ -159,6 +159,90 @@ BOOST_FIXTURE_TEST_CASE(index_sync_resumes_once_bodies_become_available, TestCha
     txindex.Stop();
 }
 
+// F-177 (independent review of F-170's own retry loop, HIGH): the retry
+// loop's interrupt-exit branch (`if (!m_interrupt.sleep_for(...)) {
+// WriteBestBlock(pindex); return; }`) wrote the locator for `pindex` -- but
+// at that point in the loop `pindex` is the STUCK sync TARGET (assigned via
+// `pindex = pindex_next` earlier in this same iteration), not the last block
+// actually indexed via WriteBlock (which only runs AFTER this retry loop
+// exits successfully, later in the same iteration). This proves the on-disk
+// locator, after an interrupt fired while paused in the retry loop, still
+// points at the last block genuinely written -- not past the withheld one --
+// by stopping a first TxIndex instance mid-retry, restoring the withheld
+// block's body, then starting a SECOND TxIndex instance against the SAME
+// on-disk database (f_memory=false, so it persists across instances within
+// this test's own temp datadir) and confirming it still genuinely syncs the
+// withheld block, rather than its Init() having already considered it done.
+BOOST_FIXTURE_TEST_CASE(index_sync_writes_correct_locator_on_interrupt_during_retry, TestChain100Setup)
+{
+    CScript coinbase_script_pub_key = GetScriptForDestination(coinbaseKey.GetPubKey().GetID());
+    std::vector<CMutableTransaction> no_txns;
+    const CBlock &withheld_block = CreateAndProcessBlock(no_txns, coinbase_script_pub_key);
+    uint256 withheld_hash = withheld_block.GetHash();
+    uint256 withheld_coinbase_hash = withheld_block.vtx[0]->GetHash();
+
+    CBlockIndex *pindex = LookupBlockIndex(withheld_hash);
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(::ChainActive().Tip() == pindex);
+    BOOST_REQUIRE(HaveBodies(pindex));
+
+    auto guard = MakeUnique<PerfWithholdGuard>(withheld_hash);
+    pindex->nStatus &= ~BLOCK_HAVE_BODIES;
+    BOOST_REQUIRE(!HaveBodies(pindex));
+
+    {
+        // f_memory=false: persists to a real on-disk DB under this test's own
+        // temp datadir, so a second instance below can reopen the same file.
+        TxIndex txindex(1 << 20, /*f_memory=*/false);
+        txindex.Start();
+
+        CTransactionRef tx_disk;
+        uint256 block_hash;
+        constexpr int64_t timeout_ms = 10 * 1000;
+        int64_t time_start = GetTimeMillis();
+        while (!txindex.FindTx(m_coinbase_txns[0]->GetHash(), block_hash, tx_disk)) {
+            BOOST_REQUIRE(time_start + timeout_ms > GetTimeMillis());
+            UninterruptibleSleep(std::chrono::milliseconds{100});
+        }
+        // Give the sync thread a further beat to reach (and pause at) the
+        // withheld block's own retry loop.
+        UninterruptibleSleep(std::chrono::milliseconds{200});
+        BOOST_REQUIRE(!txindex.FindTx(withheld_coinbase_hash, block_hash, tx_disk));
+
+        // Stop() interrupts the thread while it's inside the bodies-retry
+        // loop -- exactly the interrupt-exit branch under test.
+        txindex.Stop();
+    }
+
+    // Restore the body so a genuine sync attempt against it can succeed --
+    // isolating whether the SECOND instance's behaviour reflects a correct
+    // locator (still attempts this block) or the buggy one (skips it, since
+    // its own Init() would already consider it done).
+    guard.reset();
+    pindex->nStatus |= BLOCK_HAVE_BODIES;
+    BOOST_REQUIRE(HaveBodies(pindex));
+
+    TxIndex txindex2(1 << 20, /*f_memory=*/false);
+    txindex2.Start();
+
+    constexpr int64_t timeout_ms2 = 10 * 1000;
+    int64_t time_start2 = GetTimeMillis();
+    while (!txindex2.BlockUntilSyncedToCurrentChain()) {
+        BOOST_REQUIRE(time_start2 + timeout_ms2 > GetTimeMillis());
+        UninterruptibleSleep(std::chrono::milliseconds{100});
+    }
+
+    // If the first instance's interrupt exit had written a locator pointing
+    // PAST the withheld block (the bug), the second instance's Init() would
+    // consider height 101 already done and never actually index its
+    // coinbase. This confirms genuine sync happened, not a skip.
+    uint256 block_hash2;
+    CTransactionRef tx_disk2;
+    BOOST_CHECK(txindex2.FindTx(withheld_coinbase_hash, block_hash2, tx_disk2));
+
+    txindex2.Stop();
+}
+
 // F-171 (independent review of F-163): TxIndex::FindTx (index/txindex.cpp)
 // reads blk*.dat directly via OpenBlockFile, bypassing ReadBlockFromDisk and
 // therefore HaveBodies entirely -- undermining F-163's own GetTransaction

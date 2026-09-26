@@ -87,6 +87,20 @@ static const CBlockIndex *NextSyncBlock(const CBlockIndex *pindex_prev) {
 
 void BaseIndex::ThreadSync() {
     const CBlockIndex *pindex = m_best_block_index.load();
+    // F-177 (independent review of F-170's own retry loop, HIGH): `pindex`
+    // is reassigned to the CURRENT SYNC TARGET a few lines below (`pindex =
+    // pindex_next`), before that target has actually been written via
+    // WriteBlock() later in the same iteration. F-170's retry-loop interrupt
+    // exit wrote `pindex` at exactly that point -- the stuck target, not the
+    // last block genuinely indexed -- so a clean shutdown while paused in
+    // the retry loop persisted a locator that skipped the withheld block
+    // entirely; a restart would then treat it as done (for BlockFilterIndex
+    // specifically, this crashes on startup: its WriteBlock does a height-1
+    // lookup that fails on a block that was never actually written).
+    // `last_written_index` tracks what its name says -- only ever updated
+    // right after WriteBlock() succeeds -- and is what every interrupt exit
+    // in this function writes, instead of `pindex` directly.
+    const CBlockIndex *last_written_index = pindex;
     if (!m_synced) {
         auto &consensus_params = Params().GetConsensus();
 
@@ -94,7 +108,7 @@ void BaseIndex::ThreadSync() {
         int64_t last_locator_write_time = 0;
         while (true) {
             if (m_interrupt) {
-                WriteBestBlock(pindex);
+                WriteBestBlock(last_written_index);
                 return;
             }
 
@@ -102,7 +116,7 @@ void BaseIndex::ThreadSync() {
                 LOCK(cs_main);
                 const CBlockIndex *pindex_next = NextSyncBlock(pindex);
                 if (!pindex_next) {
-                    WriteBestBlock(pindex);
+                    WriteBestBlock(last_written_index);
                     m_best_block_index = pindex;
                     m_synced = true;
                     break;
@@ -166,7 +180,10 @@ void BaseIndex::ThreadSync() {
                     last_log_time = GetTime();
                 }
                 if (!m_interrupt.sleep_for(std::chrono::milliseconds(BODIES_RETRY_INTERVAL_MS))) {
-                    WriteBestBlock(pindex);
+                    // F-177: write the last block ACTUALLY indexed, not this
+                    // loop's own stuck target -- see the comment at the top
+                    // of this function.
+                    WriteBestBlock(last_written_index);
                     return;
                 }
             }
@@ -181,6 +198,7 @@ void BaseIndex::ThreadSync() {
                            __func__, pindex->GetBlockHash().ToString());
                 return;
             }
+            last_written_index = pindex;
         }
     }
 
