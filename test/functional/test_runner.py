@@ -239,7 +239,7 @@ DISABLED_SCRIPTS = [
     # all. check_script_list() needs to know about these too, or it reports
     # each one as accidentally forgotten (and aborts under --ci) rather
     # than recognising it as a real, intentional exclusion.
-    "feature_governance_objects.py",  # Raptoreum does not use governance
+    "feature_governance_objects.py",  # governance is not exercised on Raptoreum
 ]
 
 NON_SCRIPTS = [
@@ -612,6 +612,18 @@ def check_script_list(*, src_dir, fail_on_warn):
     not being run by pull-tester.py."""
     script_dir = src_dir + '/test/functional/'
     python_files = set([test_file for test_file in os.listdir(script_dir) if test_file.endswith(".py")])
+
+    disabled_names = set(map(lambda x: x.split()[0], DISABLED_SCRIPTS))
+    all_names = set(map(lambda x: x.split()[0], ALL_SCRIPTS))
+    both = disabled_names & all_names
+    assert not both, "listed in both ALL_SCRIPTS and DISABLED_SCRIPTS, so it would run while claiming to be disabled: %s" % sorted(both)
+
+    stale_disabled = disabled_names - python_files
+    if stale_disabled:
+        print("%sWARNING!%s DISABLED_SCRIPTS names a file that no longer exists: %s." % (BOLD[1], BOLD[0], str(sorted(stale_disabled))))
+        if fail_on_warn:
+            sys.exit(1)
+
     missed_tests = list(python_files - set(map(lambda x: x.split()[0], ALL_SCRIPTS + NON_SCRIPTS + DISABLED_SCRIPTS)))
     if len(missed_tests) != 0:
         print("%sWARNING!%s The following scripts are not being run: %s. Check the test lists in test_runner.py." % (BOLD[1], BOLD[0], str(missed_tests)))
