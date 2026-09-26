@@ -6,6 +6,7 @@
 #include <index/txindex.h>
 #include <script/standard.h>
 #include <test/test_raptoreum.h>
+#include <util/memory.h>
 #include <util/system.h>
 #include <util/time.h>
 #include <validation.h>
@@ -79,6 +80,125 @@ BOOST_FIXTURE_TEST_CASE(index_sync_pauses_instead_of_crashing_when_bodies_not_he
     BOOST_CHECK(!txindex.FindTx(withheld_coinbase_hash, block_hash, tx_disk));
     // And the index must never claim to be caught up while paused.
     BOOST_CHECK(!txindex.BlockUntilSyncedToCurrentChain());
+
+    txindex.Stop();
+}
+
+// F-170 (independent review of F-166): F-166's own fix and its log line
+// ("pausing sync (will resume once available)") claimed a pause-and-retry
+// that didn't exist -- ThreadSync's `return;` on a body-missing block ended
+// its own thread (m_thread_sync, spawned exactly once by Start(), never
+// restarted) permanently, so m_synced could never become true and every
+// later block was silently ignored by BlockConnected forever, regardless of
+// whether the withheld block's body was ever supplied. This proves the
+// FIXED behaviour directly: once the withheld block's body becomes
+// available again (the guard lifted, the bit restored -- exactly what a
+// future body-retention/fetch mechanism supplying a previously-missing body
+// would look like from ThreadSync's own vantage point), the SAME index
+// instance that was paused above resumes on its own, with no restart, and
+// makes genuine further progress past the block it was stuck on.
+BOOST_FIXTURE_TEST_CASE(index_sync_resumes_once_bodies_become_available, TestChain100Setup)
+{
+    CScript coinbase_script_pub_key = GetScriptForDestination(coinbaseKey.GetPubKey().GetID());
+    std::vector<CMutableTransaction> no_txns;
+    const CBlock &withheld_block = CreateAndProcessBlock(no_txns, coinbase_script_pub_key);
+    uint256 withheld_hash = withheld_block.GetHash();
+    uint256 withheld_coinbase_hash = withheld_block.vtx[0]->GetHash();
+
+    // A further block past the withheld one -- proves the index catches all
+    // the way up, not just past the withheld block alone.
+    const CBlock &later_block = CreateAndProcessBlock(no_txns, coinbase_script_pub_key);
+    uint256 later_coinbase_hash = later_block.vtx[0]->GetHash();
+
+    CBlockIndex *pindex = LookupBlockIndex(withheld_hash);
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(HaveBodies(pindex));
+
+    auto guard = MakeUnique<PerfWithholdGuard>(withheld_hash);
+    pindex->nStatus &= ~BLOCK_HAVE_BODIES;
+    BOOST_REQUIRE(!HaveBodies(pindex));
+
+    TxIndex txindex(1 << 20, true);
+    txindex.Start();
+
+    // Wait for the sync thread to reach (and pause at) the withheld block --
+    // same technique as index_sync_pauses_instead_of_crashing_when_bodies_not_held.
+    CTransactionRef tx_disk;
+    uint256 block_hash;
+    constexpr int64_t timeout_ms = 10 * 1000;
+    int64_t time_start = GetTimeMillis();
+    while (!txindex.FindTx(m_coinbase_txns[0]->GetHash(), block_hash, tx_disk)) {
+        BOOST_REQUIRE(time_start + timeout_ms > GetTimeMillis());
+        UninterruptibleSleep(std::chrono::milliseconds{100});
+    }
+    UninterruptibleSleep(std::chrono::milliseconds{200});
+    BOOST_REQUIRE(!txindex.FindTx(withheld_coinbase_hash, block_hash, tx_disk));
+    BOOST_REQUIRE(!txindex.BlockUntilSyncedToCurrentChain());
+
+    // Now let the body become available again: lift the guard (so
+    // ReadBlockFromDisk genuinely succeeds) and restore the status bit (so
+    // HaveBodies agrees) -- both together, matching what a real
+    // body-retention/fetch mechanism resolving the gap would produce.
+    guard.reset();
+    pindex->nStatus |= BLOCK_HAVE_BODIES;
+    BOOST_REQUIRE(HaveBodies(pindex));
+
+    // The retry loop checks every BODIES_RETRY_INTERVAL_MS (1s); give it a
+    // bounded window to notice and catch all the way up to the later block.
+    time_start = GetTimeMillis();
+    while (!txindex.BlockUntilSyncedToCurrentChain()) {
+        BOOST_REQUIRE(time_start + timeout_ms > GetTimeMillis());
+        UninterruptibleSleep(std::chrono::milliseconds{100});
+    }
+
+    // Genuine progress, not just the flag flipping: both the previously
+    // withheld coinbase and the block after it are now indexed.
+    BOOST_CHECK(txindex.FindTx(withheld_coinbase_hash, block_hash, tx_disk));
+    BOOST_CHECK(txindex.FindTx(later_coinbase_hash, block_hash, tx_disk));
+
+    txindex.Stop();
+}
+
+// F-171 (independent review of F-163): TxIndex::FindTx (index/txindex.cpp)
+// reads blk*.dat directly via OpenBlockFile, bypassing ReadBlockFromDisk and
+// therefore HaveBodies entirely -- undermining F-163's own GetTransaction
+// guard, whose txindex fallback calls straight into this function. Same
+// no-PerfWithholdGuard-needed reasoning as F-163/F-168: blk*.dat holds the
+// real bytes unconditionally under Phase 1 (F-110), so clearing
+// BLOCK_HAVE_BODIES alone is enough to distinguish "checks the bit" from
+// "happened to fail because the bytes were genuinely gone".
+BOOST_FIXTURE_TEST_CASE(findtx_respects_have_bodies_even_though_the_read_would_succeed, TestChain100Setup)
+{
+    TxIndex txindex(1 << 20, true);
+    txindex.Start();
+
+    constexpr int64_t timeout_ms = 10 * 1000;
+    int64_t time_start = GetTimeMillis();
+    while (!txindex.BlockUntilSyncedToCurrentChain()) {
+        BOOST_REQUIRE(time_start + timeout_ms > GetTimeMillis());
+        UninterruptibleSleep(std::chrono::milliseconds{100});
+    }
+
+    CTransactionRef earlier_tx = m_coinbase_txns[0];
+    uint256 block_hash;
+    CTransactionRef tx_disk;
+    BOOST_REQUIRE(txindex.FindTx(earlier_tx->GetHash(), block_hash, tx_disk));
+    BOOST_REQUIRE(tx_disk->GetHash() == earlier_tx->GetHash());
+
+    CBlockIndex *pindex = LookupBlockIndex(block_hash);
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(HaveBodies(pindex));
+
+    pindex->nStatus &= ~BLOCK_HAVE_BODIES;
+    BOOST_REQUIRE(!HaveBodies(pindex));
+
+    uint256 block_hash2;
+    CTransactionRef tx_disk2;
+    BOOST_CHECK(!txindex.FindTx(earlier_tx->GetHash(), block_hash2, tx_disk2));
+
+    // Restore before the fixture tears down.
+    pindex->nStatus |= BLOCK_HAVE_BODIES;
+    BOOST_REQUIRE(HaveBodies(pindex));
 
     txindex.Stop();
 }
