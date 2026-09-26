@@ -251,18 +251,25 @@ namespace interfaces {
 
             bool findBlock(const uint256 &hash, CBlock *block, int64_t *time, int64_t *time_max) override {
                 CBlockIndex *index;
-                {
-                    LOCK(cs_main);
-                    index = LookupBlockIndex(hash);
-                    if (!index) {
-                        return false;
-                    }
-                    if (time) {
-                        *time = index->GetBlockTime();
-                    }
-                    if (time_max) {
-                        *time_max = index->GetBlockTimeMax();
-                    }
+                // F-179 (independent review of F-174, LOW): the HaveBodies
+                // check and ReadBlockFromDisk call below used to run AFTER
+                // this LOCK(cs_main) scope had already closed -- inconsistent
+                // with every sibling site this campaign fixed (matching the
+                // pattern F-175 established in rpc/smartnode.cpp: HaveBodies
+                // and the read it guards both live under one lock scope).
+                // cs_main is a RecursiveMutex (validation.h), so extending
+                // the scope to cover the whole function is safe regardless
+                // of what any caller already holds.
+                LOCK(cs_main);
+                index = LookupBlockIndex(hash);
+                if (!index) {
+                    return false;
+                }
+                if (time) {
+                    *time = index->GetBlockTime();
+                }
+                if (time_max) {
+                    *time_max = index->GetBlockTimeMax();
                 }
                 // F-174 (independent review of F-160/4.1.1): no HaveBodies
                 // guard at all, unlisted anywhere by F-160's original audit.
