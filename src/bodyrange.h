@@ -338,4 +338,20 @@ bool HasOutstandingBlockDownloadWork(size_t nWholeBlockCandidates, size_t nBodyR
  *  independent of any net_processing.cpp scaffolding. */
 bool IsBodyRangeChunkAligned(size_t nAccumulatedSoFar, uint32_t nResponseStartIndex);
 
+/** F-185 (4.1.4, build-plan.md's 4.1.4 row): whole-block download disconnects
+ *  a peer that stalls or never resolves an in-flight fetch
+ *  (BLOCK_STALLING_TIMEOUT, BLOCK_DOWNLOAD_TIMEOUT_BASE/_PER_PEER,
+ *  net_processing.cpp) -- GETBODYRANGE's own retry state
+ *  (BodyRetryState::nAttempts, net_processing.cpp) shares no fields with
+ *  that mechanism (confirmed by grep), so a peer that persistently stalls
+ *  or never resolves a body-range fetch was never actually disconnected,
+ *  only internally backed off. This is the trigger check, pure (this
+ *  project's own established split, matching ShouldRequestBodyRange/
+ *  IsBodyRangeRequestStale/HasOutstandingBlockDownloadWork/
+ *  IsBodyRangeChunkAligned above) -- see net_processing.cpp's own
+ *  BODY_RANGE_DISCONNECT_ATTEMPTS doc comment for why 18 is the chosen
+ *  threshold (a deliberate multiple of where NextBodyRetryBackoffMicros's
+ *  own backoff shape saturates, not an arbitrary number). */
+bool ShouldDisconnectForBodyRangeAttempts(unsigned int nAttempts, unsigned int nDisconnectThreshold);
+
 #endif // BITCOIN_BODYRANGE_H

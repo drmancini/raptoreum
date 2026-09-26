@@ -107,3 +107,7 @@ bool HasOutstandingBlockDownloadWork(size_t nWholeBlockCandidates, size_t nBodyR
 bool IsBodyRangeChunkAligned(size_t nAccumulatedSoFar, uint32_t nResponseStartIndex) {
     return nAccumulatedSoFar == nResponseStartIndex;
 }
+
+bool ShouldDisconnectForBodyRangeAttempts(unsigned int nAttempts, unsigned int nDisconnectThreshold) {
+    return nAttempts >= nDisconnectThreshold;
+}

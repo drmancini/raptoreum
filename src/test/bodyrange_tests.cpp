@@ -872,4 +872,27 @@ BOOST_AUTO_TEST_CASE(chunk_not_aligned_off_by_one_either_direction) {
     BOOST_CHECK(!IsBodyRangeChunkAligned(/*nAccumulatedSoFar=*/5, /*nResponseStartIndex=*/6));
 }
 
+// F-185 (4.1.4): the body-range fetch's own disconnect trigger, isolated
+// from net_processing.cpp's own untested SendMessages scaffolding. The
+// regression this exists to fix: a peer that persistently stalls or never
+// resolves a GETBODYRANGE fetch was previously only ever backed off
+// (g_body_retry_state), never actually disconnected, unlike whole-block
+// download's own stalling/timeout mechanism.
+BOOST_AUTO_TEST_CASE(does_not_disconnect_below_the_threshold) {
+    BOOST_CHECK(!ShouldDisconnectForBodyRangeAttempts(/*nAttempts=*/17, /*nDisconnectThreshold=*/18));
+}
+
+BOOST_AUTO_TEST_CASE(disconnects_exactly_at_the_threshold) {
+    BOOST_CHECK(ShouldDisconnectForBodyRangeAttempts(/*nAttempts=*/18, /*nDisconnectThreshold=*/18));
+}
+
+BOOST_AUTO_TEST_CASE(disconnects_past_the_threshold) {
+    BOOST_CHECK(ShouldDisconnectForBodyRangeAttempts(/*nAttempts=*/25, /*nDisconnectThreshold=*/18));
+}
+
+BOOST_AUTO_TEST_CASE(does_not_disconnect_a_fresh_or_low_attempt_count) {
+    BOOST_CHECK(!ShouldDisconnectForBodyRangeAttempts(/*nAttempts=*/0, /*nDisconnectThreshold=*/18));
+    BOOST_CHECK(!ShouldDisconnectForBodyRangeAttempts(/*nAttempts=*/1, /*nDisconnectThreshold=*/18));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

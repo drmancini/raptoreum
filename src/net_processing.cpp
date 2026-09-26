@@ -356,6 +356,31 @@ namespace {
     static const int64_t BODY_RETRY_BASE_MICROS = 1000000;    // 1s
     static const int64_t BODY_RETRY_MAX_MICROS = 30000000;    // 30s cap
 
+    /** F-185 (4.1.4): whole-block download disconnects a peer that stalls or
+     *  never resolves an in-flight fetch (BLOCK_STALLING_TIMEOUT,
+     *  BLOCK_DOWNLOAD_TIMEOUT_BASE/_PER_PEER, below in SendMessages) --
+     *  GETBODYRANGE's own retry state (BodyRetryState::nAttempts, above)
+     *  tracks the identical failure shape (a body that keeps getting
+     *  requested without ever resolving) but shares no fields with the
+     *  whole-block mechanism (confirmed by grep: state.nStallingSince /
+     *  state.vBlocksInFlight are never touched by the body-range path), so
+     *  a peer that persistently stalls or never resolves a body-range fetch
+     *  was never actually disconnected, only internally backed off.
+     *
+     *  Reuses BodyRetryState's own attempt count as the trigger, matching
+     *  how whole-block disconnect is itself attempt/time-bounded, rather
+     *  than inventing an independent policy. The threshold is a deliberate
+     *  multiple of where NextBodyRetryBackoffMicros's own backoff shape
+     *  saturates (bodyrange.cpp: `std::min(nAttempts - 1, 5U)` stops
+     *  growing once nAttempts reaches 6, so every attempt from the 6th
+     *  onward waits the same capped ~30s regardless of how many more
+     *  follow) -- 3x that (18) gives a peer a full run of maximum-backoff
+     *  attempts, on the order of minutes of real time even at the backoff
+     *  ceiling, comfortably longer than any transient stall, before this
+     *  node concludes it is never going to resolve and disconnects, rather
+     *  than retrying forever as today. */
+    static const unsigned int BODY_RANGE_DISCONNECT_ATTEMPTS = 18;
+
     /** 2.2.4: the aggregate concurrent-chase cap -- bounds the total number
      *  of in-flight GETBODYRANGE requests across ALL peers at once, not
      *  per-peer (a separate, already-noted concern this phase does not
@@ -3772,6 +3797,27 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
             acc.vBodies.insert(acc.vBodies.end(), resp.vBodies.begin(), resp.vBodies.end());
             acc.nLastTouched = GetTimeMicros();
 
+            // F-187 (4.1.4 correction): a chunk that actually advanced this
+            // accumulation is progress, not stalling -- reset this peer's
+            // own g_body_retry_state::nAttempts so ShouldDisconnectForBody-
+            // RangeAttempts (SendMessages, above) counts CONSECUTIVE
+            // non-productive attempts, never total requests. Without this,
+            // any transfer needing more chunks than BODY_RANGE_DISCONNECT_
+            // ATTEMPTS (18) would trip the disconnect threshold on a
+            // perfectly healthy peer purely from its own chunk count --
+            // this project's own stated target scale (~110MB/700k-tx block
+            // at the 1MiB DEFAULT_MAX_BODYRANGE_BYTES chunk size, this
+            // file's own comment above) needs on the order of 110 chunks to
+            // complete, six times this threshold. An entry can be absent
+            // here (e.g. this peer's very first, immediately-complete
+            // single-chunk response never went through SendMessages'
+            // operator[] first) -- find(), not operator[], so this never
+            // creates a fresh entry of its own.
+            auto retryIt = g_body_retry_state.find({pfrom->GetId(), resp.hashBlock});
+            if (retryIt != g_body_retry_state.end()) {
+                retryIt->second.nAttempts = 0;
+            }
+
             if (acc.vBodies.size() < BodyRangeWantedCount(pindex)) {
                 // More chunks needed -- the "Message: getbodyrange" section
                 // in SendMessages picks this back up (mapBodyRangeInFlight
@@ -5777,6 +5823,23 @@ bool PeerLogicValidation::SendMessages(CNode *pto) {
                                                                        ANNOUNCER_RING_DEPTH);
                 auto retryKey = std::make_pair(pto->GetId(), hash);
                 BodyRetryState &retry = g_body_retry_state[retryKey];
+
+                // F-185 (4.1.4): this peer has already been asked for this
+                // body range BODY_RANGE_DISCONNECT_ATTEMPTS times (or more)
+                // without ever resolving it -- matching whole-block
+                // download's own stall/disconnect convention (below, this
+                // same function), disconnect rather than backing off
+                // forever. See BODY_RANGE_DISCONNECT_ATTEMPTS's own doc
+                // comment (above) for why this specific threshold, and
+                // bodyrange.h's ShouldDisconnectForBodyRangeAttempts for
+                // why this check is a named, testable predicate.
+                if (ShouldDisconnectForBodyRangeAttempts(retry.nAttempts, BODY_RANGE_DISCONNECT_ATTEMPTS)) {
+                    LogPrintf("Peer=%d failed to resolve body range for %s after %u attempts, disconnecting\n",
+                              pto->GetId(), hash.ToString(), retry.nAttempts);
+                    pto->fDisconnect = true;
+                    return true;
+                }
+
                 if (!ShouldRequestBodyRange(fWasAnnounced, nNow, retry.nNextAttempt,
                                             nBodyRangeInFlight, nMaxBodyRangeInFlight)) {
                     continue;
