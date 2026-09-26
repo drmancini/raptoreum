@@ -615,8 +615,18 @@ def check_script_list(*, src_dir, fail_on_warn):
 
     disabled_names = set(map(lambda x: x.split()[0], DISABLED_SCRIPTS))
     all_names = set(map(lambda x: x.split()[0], ALL_SCRIPTS))
-    both = disabled_names & all_names
-    assert not both, "listed in both ALL_SCRIPTS and DISABLED_SCRIPTS, so it would run while claiming to be disabled: %s" % sorted(both)
+    non_names = set(map(lambda x: x.split()[0], NON_SCRIPTS))
+
+    # A name registered as both disabled AND (a real test or a known
+    # non-test file) would run -- or be silently accepted as a non-script --
+    # while still being reported everywhere else as intentionally disabled.
+    # print()+sys.exit(1), not assert: this must still fire under
+    # `python -O`/PYTHONOPTIMIZE=1, which strips bare asserts but not this.
+    both = disabled_names & (all_names | non_names)
+    if both:
+        print("%sWARNING!%s Listed in DISABLED_SCRIPTS but also registered elsewhere, so it would not actually be treated as disabled: %s." % (BOLD[1], BOLD[0], str(sorted(both))))
+        if fail_on_warn:
+            sys.exit(1)
 
     stale_disabled = disabled_names - python_files
     if stale_disabled:
@@ -624,7 +634,7 @@ def check_script_list(*, src_dir, fail_on_warn):
         if fail_on_warn:
             sys.exit(1)
 
-    missed_tests = list(python_files - set(map(lambda x: x.split()[0], ALL_SCRIPTS + NON_SCRIPTS + DISABLED_SCRIPTS)))
+    missed_tests = list(python_files - (all_names | non_names | disabled_names))
     if len(missed_tests) != 0:
         print("%sWARNING!%s The following scripts are not being run: %s. Check the test lists in test_runner.py." % (BOLD[1], BOLD[0], str(missed_tests)))
         if fail_on_warn:
