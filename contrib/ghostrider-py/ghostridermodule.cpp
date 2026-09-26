@@ -42,14 +42,15 @@ static PyObject *ghostrider_getPoWHash(PyObject *self, PyObject *args)
     // HashGR (src/hash.h) narrows (pend - pbegin) * sizeof(*pbegin) into a
     // plain `int` internally to build its own lenToHash. Py_ssize_t is wider
     // than int on every platform this extension targets, so a caller-supplied
-    // length above INT_MAX would silently truncate there -- HashGR would hash
-    // fewer bytes than actually requested instead of failing. Reject it here
-    // instead, at the boundary this binding owns, rather than let a truncation
-    // inside vendored consensus code pass for a successful call.
+    // length above INT_MAX does not just truncate: the narrowed value goes
+    // negative, and HashGR then reads it back as an unsigned size_t, producing
+    // an out-of-bounds read far past the real buffer rather than a smaller
+    // in-bounds hash. Reject it here instead, at the boundary this binding
+    // owns, rather than let that reach vendored consensus code.
     if (len > std::numeric_limits<int>::max()) {
         PyErr_SetString(PyExc_ValueError,
-                        "header too long: length exceeds INT_MAX, which HashGR would silently "
-                        "truncate to internally rather than hash in full");
+                        "header too long: length exceeds INT_MAX, which HashGR would narrow to "
+                        "a negative int and then read as an out-of-bounds size_t rather than hash");
         return nullptr;
     }
 

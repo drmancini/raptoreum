@@ -114,7 +114,15 @@ class GetPoWHashTests(unittest.TestCase):
         # exactly INT_MAX bytes) vs. microseconds to reject outright, so 1
         # second is a generous bound for that narrower case.
         import time
-        oversized = bytes(INT_MAX + 2000)
+        # Allocating ~2GiB is cheap under default overcommit, but under
+        # ulimit -v, overcommit_memory=2, or a 32-bit interpreter, this
+        # allocation itself can raise MemoryError before the C-level check
+        # under test is ever reached -- that says nothing about the fix, so
+        # skip rather than report a false ERROR in those environments.
+        try:
+            oversized = bytes(INT_MAX + 2000)
+        except MemoryError:
+            self.skipTest("environment cannot allocate an INT_MAX+2000-byte buffer")
         start = time.monotonic()
         with self.assertRaises(ValueError):
             raptoreum_hash.getPoWHash(oversized)
