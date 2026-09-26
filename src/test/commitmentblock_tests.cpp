@@ -99,6 +99,33 @@ BOOST_AUTO_TEST_CASE(round_trips_over_a_stream) {
     BOOST_CHECK(in.ComputeMerkleRoot() == block.hashMerkleRoot);
 }
 
+// F-191 (4.4.1, mining and template): mining hardware depends on this being
+// true -- it only ever hashes the 80-byte header (transaction-decoupling.md
+// SS9.2's own "The header is byte-identical between the two designs" claim).
+// Proven here as raw serialized bytes, not just via GetHash() equality
+// (already covered above, round_trips_over_a_stream) -- two different hash
+// inputs could in principle collide; identical serialized bytes cannot.
+BOOST_AUTO_TEST_CASE(header_bytes_are_byte_identical_between_full_and_commitment_form) {
+    const CBlock block = MakeBlock(6);
+    const CCommitmentBlock commitments = CommitmentsFromBlock(block);
+
+    CDataStream fullHeader(SER_NETWORK, PROTOCOL_VERSION);
+    fullHeader << block.GetBlockHeader();
+
+    CDataStream commitmentHeader(SER_NETWORK, PROTOCOL_VERSION);
+    commitmentHeader << static_cast<const CBlockHeader &>(commitments);
+
+    std::vector<unsigned char> fullBytes(fullHeader.begin(), fullHeader.end());
+    std::vector<unsigned char> commitmentBytes(commitmentHeader.begin(), commitmentHeader.end());
+    BOOST_REQUIRE_EQUAL(fullBytes.size(), 80U);
+    BOOST_CHECK(fullBytes == commitmentBytes);
+
+    // And the header hash itself -- the one thing hardware actually computes
+    // proof of work over -- necessarily agrees too.
+    BOOST_CHECK(block.GetBlockHeader().GetHash() ==
+                static_cast<const CBlockHeader &>(commitments).GetHash());
+}
+
 // The saving is not a constant: it is the ratio of a body to 32 bytes, so it depends
 // entirely on how big the transactions are. With the minimal 1-in/1-out transactions
 // above -- about 61 bytes -- an identifier saves barely half, and the header plus the
