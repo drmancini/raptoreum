@@ -1192,6 +1192,18 @@ static UniValue getmerkleblocks(const JSONRPCRequest &request) {
             break;
         }
 
+        // F-173 (independent review of F-160/4.1.1): GetBlockChecked above
+        // only guards the FIRST block in this range (pblockindex before the
+        // loop starts) -- every subsequent block this loop reads via
+        // ::ChainActive().Next() has its own, separate ReadBlockFromDisk
+        // call here, which had no HaveBodies guard of its own at all.
+        // F-164's own "4 call sites" claim for GetBlockChecked never
+        // covered this loop's inner read -- it's a genuinely different call
+        // site. Same message convention as GetBlockChecked for consistency.
+        if (!HaveBodies(pblockindex)) {
+            throw JSONRPCError(RPC_MISC_ERROR, "Block not available (bodies not held)");
+        }
+
         if (!ReadBlockFromDisk(block, pblockindex, Params().GetConsensus())) {
             // this shouldn't happen, we already checked pruning case earlier
             throw JSONRPCError(RPC_MISC_ERROR, "Block not found on disk");

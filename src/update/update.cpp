@@ -157,6 +157,26 @@ VoteResult NodeRoundVoting::GetVote(const CBlockIndex *blockIndex, const Update 
             break;
         }
 
+        // F-169 (independent review of F-160/4.1.1, CONFIRMED HIGH): unlike
+        // MinerRoundVoting::GetVote above (which only reads CBlockIndex's
+        // own already-loaded nVersion field, no disk touch), this walk
+        // needs the full block body to inspect quorum-commitment
+        // transactions -- and had no HaveBodies guard at all, just this
+        // hard assert(r). Reached from Updates().State()'s own round-voting
+        // walk, itself called from 39 non-test sites including consensus
+        // code (validation.cpp:2198 IsActive/IsAssetsActive, evo/
+        // providertx.cpp, llmq/*) -- never found by F-160's original audit.
+        // Same shape as the existing curIndex==nullptr guard immediately
+        // above: stop the walk (break, keep whatever vote has accumulated
+        // so far) rather than crash. Not reachable today under Phase 1's
+        // storage format (F-110) -- future-proofing, matching this
+        // sub-step's own established classification for every other site.
+        if (!HaveBodies(curIndex)) {
+            LogPrint(BCLog::UPDATES, "Updates: NodeRoundVoting::GetVote, Height: %7d, bodies not held\n",
+                     curIndex->nHeight);
+            break;
+        }
+
         // Search all transactions for final quorum commitments:
         CBlock block;
         bool r = ReadBlockFromDisk(block, curIndex, Params().GetConsensus());
