@@ -24,6 +24,7 @@
 #include <primitives/block.h>
 #include <pubkey.h>
 #include <fs.h>
+#include <interfaces/chain.h>
 #include <rpc/client.h>
 #include <rpc/server.h>
 #include <script/script.h>
@@ -2196,6 +2197,146 @@ BOOST_AUTO_TEST_CASE(smartnode_payments_respects_have_bodies_even_though_the_rea
 
     pindex->nStatus |= BLOCK_HAVE_BODIES;
     BOOST_REQUIRE(HaveBodies(pindex));
+}
+
+// F-169 (independent review of F-160/4.1.1, CONFIRMED HIGH): NodeRoundVoting::
+// GetVote (update/update.cpp) called ReadBlockFromDisk with no HaveBodies
+// guard and a hard assert(r) -- reachable from Updates().State()'s own
+// round-voting walk, itself called from 39 non-test sites including
+// consensus code (validation.cpp:2198 IsActive/IsAssetsActive, evo/
+// providertx.cpp, llmq/*). Never found by F-160's original audit at all.
+// Unlike F-163/F-168/F-171/F-172's "wrong yes" class, this genuinely
+// crashes, so proving it needs a real read failure, not just a cleared
+// status bit (blk*.dat's real bytes stay in place under Phase 1, F-110, and
+// the read would silently succeed with the bit alone) -- PerfWithholdGuard
+// + a bit-clear, matching F-161's own SIGABRT-reproduction technique.
+// RED verified manually, not as part of this committed test (which asserts
+// the FIXED graceful behaviour, since an assert() failure aborts the whole
+// test binary and can't be caught in-process): the fix was reverted, this
+// test was run, and it reproduced a genuine `Assertion 'r' failed` SIGABRT
+// -- matching the independent reviewer's own reproduction exactly -- before
+// the fix was restored.
+BOOST_AUTO_TEST_CASE(node_round_voting_getvote_respects_have_bodies_instead_of_crashing) {
+    // Regtest's ROUND_VOTING params (chainparams.cpp): bit=1, roundSize=10,
+    // startHeight=100 -- NodeRoundVoting::GetVote's own early-return guards
+    // (partial-round rejection, before-start rejection) only clear once the
+    // round block being evaluated reaches height startHeight+roundSize=110,
+    // so mine 10 further blocks past TestChain100Setup's own 100.
+    for (int i = 0; i < 10; i++) {
+        CreateAndProcessBlock({}, coinbaseKey);
+    }
+    CBlockIndex *pindex = ::ChainActive().Tip();
+    BOOST_REQUIRE_EQUAL(pindex->nHeight, 110);
+
+    // Withhold a block genuinely inside the round the walk covers
+    // (GetVote(pindex@110) walks pprev 10 times -> heights 109 down to 100).
+    CBlockIndex *pindexWithheld = pindex->GetAncestor(105);
+    BOOST_REQUIRE(pindexWithheld != nullptr);
+    BOOST_REQUIRE(HaveBodies(pindexWithheld));
+    uint256 withheldHash = pindexWithheld->GetBlockHash();
+
+    PerfWithholdGuard guard(withheldHash);
+    CBlock unreadable;
+    BOOST_REQUIRE(!ReadBlockFromDisk(unreadable, pindexWithheld, Params().GetConsensus()));  // sanity
+    pindexWithheld->nStatus &= ~BLOCK_HAVE_BODIES;
+    BOOST_REQUIRE(!HaveBodies(pindexWithheld));
+
+    // A standalone UpdateManager, not the global Updates() singleton:
+    // ordinary block connection already calls Updates().IsAssetsActive()
+    // (validation.cpp) on every block as it's accepted, including all 110
+    // mined above, which populates BOTH UpdateManager's own per-round
+    // `states` cache AND NodeRoundVoting's own per-(update,blockIndex)
+    // `cache` -- by the time a test manually withholds a block and calls
+    // the global Updates() afterwards, the vote for that exact round may
+    // already be cached from when the block genuinely had its bodies,
+    // masking the gap instead of reproducing it. A fresh UpdateManager has
+    // never queried this update/blockIndex pair, so it genuinely walks and
+    // reads, exactly like a node computing this round's vote for the first
+    // time (e.g. right after IBD, or Updates()'s own worst case).
+    // votingPeriod=1, not regtest's real 10: NodeUpdateVoting::GetVote (the
+    // wrapper State() actually calls) has its OWN, even stricter threshold
+    // -- StartHeight() + RoundSize()*VotingPeriod() -- before it ever calls
+    // into NodeRoundVoting::GetVote at all. With regtest's real
+    // votingPeriod=10 that threshold is height 200, needing 100 further
+    // mined blocks just to reach it; votingPeriod=1 drops it to exactly 110,
+    // matching NodeRoundVoting::GetVote's own StartHeight()+RoundSize()
+    // guard, so the round mined above is enough.
+    UpdateManager testUpdates;
+    testUpdates.Add(Update(EUpdate::ROUND_VOTING, std::string("Test Round Voting"), 1, 10, 100, 1, 100, 10, false,
+                           VoteThreshold(95, 95, 5), VoteThreshold(0, 0, 1)));
+
+    // Before the fix this SIGABRTs (Assertion 'r' failed); after it, State()
+    // completes without crashing. Not asserting a specific State value --
+    // with no real vote bits set anywhere in this synthetic chain, Voting is
+    // the expected shape, but the point of this test is "did not crash",
+    // matching this round's own priority (graceful degradation over a
+    // specific vote outcome).
+    StateInfo si = testUpdates.State(EUpdate::ROUND_VOTING, pindex);
+    BOOST_CHECK(si.State == EUpdateState::Voting || si.State == EUpdateState::Defined);
+
+    pindexWithheld->nStatus |= BLOCK_HAVE_BODIES;
+    BOOST_REQUIRE(HaveBodies(pindexWithheld));
+}
+
+// F-173 (independent review of F-160/4.1.1, LOW): getmerkleblocks
+// (rpc/blockchain.cpp) only guards its FIRST block, via GetBlockChecked
+// (F-164) -- the loop that walks forward from there via ::ChainActive().Next()
+// reads every further block with its own separate, unguarded
+// ReadBlockFromDisk call. Proves the loop's OWN read, not GetBlockChecked's
+// already-covered one: the withheld block here is the 5th block from the
+// range's start, never touched by GetBlockChecked at all.
+BOOST_AUTO_TEST_CASE(getmerkleblocks_respects_have_bodies_for_every_block_not_just_the_first) {
+    CBlockIndex *pindexTip = ::ChainActive().Tip();
+    BOOST_REQUIRE(pindexTip != nullptr);
+    CBlockIndex *pindexStart = pindexTip->GetAncestor(pindexTip->nHeight - 10);
+    CBlockIndex *pindexWithheld = pindexTip->GetAncestor(pindexTip->nHeight - 5);
+    BOOST_REQUIRE(pindexStart != nullptr);
+    BOOST_REQUIRE(pindexWithheld != nullptr);
+    BOOST_REQUIRE(HaveBodies(pindexWithheld));
+
+    const std::string filterHex =
+        "2303028005802040100040000008008400048141010000f8400420800080025004000004130000000000000001";
+    const std::string cmd = "getmerkleblocks " + filterHex + " " + pindexStart->GetBlockHash().ToString() + " 10";
+    BOOST_CHECK_NO_THROW(CallRPCForTest(m_node, cmd));
+
+    pindexWithheld->nStatus &= ~BLOCK_HAVE_BODIES;
+    BOOST_REQUIRE(!HaveBodies(pindexWithheld));
+
+    BOOST_CHECK_EXCEPTION(CallRPCForTest(m_node, cmd), std::runtime_error,
+                          [](const std::runtime_error &e) {
+                              return std::string(e.what()).find("bodies not held") != std::string::npos;
+                          });
+
+    pindexWithheld->nStatus |= BLOCK_HAVE_BODIES;
+    BOOST_REQUIRE(HaveBodies(pindexWithheld));
+}
+
+// F-174 (independent review of F-160/4.1.1, LOW): interfaces::Chain::findBlock
+// (interfaces/chain.cpp) -- used by wallet rescan and listsinceblock -- had
+// no HaveBodies guard, unlisted anywhere by F-160's own original audit.
+// Already fails gracefully by its own existing contract (SetNull() the
+// output block, still return true -- callers are expected to check
+// block.IsNull()), so this proves the fix extends that SAME contract to a
+// body-not-held block, not a new behaviour.
+BOOST_AUTO_TEST_CASE(findblock_respects_have_bodies_even_though_the_read_would_succeed) {
+    CBlockIndex *pindexTip = ::ChainActive().Tip();
+    BOOST_REQUIRE(pindexTip != nullptr);
+    BOOST_REQUIRE(HaveBodies(pindexTip));
+
+    CBlock block;
+    BOOST_REQUIRE(m_node.chain->findBlock(pindexTip->GetBlockHash(), &block));
+    BOOST_REQUIRE(!block.IsNull());
+
+    pindexTip->nStatus &= ~BLOCK_HAVE_BODIES;
+    BOOST_REQUIRE(!HaveBodies(pindexTip));
+
+    CBlock block2;
+    bool found = m_node.chain->findBlock(pindexTip->GetBlockHash(), &block2);
+    BOOST_CHECK(found);
+    BOOST_CHECK(block2.IsNull());
+
+    pindexTip->nStatus |= BLOCK_HAVE_BODIES;
+    BOOST_REQUIRE(HaveBodies(pindexTip));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

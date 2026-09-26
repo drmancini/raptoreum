@@ -264,7 +264,14 @@ namespace interfaces {
                         *time_max = index->GetBlockTimeMax();
                     }
                 }
-                if (block && !ReadBlockFromDisk(*block, index, Params().GetConsensus())) {
+                // F-174 (independent review of F-160/4.1.1): no HaveBodies
+                // guard at all, unlisted anywhere by F-160's original audit.
+                // Extends this function's own existing contract (a read
+                // failure nulls the output block but still returns true --
+                // used by wallet rescan/listsinceblock, whose callers
+                // already check block.IsNull()) to a body-not-held block,
+                // rather than inventing a new failure shape.
+                if (block && (!HaveBodies(index) || !ReadBlockFromDisk(*block, index, Params().GetConsensus()))) {
                     block->SetNull();
                 }
                 return true;
