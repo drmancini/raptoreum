@@ -237,6 +237,17 @@ BuildSimplifiedMNListDiff(const uint256 &baseBlockHash, const uint256 &blockHash
         return false;
     }
 
+    // F-172 (independent review of F-160/4.1.1): unguarded, network-triggered
+    // via the GETMNLISTDIFF P2P handler and the protx diff RPC -- already
+    // failed gracefully (returns false, the P2P caller Misbehaving(1)s the
+    // requester) rather than crashing, but still needs the same guard for
+    // consistency and an accurate diagnosis, matching every other RPC/P2P
+    // site this sub-step already fixed.
+    if (!HaveBodies(blockIndex)) {
+        errorRet = strprintf("block %s not available (bodies not held)", blockHash.ToString());
+        return false;
+    }
+
     // TODO store coinbase TX in CBlockIndex
     CBlock block;
     if (!ReadBlockFromDisk(block, blockIndex, Params().GetConsensus())) {
