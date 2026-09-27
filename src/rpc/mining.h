@@ -71,22 +71,33 @@ UniValue BuildGBTTransactionEntry(const CTransaction &tx, const std::map <uint25
  *  path and must never be used to materialise a commitment block that
  *  arrived from a peer.
  *
- *  KNOWN GAP (F-193, not fixed here, flagged for the coordinator): this is
- *  NOT true for an LLMQ quorum-commitment special transaction (miner.cpp's
- *  GetMineableCommitmentTx) -- CreateNewBlock inserts one directly from
- *  quorumBlockProcessor, bypassing mempool selection entirely, so a real
- *  commitment-mode block can legitimately name a transaction this function
- *  will correctly, but unhelpfully, report as "not found in local mempool".
+ *  F-193 (fixed): an LLMQ quorum-commitment special transaction (miner.cpp's
+ *  GetMineableCommitmentTx) is the one exception to the mempool-coverage
+ *  assumption above -- CreateNewBlock inserts one directly from
+ *  quorumBlockProcessor, bypassing mempool selection entirely, so it is
+ *  never found by a mempool lookup. When the mempool lookup misses,
+ *  FindMineableCommitmentTxByHash reconstructs each currently-mineable
+ *  commitment for the next block exactly as CreateNewBlock does, and
+ *  returns the one whose hash matches -- the same source, not a new one.
  *
- *  No new validation logic: pure lookup plus the pre-existing
- *  MaterialiseBlock call. Throws JSONRPCError (matching F-178's own
- *  established convention, rpc/smartnode.cpp) on a missing or a mismatched
- *  body rather than propagating a crash or an unclear generic error --
- *  never returns a null/false sentinel on failure. Extracted as its own,
- *  header-declared function so this orchestration is directly unit-testable
- *  against a standalone CTxMemPool, without needing a live RPC dispatch
- *  context (matching F-191's own established convention for this file's
+ *  No new validation logic: pure lookup (mempool, then the quorum-commitment
+ *  fallback) plus the pre-existing MaterialiseBlock call. Throws
+ *  JSONRPCError (matching F-178's own established convention,
+ *  rpc/smartnode.cpp) on a missing or a mismatched body rather than
+ *  propagating a crash or an unclear generic error -- never returns a
+ *  null/false sentinel on failure. Extracted as its own, header-declared
+ *  function so this orchestration is directly unit-testable against a
+ *  standalone CTxMemPool, without needing a live RPC dispatch context
+ *  (matching F-191's own established convention for this file's
  *  dispatch-adjacent glue). */
 CBlock MaterialiseSubmittedCommitmentBlock(const CCommitmentBlock &commitments, const CTxMemPool &mempool);
+
+/** F-193: reconstruct each quorum-commitment transaction that CreateNewBlock could
+ *  legally mine into the NEXT block (one per enabled LLMQ param set, at the current
+ *  tip height + 1 -- exactly miner.cpp's own loop), and return the one whose hash
+ *  matches txid. Returns nullptr if none matches, if DIP0003 isn't enabled, or if
+ *  there is no chain tip. Requires cs_main (GetMineableCommitmentTx's own
+ *  precondition); the caller is responsible for holding it. */
+CTransactionRef FindMineableCommitmentTxByHash(const uint256 &txid);
 
 #endif

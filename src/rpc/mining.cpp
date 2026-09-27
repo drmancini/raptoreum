@@ -17,6 +17,8 @@
 #include <consensus/validation.h>
 #include <core_io.h>
 #include <key_io.h>
+#include <llmq/quorums_blockprocessor.h>
+#include <llmq/quorums_utils.h>
 #include <miner.h>
 #include <net.h>
 #include <node/context.h>
@@ -919,6 +921,34 @@ static UniValue getblocktemplate(const JSONRPCRequest &request) {
     return result;
 }
 
+// F-193: a quorum-commitment transaction is reconstructed, not looked up by a stored
+// hash -- GetMineableCommitmentTx (quorums_blockprocessor.cpp) builds it fresh from
+// the current CFinalCommitment state each call, keyed by (LLMQParams, height), the
+// same way CreateNewBlock (miner.cpp) selects one per enabled quorum param set for
+// the next block. Mirror that loop exactly and match by hash, rather than inventing
+// a new lookup path into quorumBlockProcessor.
+CTransactionRef FindMineableCommitmentTxByHash(const uint256 &txid) {
+    AssertLockHeld(cs_main);
+
+    if (!Params().GetConsensus().DIP0003Enabled) {
+        return nullptr;
+    }
+    const CBlockIndex *pindexPrev = ::ChainActive().Tip();
+    if (pindexPrev == nullptr) {
+        return nullptr;
+    }
+    int nHeight = pindexPrev->nHeight + 1;
+
+    for (const Consensus::LLMQParams &params : llmq::CLLMQUtils::GetEnabledQuorumParams(pindexPrev)) {
+        CTransactionRef qcTx;
+        if (llmq::quorumBlockProcessor->GetMineableCommitmentTx(params, nHeight, qcTx) &&
+            qcTx->GetHash() == txid) {
+            return qcTx;
+        }
+    }
+    return nullptr;
+}
+
 // 4.4.2 (F-192): see rpc/mining.h for the full rationale. Pure orchestration
 // -- lookup plus the pre-existing MaterialiseBlock call -- no new validation
 // logic.
@@ -931,6 +961,14 @@ CBlock MaterialiseSubmittedCommitmentBlock(const CCommitmentBlock &commitments, 
     bodies.reserve(commitments.vCommitments.size());
     for (const uint256 &txid : commitments.vCommitments) {
         CTransactionRef ptx = mempool.get(txid);
+        if (!ptx) {
+            // F-193: not every committed transaction ever enters the mempool -- a
+            // quorum-commitment transaction is injected directly into the block
+            // template at assembly time and never is. Try reconstructing it the
+            // same way the miner did before concluding it's genuinely missing.
+            LOCK(cs_main);
+            ptx = FindMineableCommitmentTxByHash(txid);
+        }
         if (!ptx) {
             throw JSONRPCError(RPC_MISC_ERROR,
                                strprintf("Committed transaction %s not found in local mempool", txid.ToString()));
