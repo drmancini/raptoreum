@@ -110,6 +110,7 @@ BITCOIN_TESTS =\
   test/sigopcount_tests.cpp \
   test/skiplist_tests.cpp \
   test/streams_tests.cpp \
+  test/submitblock_tests.cpp \
   test/subsidy_tests.cpp \
   test/test_raptoreum.cpp \
   test/test_raptoreum.h \

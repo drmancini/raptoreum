@@ -17,6 +17,8 @@
 #include <consensus/validation.h>
 #include <core_io.h>
 #include <key_io.h>
+#include <llmq/quorums_blockprocessor.h>
+#include <llmq/quorums_utils.h>
 #include <miner.h>
 #include <net.h>
 #include <node/context.h>
@@ -919,6 +921,69 @@ static UniValue getblocktemplate(const JSONRPCRequest &request) {
     return result;
 }
 
+// F-193: a quorum-commitment transaction is reconstructed, not looked up by a stored
+// hash -- GetMineableCommitmentTx (quorums_blockprocessor.cpp) builds it fresh from
+// the current CFinalCommitment state each call, keyed by (LLMQParams, height), the
+// same way CreateNewBlock (miner.cpp) selects one per enabled quorum param set for
+// the next block. Mirror that loop exactly and match by hash, rather than inventing
+// a new lookup path into quorumBlockProcessor.
+CTransactionRef FindMineableCommitmentTxByHash(const uint256 &txid) {
+    AssertLockHeld(cs_main);
+
+    if (!Params().GetConsensus().DIP0003Enabled) {
+        return nullptr;
+    }
+    const CBlockIndex *pindexPrev = ::ChainActive().Tip();
+    if (pindexPrev == nullptr) {
+        return nullptr;
+    }
+    int nHeight = pindexPrev->nHeight + 1;
+
+    for (const Consensus::LLMQParams &params : llmq::CLLMQUtils::GetEnabledQuorumParams(pindexPrev)) {
+        CTransactionRef qcTx;
+        if (llmq::quorumBlockProcessor->GetMineableCommitmentTx(params, nHeight, qcTx) &&
+            qcTx->GetHash() == txid) {
+            return qcTx;
+        }
+    }
+    return nullptr;
+}
+
+// 4.4.2 (F-192): see rpc/mining.h for the full rationale. Pure orchestration
+// -- lookup plus the pre-existing MaterialiseBlock call -- no new validation
+// logic.
+CBlock MaterialiseSubmittedCommitmentBlock(const CCommitmentBlock &commitments, const CTxMemPool &mempool) {
+    if (commitments.IsNull()) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Commitment block does not carry a coinbase");
+    }
+
+    std::vector<CTransactionRef> bodies;
+    bodies.reserve(commitments.vCommitments.size());
+    for (const uint256 &txid : commitments.vCommitments) {
+        CTransactionRef ptx = mempool.get(txid);
+        if (!ptx) {
+            // F-193: not every committed transaction ever enters the mempool -- a
+            // quorum-commitment transaction is injected directly into the block
+            // template at assembly time and never is. Try reconstructing it the
+            // same way the miner did before concluding it's genuinely missing.
+            LOCK(cs_main);
+            ptx = FindMineableCommitmentTxByHash(txid);
+        }
+        if (!ptx) {
+            throw JSONRPCError(RPC_MISC_ERROR,
+                               strprintf("Committed transaction %s not found in local mempool", txid.ToString()));
+        }
+        bodies.push_back(ptx);
+    }
+
+    CBlock block;
+    if (!MaterialiseBlock(commitments, bodies, block)) {
+        throw JSONRPCError(RPC_MISC_ERROR,
+                           "Commitment block bodies do not match the block's committed identifiers");
+    }
+    return block;
+}
+
 class submitblock_StateCatcher : public CValidationInterface {
 public:
     uint256 hash;
@@ -945,6 +1010,18 @@ static UniValue submitblock(const JSONRPCRequest &request) {
                        {"hexdata", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "the hex-encoded block data to submit"},
                        {"dummy", RPCArg::Type::STR, /* default */ "ignored",
                         "dummy value, for compatibility with BIP22. This value is ignored."},
+                       {"format", RPCArg::Type::STR, /* default */ "\"full\"",
+                        "4.4.2 (F-192): \"full\" (default) -- hexdata is an ordinary serialized block, "
+                        "exactly as today, completely unchanged. \"commitment\" -- hexdata is a "
+                        "serialized commitment block (header, full coinbase, bare identifiers for the "
+                        "rest, see getblocktemplate's own \"commitments\" rule); each committed "
+                        "transaction is resolved from THIS NODE'S OWN mempool -- only ever correct for "
+                        "a commitment this node's own miner produced moments earlier, never for one "
+                        "received from a peer -- and the full block is rebuilt before submission. The "
+                        "format is never auto-detected: a full block and a commitment block share an "
+                        "identical 80-byte header prefix and both continue with a transaction-typed "
+                        "field immediately after it, so a garbled parse of one as the other is a real "
+                        "risk, not a clean failure."},
                },
                RPCResult{RPCResult::Type::NONE, "",
                          "Returns JSON Null when valid, a string according to BIP22 otherwise"},
@@ -954,10 +1031,29 @@ static UniValue submitblock(const JSONRPCRequest &request) {
                },
     }.Check(request);
 
+    const std::string strFormat = request.params[2].isNull() ? "full" : request.params[2].get_str();
+    if (strFormat != "full" && strFormat != "commitment") {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           strprintf("Unknown \"format\" \"%s\": expected \"full\" or \"commitment\"", strFormat));
+    }
+
     std::shared_ptr <CBlock> blockptr = std::make_shared<CBlock>();
     CBlock &block = *blockptr;
-    if (!DecodeHexBlk(block, request.params[0].get_str())) {
-        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Block decode failed");
+
+    if (strFormat == "commitment") {
+        // 4.4.2 (F-192): orchestration only. The wire type is exactly what
+        // the caller explicitly named above -- never auto-detected -- so
+        // there is no ambiguity about which decoder to use. ProcessNewBlock
+        // below is completely unchanged either way.
+        CCommitmentBlock commitments;
+        if (!DecodeHexCommitmentBlk(commitments, request.params[0].get_str())) {
+            throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Commitment block decode failed");
+        }
+        block = MaterialiseSubmittedCommitmentBlock(commitments, EnsureMemPool(request.context));
+    } else {
+        if (!DecodeHexBlk(block, request.params[0].get_str())) {
+            throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Block decode failed");
+        }
     }
 
     if (block.vtx.empty() || !block.vtx[0]->IsCoinBase()) {
@@ -1294,7 +1390,7 @@ static const CRPCCommand commands[] =
                 {"mining", "getmininginfo", &getmininginfo, {}},
                 {"mining", "prioritisetransaction", &prioritisetransaction, {"txid", "fee_delta"}},
                 {"mining", "getblocktemplate", &getblocktemplate, {"template_request"}},
-                {"mining", "submitblock", &submitblock, {"hexdata", "dummy"}},
+                {"mining", "submitblock", &submitblock, {"hexdata", "dummy", "format"}},
                 {"mining", "submitheader", &submitheader, {"hexdata"}},
 
 #if ENABLE_MINER
