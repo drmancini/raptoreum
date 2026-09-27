@@ -45,6 +45,10 @@ uint64_t CBlockHeaderAndShortTxIDs::GetShortID(const uint256 &txhash) const {
     return SipHashUint256(shorttxidk0, shorttxidk1, txhash) & 0xffffffffffffL;
 }
 
+bool ShouldDeclineBlockTransactionsForSize(uint64_t nTotalSerializedSize, uint64_t nSizeCeiling) {
+    return nTotalSerializedSize > nSizeCeiling;
+}
+
 
 ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs &cmpctblock,
                                               const std::vector <std::pair<uint256, CTransactionRef>> &extra_txn) {
@@ -62,9 +66,22 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs &c
         if (cmpctblock.prefilledtxn[i].tx->IsNull())
             return READ_STATUS_INVALID;
 
-        lastprefilledindex += cmpctblock.prefilledtxn[i].index + 1; //index is a uint16_t, so can't overflow here
-        if (lastprefilledindex > std::numeric_limits<uint16_t>::max())
+        // F-200 (4.5.2 Part A): prefilledtxn[i].index is now a uint32_t, not
+        // a uint16_t (the old comment's premise is gone) -- BlockTxCount()'s
+        // own deserialize-time guard (blockencodings.h) only bounds the
+        // COUNT of shorttxids+prefilledtxn entries, never an individual
+        // index VALUE, so nothing else stops a lone prefilledtxn entry
+        // naming an index up to uint32_t's own max (~4.29 billion). Compute
+        // in int64_t (wide enough that this addition can never itself
+        // overflow) and bind the bound to COMMITMENT_BUDGET_MAX_INPUTS --
+        // the design's own consensus cap, matching the same guard's binding
+        // in blockencodings.h -- rather than the widened type's own
+        // incidental max, which would silently reopen exactly the unbounded-
+        // index hazard the widening is supposed to close.
+        int64_t candidateindex = (int64_t) lastprefilledindex + (int64_t) cmpctblock.prefilledtxn[i].index + 1;
+        if (candidateindex > (int64_t) COMMITMENT_BUDGET_MAX_INPUTS)
             return READ_STATUS_INVALID;
+        lastprefilledindex = (int32_t) candidateindex;
         if ((uint32_t) lastprefilledindex > cmpctblock.shorttxids.size() + i) {
             // If we are inserting a tx at an index greater than our full list of shorttxids
             // plus the number of prefilled txn we've inserted, then we have txn for which we
@@ -79,8 +96,13 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs &c
     // Because well-formed cmpctblock messages will have a (relatively) uniform distribution
     // of short IDs, any highly-uneven distribution of elements can be safely treated as a
     // READ_STATUS_FAILED.
-    std::unordered_map <uint64_t, uint16_t> shorttxids(cmpctblock.shorttxids.size());
-    uint16_t index_offset = 0;
+    // F-200 (4.5.2 Part A): these positions index into txn_available, whose
+    // size is BlockTxCount() -- now bound to COMMITMENT_BUDGET_MAX_INPUTS
+    // (700,000), not the old 65,535 -- so uint16_t here would silently wrap
+    // for any block needing more than 65,535 transactions, corrupting
+    // lookups for exactly the large blocks this widening exists to support.
+    std::unordered_map <uint64_t, uint32_t> shorttxids(cmpctblock.shorttxids.size());
+    uint32_t index_offset = 0;
     for (size_t i = 0; i < cmpctblock.shorttxids.size(); i++) {
         while (txn_available[i + index_offset])
             index_offset++;
@@ -108,7 +130,7 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs &c
         LOCK(pool->cs);
         for (size_t i = 0; i < pool->vTxHashes.size(); i++) {
             uint64_t shortid = cmpctblock.GetShortID(pool->vTxHashes[i].first);
-            std::unordered_map<uint64_t, uint16_t>::iterator idit = shorttxids.find(shortid);
+            std::unordered_map<uint64_t, uint32_t>::iterator idit = shorttxids.find(shortid);
             if (idit != shorttxids.end()) {
                 if (!have_txn[idit->second]) {
                     txn_available[idit->second] = pool->vTxHashes[i].second->GetSharedTx();
@@ -134,7 +156,7 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs &c
 
     for (size_t i = 0; i < extra_txn.size(); i++) {
         uint64_t shortid = cmpctblock.GetShortID(extra_txn[i].first);
-        std::unordered_map<uint64_t, uint16_t>::iterator idit = shorttxids.find(shortid);
+        std::unordered_map<uint64_t, uint32_t>::iterator idit = shorttxids.find(shortid);
         if (idit != shorttxids.end()) {
             if (!have_txn[idit->second]) {
                 txn_available[idit->second] = extra_txn[i].second;

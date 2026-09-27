@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <blockencodings.h>
+#include <consensus/consensus.h>
 #include <consensus/merkle.h>
 #include <chainparams.h>
 #include <pow.h>
@@ -353,15 +354,21 @@ BOOST_AUTO_TEST_CASE(TransactionsRequestDeserializationMaxTest) {
 }
 
 BOOST_AUTO_TEST_CASE(TransactionsRequestDeserializationOverflowTest) {
-        // Any set of index deltas that starts with N values that sum to (0x10000 - N)
-        // causes the edge-case overflow that was originally not checked for. Such
-        // a request cannot be created by serializing a real BlockTransactionsRequest
-        // due to the overflow, so here we'll serialize from raw deltas.
+        // Any set of index deltas that starts with N values that sum to
+        // (2^32 - N) causes the edge-case overflow that was originally not
+        // checked for. F-200 (4.5.2 Part A) widened indexes's element type
+        // from uint16_t to uint32_t, so this boundary moved from 0x10000 to
+        // 0x100000000 -- still exercising DifferenceFormatter's own generic
+        // wraparound protection (templated on the element type, so it
+        // adapts automatically), just at the new, wider boundary. Such a
+        // request cannot be created by serializing a real
+        // BlockTransactionsRequest due to the overflow, so here we'll
+        // serialize from raw deltas.
         BlockTransactionsRequest req0;
         req0.blockhash = InsecureRand256();
         req0.indexes.resize(3);
-        req0.indexes[0] = 0x7000;
-        req0.indexes[1] = 0x10000 - 0x7000 - 2;
+        req0.indexes[0] = 0x70000000;
+        req0.indexes[1] = (uint32_t)(0x100000000ULL - 0x70000000ULL - 2);
         req0.indexes[2] = 0;
         CDataStream stream(SER_NETWORK, PROTOCOL_VERSION);
         stream << req0.blockhash;
@@ -380,6 +387,124 @@ BOOST_AUTO_TEST_CASE(TransactionsRequestDeserializationOverflowTest) {
         } catch(std::ios_base::failure &) {
             // deserialize should fail
         }
+}
+
+// F-200 (4.5.2 Part A): PrefilledTransaction::index and
+// BlockTransactionsRequest::indexes were uint16_t (max 65,535) -- this
+// branch's own MAX_DIP0001_BLOCK_SIZE (8,000,000, consensus/consensus.h)
+// needs up to 250,000 identifiers, which overflows that outright. Widened to
+// uint32_t. The first two cases pin the widened range directly at the point
+// of assignment: a narrowing int->uint16_t conversion silently WRAPS rather
+// than failing to compile, so the pre-widening bug reproduces as a wrong
+// stored value, not a crash -- these are genuine RED before the widening.
+BOOST_AUTO_TEST_CASE(PrefilledTransactionIndexWideningTest) {
+        PrefilledTransaction pt;
+        pt.index = 100000;
+        BOOST_CHECK_EQUAL(pt.index, 100000U);
+}
+
+BOOST_AUTO_TEST_CASE(BlockTransactionsRequestIndexesWideningTest) {
+        BlockTransactionsRequest req;
+        req.indexes.push_back(100000);
+        BOOST_CHECK_EQUAL(req.indexes[0], 100000U);
+}
+
+BOOST_AUTO_TEST_CASE(BlockTransactionsRequestWideIndexRoundTripTest) {
+        // Exercises the actual wire path (DifferenceFormatter's own
+        // WriteCompactSize/ReadCompactSize), not just in-memory storage: a
+        // single index above the old uint16_t ceiling must serialize and
+        // deserialize back to the same value.
+        BlockTransactionsRequest req0;
+        req0.blockhash = InsecureRand256();
+        req0.indexes.resize(1);
+        req0.indexes[0] = 100000;
+
+        CDataStream stream(SER_NETWORK, PROTOCOL_VERSION);
+        stream << req0;
+
+        BlockTransactionsRequest req1;
+        stream >> req1;
+        BOOST_CHECK_EQUAL(req0.indexes.size(), req1.indexes.size());
+        // Pinned against the literal, not just req0 -- req0 itself already
+        // truncates silently under uint16_t, so comparing only against req0
+        // would pass even before the widening (round-tripping whatever
+        // wrong value got stored).
+        BOOST_CHECK_EQUAL(req1.indexes[0], 100000U);
+        BOOST_CHECK_EQUAL(req0.indexes[0], req1.indexes[0]);
+}
+
+// F-200 (4.5.2 Part A): CBlockHeaderAndShortTxIDs::BlockTxCount()'s
+// deserialize-time overflow guard (blockencodings.h) must bind to the
+// design's own consensus cap, COMMITMENT_BUDGET_MAX_INPUTS (700,000, D-19)
+// -- not to the widened type's own incidental max (~4.29 billion for
+// uint32_t). The four cases below pin that binding precisely: a count that
+// fits the OLD uint16_t ceiling still passes; a count between the old
+// ceiling and the cap (this branch's own 8 MB/250,000-identifier need --
+// impossible before this fix) now also passes; the cap itself passes
+// exactly; one past the cap still throws. If the guard were ever reverted
+// to bind against uint32_t's own max instead of COMMITMENT_BUDGET_MAX_INPUTS,
+// the last case would silently stop throwing -- that is the mutation this
+// test is built to catch.
+static CBlockHeaderAndShortTxIDs RoundTripWithShortTxIdCount(size_t count) {
+        TestHeaderAndShortIDs shortIDs(BuildBlockTestCase());
+        shortIDs.shorttxids.assign(count, 0);
+        shortIDs.prefilledtxn.clear();
+
+        CDataStream stream(SER_NETWORK, PROTOCOL_VERSION);
+        stream << shortIDs;
+
+        CBlockHeaderAndShortTxIDs result;
+        stream >> result;
+        return result;
+}
+
+BOOST_AUTO_TEST_CASE(BlockTxCountUnderOldUint16CeilingStillWorks) {
+        BOOST_CHECK_NO_THROW(RoundTripWithShortTxIdCount(60000));
+}
+
+BOOST_AUTO_TEST_CASE(BlockTxCountAboveOldUint16CeilingNowWorks) {
+        // This branch's own MAX_DIP0001_BLOCK_SIZE=8,000,000 needs up to
+        // 250,000 identifiers -- exceeded the old 65,535 ceiling outright.
+        BOOST_CHECK_NO_THROW(RoundTripWithShortTxIdCount(250000));
+}
+
+BOOST_AUTO_TEST_CASE(BlockTxCountAtCommitmentBudgetMaxInputsWorks) {
+        BOOST_CHECK_NO_THROW(RoundTripWithShortTxIdCount(COMMITMENT_BUDGET_MAX_INPUTS));
+}
+
+BOOST_AUTO_TEST_CASE(BlockTxCountOverCommitmentBudgetMaxInputsThrows) {
+        BOOST_CHECK_THROW(RoundTripWithShortTxIdCount(COMMITMENT_BUDGET_MAX_INPUTS + 1), std::ios_base::failure);
+}
+
+// F-201 (4.5.2 Part B): SendBlockTransactions (net_processing.cpp) builds a
+// single BLOCKTXN message with no size-based chunking -- at design
+// throughput (~373 B/tx average, F-30), as few as ~8,000 requested
+// transactions already exceeds MAX_PROTOCOL_MESSAGE_LENGTH (3 MB) and gets
+// this node disconnected by the peer it's replying to. The size-vs-ceiling
+// DECISION is factored out as a pure predicate (matching bodyrange.h's own
+// ShouldDisconnectForBodyRangeAttempts precedent) so it is unit-testable
+// without a CNode/CConnman network harness; net_processing.cpp wires it to
+// the actual fallback (a CInv pushed to vRecvGetData, reusing
+// MAX_BLOCKTXN_DEPTH's own existing full-block-fallback shape).
+BOOST_AUTO_TEST_CASE(DoesNotDeclineWithinCeiling) {
+        BOOST_CHECK(!ShouldDeclineBlockTransactionsForSize(100, 200));
+}
+
+BOOST_AUTO_TEST_CASE(DoesNotDeclineExactlyAtCeiling) {
+        BOOST_CHECK(!ShouldDeclineBlockTransactionsForSize(200, 200));
+}
+
+BOOST_AUTO_TEST_CASE(DeclinesOneByteOverCeiling) {
+        // If this trigger were ever reverted/disabled (e.g. hardcoded to
+        // `return false`), this is the case that would silently pass again
+        // -- the mutation this test is built to catch.
+        BOOST_CHECK(ShouldDeclineBlockTransactionsForSize(201, 200));
+}
+
+BOOST_AUTO_TEST_CASE(DeclinesAtDesignPointScale) {
+        // F-197's own worked example: ~8,000 missing transactions at F-30's
+        // ~373 B average already exceeds a 2 MB ceiling.
+        BOOST_CHECK(ShouldDeclineBlockTransactionsForSize(8000ULL * 373, 2 * 1024 * 1024));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

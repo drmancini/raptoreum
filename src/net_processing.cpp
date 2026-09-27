@@ -133,6 +133,27 @@ static_assert(MAX_STANDARD_TX_SIZE + 4096 < MAX_PROTOCOL_MESSAGE_LENGTH,
               "a single forced-through oversized body (BuildBodyRangeResponse's own first-body exception) "
               "must always fit in one P2P message too");
 
+/** 4.5.2 Part B (F-201): the byte ceiling SendBlockTransactions sums
+ *  requested transactions' own serialized size against before committing to
+ *  a single BLOCKTXN message. SendBlockTransactions previously built every
+ *  requested transaction into ONE BlockTransactions object with zero size
+ *  checking; at design-point scale (~373 B/tx average, F-30), as few as
+ *  ~8,000 requested transactions already exceeds MAX_PROTOCOL_MESSAGE_LENGTH
+ *  (3 MB, net.h) and gets THIS node disconnected by the peer it's replying
+ *  to (net.cpp's oversized-message check). 2 MB gives a ~1 MiB / 33% safety
+ *  margin under the 3 MB disconnect threshold (MEDIUM-confidence choice,
+ *  F-197's own framing) -- generous enough to absorb BlockTransactions's own
+ *  small fixed overhead (blockhash, the txn vector's CompactSize prefix,
+ *  each element's own CompactSize length prefix under TransactionCompression)
+ *  plus the P2P message header, none of which the per-tx GetSerializeSize
+ *  sum in SendBlockTransactions counts, while still declining well before
+ *  the peer's own hard disconnect line -- same shape as
+ *  DEFAULT_MAX_BODYRANGE_BYTES's own margin just above. */
+static const uint64_t MAX_BLOCKTXN_RESPONSE_BYTES = 2 * 1024 * 1024;
+static_assert(MAX_BLOCKTXN_RESPONSE_BYTES + 4096 < MAX_PROTOCOL_MESSAGE_LENGTH,
+              "a BLOCKTXN response declined at the size ceiling must always have left room "
+              "for BlockTransactions's own overhead and the P2P message header");
+
 /** 2.2.3b (F-143's accepted spec, announcerring.h): how many blocks behind
  *  the announcer ring's own EFFECTIVE height (CAnnouncerRing::EffectiveHeight
  *  -- the higher of the connected tip or the highest height any given peer
@@ -2422,7 +2443,14 @@ LOCKS_EXCLUDED(cs_main)
 
 inline void static
 SendBlockTransactions(const CBlock &block, const BlockTransactionsRequest &req, CNode *pfrom, CConnman *connman) {
-    BlockTransactions resp(req);
+    // 4.5.2 Part B (F-201): bounds-check first (existing behavior), then sum
+    // each requested transaction's own serialized size before committing to
+    // a single BLOCKTXN message -- see MAX_BLOCKTXN_RESPONSE_BYTES's own
+    // comment for the margin's reasoning. GetSerializeSize here mirrors
+    // exactly what TransactionCompression (a plain DefaultFormatter, no
+    // compression scheme) will actually put on the wire for each element of
+    // BlockTransactions::txn -- confirmed by direct read of serialize.h.
+    uint64_t nTotalSize = 0;
     for (size_t i = 0; i < req.indexes.size(); i++) {
         if (req.indexes[i] >= block.vtx.size()) {
             LOCK(cs_main);
@@ -2430,6 +2458,26 @@ SendBlockTransactions(const CBlock &block, const BlockTransactionsRequest &req, 
                         strprintf("Peer %d sent us a getblocktxn with out-of-bounds tx indices", pfrom->GetId()));
             return;
         }
+        nTotalSize += GetSerializeSize(*block.vtx[req.indexes[i]], SER_NETWORK, PROTOCOL_VERSION);
+    }
+
+    if (ShouldDeclineBlockTransactionsForSize(nTotalSize, MAX_BLOCKTXN_RESPONSE_BYTES)) {
+        // Reuse MAX_BLOCKTXN_DEPTH's own full-block fallback SHAPE just
+        // below (too OLD triggers it there; too BIG triggers it here) rather
+        // than inventing new wire continuation semantics for a message that
+        // has none today.
+        LogPrint(BCLog::NET,
+                 "Declining oversized BLOCKTXN response (%u bytes over a %u byte ceiling) to peer %d, falling back to a full block\n",
+                 nTotalSize, MAX_BLOCKTXN_RESPONSE_BYTES, pfrom->GetId());
+        CInv inv;
+        inv.type = MSG_BLOCK;
+        inv.hash = req.blockhash;
+        pfrom->vRecvGetData.push_back(inv);
+        return;
+    }
+
+    BlockTransactions resp(req);
+    for (size_t i = 0; i < req.indexes.size(); i++) {
         resp.txn[i] = block.vtx[req.indexes[i]];
     }
     LOCK(cs_main);
