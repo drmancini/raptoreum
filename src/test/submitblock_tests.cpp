@@ -148,6 +148,38 @@ BOOST_AUTO_TEST_CASE(commitment_format_round_trips_through_the_local_mempool) {
     BOOST_CHECK_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), candidate.GetHash().ToString());
 }
 
+// F-193: the quorum-commitment transaction present in candidate.vtx (confirmed
+// empirically: TestChain100Setup's fixture always produces one, nType ==
+// TRANSACTION_QUORUM_COMMITMENT) is deliberately NOT staged into the mempool here,
+// unlike the round-trip test above -- only the ordinary spend is. Without the
+// FindMineableCommitmentTxByHash fallback, this would throw "not found in local
+// mempool" for the quorum-commitment transaction's hash; the block is still
+// accepted, and the chain tip actually advances to it.
+BOOST_AUTO_TEST_CASE(commitment_format_resolves_a_quorum_commitment_tx_the_mempool_never_held) {
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock candidate = CreateBlock({spendTx}, coinbaseKey);
+
+    bool sawQuorumCommitment = false;
+    TestMemPoolEntryHelper entry;
+    for (size_t i = 1; i < candidate.vtx.size(); i++) {
+        if (candidate.vtx[i]->nType == TRANSACTION_QUORUM_COMMITMENT) {
+            sawQuorumCommitment = true;
+            continue; // the transaction under test: left out of the mempool on purpose
+        }
+        m_node.mempool->addUnchecked(entry.FromTx(candidate.vtx[i]));
+    }
+    // If the fixture ever stops producing one, this test would silently stop
+    // testing anything -- fail loudly instead.
+    BOOST_REQUIRE(sawQuorumCommitment);
+
+    CCommitmentBlock commitments = CommitmentsFromBlock(candidate);
+    const std::string hex = HexEncode(commitments);
+
+    UniValue result = CallSubmitBlock(m_node, hex, UniValue("commitment"));
+    BOOST_CHECK(result.isNull());
+    BOOST_CHECK_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), candidate.GetHash().ToString());
+}
+
 BOOST_AUTO_TEST_CASE(commitment_format_throws_a_clean_error_on_a_missing_body) {
     CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
     // Deliberately never added to the mempool.
