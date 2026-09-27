@@ -463,6 +463,32 @@ UniValue BuildGBTTransactionEntry(const CTransaction &tx, const std::map <uint25
     return entry;
 }
 
+// 4.4.3 (F-194): see rpc/mining.h for the full design rationale (why REFUSE
+// rather than auto-enable). A no-op for full-mode requests -- the serving
+// obligation this enforces (docs/transaction-decoupling.md §9.1a/§14.10) is
+// specific to a commitment-mode block's assembly-time-only transactions.
+void EnforceCommitmentModeServingObligation(bool fCommitmentMode) {
+    if (!fCommitmentMode) {
+        return;
+    }
+
+    if (gArgs.GetBoolArg("-servebodyrange", false)) {
+        return;
+    }
+
+    throw JSONRPCError(RPC_INVALID_PARAMETER,
+                        "Commitment-mode getblocktemplate requires -servebodyrange to be "
+                        "explicitly enabled first. A commitment-mode block's assembly-time-only "
+                        "transactions are held by no other node until served "
+                        "(docs/transaction-decoupling.md's own section 9.1a/14.10), and "
+                        "-servebodyrange's own per-connection rate limit is still unbuilt (F-150's "
+                        "MEDIUM finding, never fixed -- F-155's own scope boundary still lists it "
+                        "deferred) -- enabling it reopens that gap outside a controlled devnet, so "
+                        "it must not run on a live/exposed network unopted-in. Set "
+                        "-servebodyrange=1 only on an isolated devnet before requesting a "
+                        "commitment-mode template.");
+}
+
 static UniValue getblocktemplate(const JSONRPCRequest &request) {
     RPCHelpMan{"getblocktemplate",
                "\nIf the request parameters include a 'mode' key, that is used to explicitly select between the default 'template' request or a 'proposal'.\n"
@@ -761,6 +787,14 @@ static UniValue getblocktemplate(const JSONRPCRequest &request) {
     // full design rationale. CreateNewBlock/pblocktemplate above are
     // completely unaffected; only this array's own per-entry shape changes.
     const bool fCommitmentMode = WantsCommitmentModeTemplate(setClientRules);
+
+    // 4.4.3 (F-194): refuse to serve a commitment-mode template at all until
+    // the miner's own active serving obligation (§9.1a/§14.10) has an
+    // operator opt-in behind it -- see rpc/mining.h for the full rationale.
+    // Placed before the transactions array is built (not after) so a
+    // refused request never computes or leaks any commitment-mode-shaped
+    // response.
+    EnforceCommitmentModeServingObligation(fCommitmentMode);
 
     UniValue transactions(UniValue::VARR);
     std::map <uint256, int64_t> setTxIndex;
