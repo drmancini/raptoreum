@@ -27,8 +27,30 @@ static const unsigned int MAX_STANDARD_TX_SIZE = 100000;
 static const unsigned int MAX_P2SH_SIGOPS = 15;
 /** The maximum number of sigops we're willing to relay/mine in a single tx */
 static const unsigned int MAX_STANDARD_TX_SIGOPS = 4000;
-/** Default for -maxmempool, maximum megabytes of mempool memory usage */
-static const unsigned int DEFAULT_MAX_MEMPOOL_SIZE = 300;
+/** Default for -maxmempool, maximum megabytes of mempool memory usage.
+ *
+ *  4.5.1 (F-199): raised from upstream's 300 past the design-point floor
+ *  below (MIN_MAX_MEMPOOL_SIZE_DESIGN_FLOOR, 459 MB) with real headroom, per
+ *  docs/transaction-decoupling.md §16.6's own "mempool growth is lumpy"
+ *  point -- hash-table doubling means a node sitting at 90% of a cap sized
+ *  flush against the floor crosses it in one step. 1024 (a full, memorable
+ *  GB) sits ~2.1-2.25x above the re-derived 455.5-483 MB range (F-197/F-198),
+ *  comfortably absorbing one such doubling jump from anywhere below the
+ *  floor, while remaining a trivial fraction of any Smartnode-class box's RAM
+ *  (X-5: 16 GB). This is a default only -- -maxmempool remains fully
+ *  operator-overridable in either direction. */
+static const unsigned int DEFAULT_MAX_MEMPOOL_SIZE = 1024;
+/** Design-point minimum for -maxmempool once the mining gate is live (F-197's
+ *  own re-derivation: 520 tx/s x K-12's 600 s x ~1,460 B/entry, F-198, ->
+ *  455.5-483 MB depending on corpus mean -- 459 MB is the standing anchor
+ *  cited by build-plan.md/perf-results.md and re-derived, not re-picked,
+ *  here). Enforced, not merely documented, by
+ *  WarnIfMaxMempoolBelowDesignFloor (validation.h/.cpp), matching 4.4.3/
+ *  F-194's own REQUIRE precedent for -servebodyrange. Deliberately separate
+ *  from DEFAULT_MAX_MEMPOOL_SIZE above: this is the minimum an operator's
+ *  OWN override must clear, not the shipped default, which already clears it
+ *  with margin. */
+static const unsigned int MIN_MAX_MEMPOOL_SIZE_DESIGN_FLOOR = 459;
 /** Default for -incrementalrelayfee, which sets the minimum feerate increase for mempool limiting or BIP 125 replacement **/
 static const unsigned int DEFAULT_INCREMENTAL_RELAY_FEE = 1000;
 /** Default for -bytespersigop */
