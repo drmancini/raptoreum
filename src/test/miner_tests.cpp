@@ -755,4 +755,44 @@ BOOST_AUTO_TEST_CASE(gbt_transaction_entry_omits_data_only_in_commitment_mode) {
     BOOST_CHECK_EQUAL(find_value(commitment, "sigops").get_int64(), nSigOps);
 }
 
+// F-194 (4.4.3): enforces the miner's own active serving obligation
+// (docs/transaction-decoupling.md's own §9.1a/§14.10) for commitment-mode
+// getblocktemplate -- "today, publishing a block discharges the miner's
+// obligation completely. Under this design it does not" (§14.10). The
+// enforcement mechanism already exists (`-servebodyrange`, init.cpp/
+// net_processing.cpp) but defaults off because its own per-connection
+// rate limit is still unbuilt (F-150/F-155); this refuses to serve a
+// commitment-mode template until an operator has explicitly opted into
+// that flag, rather than leaving the obligation as documentation only.
+// Kept as its own function, same convention as
+// WantsCommitmentModeTemplate/BuildGBTTransactionEntry above, so the gate
+// itself is directly unit-testable without getblocktemplate's own live-peer/
+// IBD preconditions.
+BOOST_AUTO_TEST_CASE(enforce_commitment_mode_serving_obligation_refuses_without_servebodyrange) {
+    // Full-mode requests are never gated -- the obligation this enforces is
+    // specific to a commitment-mode block's assembly-time-only transactions.
+    BOOST_CHECK_NO_THROW(EnforceCommitmentModeServingObligation(/*fCommitmentMode=*/false));
+
+    // Save/restore around a global gArgs flag, matching
+    // denialofservice_tests' own -banscore save/restore precedent -- other
+    // tests in this same binary must not see this flag flipped.
+    const bool fPrevServeBodyRange = gArgs.GetBoolArg("-servebodyrange", false);
+
+    gArgs.ForceSetArg("-servebodyrange", "0");
+    BOOST_CHECK_EXCEPTION(
+        EnforceCommitmentModeServingObligation(/*fCommitmentMode=*/true), UniValue,
+        [](const UniValue &objError) {
+            const std::string msg = find_value(objError, "message").get_str();
+            BOOST_CHECK(msg.find("-servebodyrange") != std::string::npos);
+            BOOST_CHECK(msg.find("must not run on a live/exposed network") != std::string::npos);
+            BOOST_CHECK(msg.find("rate limit") != std::string::npos);
+            return true;
+        });
+
+    gArgs.ForceSetArg("-servebodyrange", "1");
+    BOOST_CHECK_NO_THROW(EnforceCommitmentModeServingObligation(/*fCommitmentMode=*/true));
+
+    gArgs.ForceSetArg("-servebodyrange", fPrevServeBodyRange ? "1" : "0");
+}
+
 BOOST_AUTO_TEST_SUITE_END()

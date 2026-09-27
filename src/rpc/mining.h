@@ -54,4 +54,37 @@ bool WantsCommitmentModeTemplate(const std::set <std::string> &setClientRules);
 UniValue BuildGBTTransactionEntry(const CTransaction &tx, const std::map <uint256, int64_t> &setTxIndex,
                                   CAmount nFee, CAmount nSpecialTxFee, int64_t nSigOps, bool fCommitmentMode);
 
+// 4.4.3 (F-194): enforces the miner's own active serving obligation
+// (docs/transaction-decoupling.md's own §9.1a/§14.10) the moment
+// commitment-mode is actually used, rather than leaving it as documentation
+// a pool operator must independently discover. "Today, publishing a block
+// discharges the miner's obligation completely. Under this design it does
+// not" (§14.10) -- a commitment-mode block's assembly-time-only
+// transactions are held by no other node until served, and orphaning
+// happens specifically if the miner will not or cannot serve.
+//
+// The enforcement mechanism already exists and is already gated:
+// `-servebodyrange` (init.cpp, net_processing.cpp:GETBODYRANGE dispatch)
+// defaults off and is DEBUG_ONLY, specifically because its own
+// per-connection rate limit is a confirmed, still-open gap (F-150's own
+// MEDIUM finding, only ever upgraded to an executable gate by F-151, never
+// actually fixed -- F-155's own explicit 2.2.4 scope boundary lists it
+// deferred, and nothing since closes it).
+//
+// Chosen enforcement style: REFUSE, not auto-enable. This function throws
+// a JSONRPCError (matching this same function's own sibling precedent a
+// few lines up, the forced-update-not-supported throw in getblocktemplate,
+// and F-178's established "clean JSONRPCError over a silent/crashing
+// fallback" convention) rather than silently flipping the global
+// `-servebodyrange` flag on from inside RPC request handling. Auto-enabling
+// would let the CONTENT of an RPC request (a client-declared "commitments"
+// rule) reach past the RPC boundary and flip a network-facing, known-gap
+// flag the operator never typed -- exactly the kind of inferred/implicit
+// trigger this project has already rejected once for an analogous reason
+// (build-plan.md 4.4's own note on why `submitblock` needs an explicit
+// format parameter, not auto-detection). `-servebodyrange` is opt-in by
+// design ("must not run on a live/exposed network unopted-in"); refusing
+// keeps it that way.
+void EnforceCommitmentModeServingObligation(bool fCommitmentMode);
+
 #endif
