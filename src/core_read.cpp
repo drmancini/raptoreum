@@ -121,6 +121,22 @@ bool DecodeHexBlk(CBlock &block, const std::string &strHexBlk) {
     return true;
 }
 
+bool DecodeHexCommitmentBlk(CCommitmentBlock &block, const std::string &strHexBlk) {
+    if (!IsHex(strHexBlk))
+        return false;
+
+    std::vector<unsigned char> blockData(ParseHex(strHexBlk));
+    CDataStream ssBlock(blockData, SER_NETWORK, PROTOCOL_VERSION);
+    try {
+        ssBlock >> block;
+    }
+    catch (const std::exception &) {
+        return false;
+    }
+
+    return true;
+}
+
 bool ParseHashStr(const std::string &strHex, uint256 &result) {
     if ((strHex.size() != 64) || !IsHex(strHex))
         return false;
