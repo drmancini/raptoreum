@@ -467,7 +467,11 @@ UniValue BuildGBTTransactionEntry(const CTransaction &tx, const std::map <uint25
 // rather than auto-enable). A no-op for full-mode requests -- the serving
 // obligation this enforces (docs/transaction-decoupling.md §9.1a/§14.10) is
 // specific to a commitment-mode block's assembly-time-only transactions.
-void EnforceCommitmentModeServingObligation(bool fCommitmentMode) {
+//
+// F-196 Part B: rpcName is threaded through so both getblocktemplate and
+// submitblock's "commitment" format branch can share this one gate with a
+// message that names whichever of them actually refused -- see rpc/mining.h.
+void EnforceCommitmentModeServingObligation(bool fCommitmentMode, const std::string &rpcName) {
     if (!fCommitmentMode) {
         return;
     }
@@ -477,7 +481,7 @@ void EnforceCommitmentModeServingObligation(bool fCommitmentMode) {
     }
 
     throw JSONRPCError(RPC_INVALID_PARAMETER,
-                        "Commitment-mode getblocktemplate requires -servebodyrange to be "
+                        strprintf("Commitment-mode %s requires -servebodyrange to be "
                         "explicitly enabled first. A commitment-mode block's assembly-time-only "
                         "transactions are held by no other node until served "
                         "(docs/transaction-decoupling.md's own section 9.1a/14.10), and "
@@ -485,8 +489,8 @@ void EnforceCommitmentModeServingObligation(bool fCommitmentMode) {
                         "MEDIUM finding, never fixed -- F-155's own scope boundary still lists it "
                         "deferred) -- enabling it reopens that gap outside a controlled devnet, so "
                         "it must not run on a live/exposed network unopted-in. Set "
-                        "-servebodyrange=1 only on an isolated devnet before requesting a "
-                        "commitment-mode template.");
+                        "-servebodyrange=1 only on an isolated devnet before using commitment mode.",
+                        rpcName));
 }
 
 static UniValue getblocktemplate(const JSONRPCRequest &request) {
@@ -689,6 +693,23 @@ static UniValue getblocktemplate(const JSONRPCRequest &request) {
     if (strMode != "template")
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid mode");
 
+    // 4.4.1 (F-191): commitment-mode, negotiated via the existing rules
+    // channel exactly like a BIP9 softfork rule -- see rpc/mining.h for the
+    // full design rationale.
+    const bool fCommitmentMode = WantsCommitmentModeTemplate(setClientRules);
+
+    // 4.4.3 (F-194)/F-196 Part B (moved earlier): refuse to serve a
+    // commitment-mode template at all until the miner's own active serving
+    // obligation (§9.1a/§14.10) has an operator opt-in behind it -- see
+    // rpc/mining.h for the full rationale. Checked here, right after
+    // setClientRules is parsed and before the long-poll wait or
+    // CreateNewBlock's own cache-rebuild below, so a refused request never
+    // pays for either -- moved up from just before the "transactions" array
+    // was built, per the reviewer's own lower-priority suggestion (F-195/
+    // F-196 coordinator note): failing fast beats failing after the
+    // expensive work is already done.
+    EnforceCommitmentModeServingObligation(fCommitmentMode, "getblocktemplate");
+
     NodeContext &node = EnsureNodeContext(request.context);
     if (!node.connman)
         throw JSONRPCError(RPC_CLIENT_P2P_DISABLED, "Error: Peer-to-peer functionality missing or disabled");
@@ -782,20 +803,12 @@ static UniValue getblocktemplate(const JSONRPCRequest &request) {
     UniValue aCaps(UniValue::VARR);
     aCaps.push_back("proposal");
 
-    // 4.4.1 (F-191): commitment-mode, negotiated via the existing rules
-    // channel exactly like a BIP9 softfork rule -- see rpc/mining.h for the
-    // full design rationale. CreateNewBlock/pblocktemplate above are
-    // completely unaffected; only this array's own per-entry shape changes.
-    const bool fCommitmentMode = WantsCommitmentModeTemplate(setClientRules);
-
-    // 4.4.3 (F-194): refuse to serve a commitment-mode template at all until
-    // the miner's own active serving obligation (§9.1a/§14.10) has an
-    // operator opt-in behind it -- see rpc/mining.h for the full rationale.
-    // Placed before the transactions array is built (not after) so a
-    // refused request never computes or leaks any commitment-mode-shaped
-    // response.
-    EnforceCommitmentModeServingObligation(fCommitmentMode);
-
+    // fCommitmentMode/the serving-obligation gate were both computed and
+    // checked earlier now (right after setClientRules was parsed, before the
+    // long-poll wait and CreateNewBlock above) -- see the F-196 Part B note
+    // there. CreateNewBlock/pblocktemplate above are completely unaffected by
+    // commitment-mode either way; only this array's own per-entry shape
+    // changes.
     UniValue transactions(UniValue::VARR);
     std::map <uint256, int64_t> setTxIndex;
     int i = 0;
@@ -961,13 +974,25 @@ static UniValue getblocktemplate(const JSONRPCRequest &request) {
 // same way CreateNewBlock (miner.cpp) selects one per enabled quorum param set for
 // the next block. Mirror that loop exactly and match by hash, rather than inventing
 // a new lookup path into quorumBlockProcessor.
-CTransactionRef FindMineableCommitmentTxByHash(const uint256 &txid) {
+//
+// F-195 (fixed): nHeight/pindexPrev are now derived from the SUBMITTED
+// BLOCK'S OWN recorded parent (hashPrevBlock), not from the live chain tip
+// at call time -- see rpc/mining.h for why the tip-relative version was
+// wrong. For each enabled quorum param set, also try the deterministic
+// "null commitment" form (GetNullCommitmentTx) as a second candidate: the
+// currently-known-best commitment for that quorum session may have changed
+// (a better one arrived via AddMineableCommitment) since the submitted
+// block's template was built, in which case GetMineableCommitmentTx's
+// CURRENT answer no longer matches what was actually mined into the stale
+// block, but the null form the template originally used is still
+// deterministic and reconstructible.
+CTransactionRef FindMineableCommitmentTxByHash(const uint256 &txid, const uint256 &hashPrevBlock) {
     AssertLockHeld(cs_main);
 
     if (!Params().GetConsensus().DIP0003Enabled) {
         return nullptr;
     }
-    const CBlockIndex *pindexPrev = ::ChainActive().Tip();
+    const CBlockIndex *pindexPrev = LookupBlockIndex(hashPrevBlock);
     if (pindexPrev == nullptr) {
         return nullptr;
     }
@@ -976,6 +1001,10 @@ CTransactionRef FindMineableCommitmentTxByHash(const uint256 &txid) {
     for (const Consensus::LLMQParams &params : llmq::CLLMQUtils::GetEnabledQuorumParams(pindexPrev)) {
         CTransactionRef qcTx;
         if (llmq::quorumBlockProcessor->GetMineableCommitmentTx(params, nHeight, qcTx) &&
+            qcTx->GetHash() == txid) {
+            return qcTx;
+        }
+        if (llmq::quorumBlockProcessor->GetNullCommitmentTx(params, nHeight, qcTx) &&
             qcTx->GetHash() == txid) {
             return qcTx;
         }
@@ -1001,11 +1030,13 @@ CBlock MaterialiseSubmittedCommitmentBlock(const CCommitmentBlock &commitments, 
             // template at assembly time and never is. Try reconstructing it the
             // same way the miner did before concluding it's genuinely missing.
             LOCK(cs_main);
-            ptx = FindMineableCommitmentTxByHash(txid);
+            ptx = FindMineableCommitmentTxByHash(txid, commitments.hashPrevBlock);
         }
         if (!ptx) {
             throw JSONRPCError(RPC_MISC_ERROR,
-                               strprintf("Committed transaction %s not found in local mempool", txid.ToString()));
+                               strprintf("Committed transaction %s not found in local mempool and not a "
+                                         "currently mineable quorum commitment for this block's parent",
+                                         txid.ToString()));
         }
         bodies.push_back(ptx);
     }
@@ -1079,6 +1110,16 @@ static UniValue submitblock(const JSONRPCRequest &request) {
         // the caller explicitly named above -- never auto-detected -- so
         // there is no ambiguity about which decoder to use. ProcessNewBlock
         // below is completely unchanged either way.
+        //
+        // F-196 Part B: the serving obligation (§9.1a/§14.10) is incurred by
+        // SUBMITTING a commitment-mode block, not by requesting one via
+        // getblocktemplate -- this path is reachable without ever calling a
+        // commitment-mode getblocktemplate first (a client can build its own
+        // CCommitmentBlock from an ordinary full-mode template, or poll one
+        // node and submit to a different one). Gate here too, before any
+        // resolution/materialisation work happens.
+        EnforceCommitmentModeServingObligation(/*fCommitmentMode=*/true, "submitblock");
+
         CCommitmentBlock commitments;
         if (!DecodeHexCommitmentBlk(commitments, request.params[0].get_str())) {
             throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Commitment block decode failed");
