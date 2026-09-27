@@ -918,4 +918,41 @@ BOOST_AUTO_TEST_CASE(enforce_commitment_mode_serving_obligation_refuses_without_
     BOOST_REQUIRE(!gArgs.IsArgSet("-servebodyrange"));
 }
 
+// F-199 (4.5.1): the -maxmempool design-point floor (F-197/F-198's
+// re-derivation, MIN_MAX_MEMPOOL_SIZE_DESIGN_FLOOR, policy/policy.h),
+// enforced rather than merely documented, matching 4.4.3/F-194's own
+// precedent for -servebodyrange -- but WARN, not REFUSE (see validation.h/
+// .cpp for why: this condition is evaluated on every node on every connected
+// block once spork 3 activates network-wide, not at a single retryable RPC
+// boundary, so aborting/rejecting there would be wildly disproportionate to
+// a local config-tuning problem).
+//
+// Split into a pure decision function (this) and a thin logging-glue caller
+// in ConnectBlock, the same split this project already uses for
+// WantsCommitmentModeTemplate/BuildGBTTransactionEntry -- the decision is
+// directly unit-testable; LogPrintf/SetMiscWarning's own output is not.
+BOOST_AUTO_TEST_CASE(max_mempool_below_design_floor_only_when_gate_live_and_size_short) {
+    const int64_t floorBytes = int64_t(MIN_MAX_MEMPOOL_SIZE_DESIGN_FLOOR) * 1000000;
+
+    // Gate not live (spork 3 inactive or node not yet synced): never flags,
+    // regardless of how small -maxmempool is.
+    BOOST_CHECK(!MaxMempoolBelowDesignFloor(/*fMiningGateLive=*/false, /*nMaxMempoolBytes=*/1));
+    BOOST_CHECK(!MaxMempoolBelowDesignFloor(/*fMiningGateLive=*/false, floorBytes - 1));
+
+    // Gate live, strictly below the floor: flags.
+    BOOST_CHECK(MaxMempoolBelowDesignFloor(/*fMiningGateLive=*/true, floorBytes - 1));
+
+    // Gate live, exactly at the floor: compliant, does not flag.
+    BOOST_CHECK(!MaxMempoolBelowDesignFloor(/*fMiningGateLive=*/true, floorBytes));
+
+    // Gate live, above the floor: compliant.
+    BOOST_CHECK(!MaxMempoolBelowDesignFloor(/*fMiningGateLive=*/true, floorBytes + 1));
+
+    // The shipped default (raised past the floor with real headroom, F-199)
+    // never trips the gate once it's live -- the two 4.5.1 deliverables
+    // (default and enforcement) must agree with each other.
+    BOOST_CHECK(!MaxMempoolBelowDesignFloor(/*fMiningGateLive=*/true,
+                                            int64_t(DEFAULT_MAX_MEMPOOL_SIZE) * 1000000));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

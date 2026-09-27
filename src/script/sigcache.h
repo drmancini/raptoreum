@@ -10,10 +10,24 @@
 
 #include <vector>
 
-// DoS prevention: limit cache size to 32MB (over 1000000 entries on 64-bit
-// systems). Due to how we count cache size, actual memory usage is slightly
-// more (~32.25 MB)
-static const unsigned int DEFAULT_MAX_SIG_CACHE_SIZE = 32;
+// DoS prevention: limit cache size to 256MB (over 8,000,000 entries on
+// 64-bit systems). Due to how we count cache size, actual memory usage is
+// slightly more.
+//
+// 4.5.1 (F-199): raised from upstream's 32 MB. This budget splits in half
+// between signatureCache and scriptExecutionCache (script/sigcache.cpp,
+// validation.cpp); scriptExecutionCache holds one ~32-byte CuckooCache entry
+// per TRANSACTION (validation.cpp:1616-1623's keying, confirmed by F-197's
+// own re-derivation). At 32 MB total the 16 MB scriptExecutionCache half
+// held 524,288 entries -- only ~2.1 of this branch's own 250,000-tx
+// design-point blocks (transaction-decoupling.md:478-480's "2.1 blocks at
+// 8 MB" figure). 256 MB (8x) gives a 128 MB half, 4,194,304 entries, ~16.8
+// design-point blocks -- comfortable margin for cuckoocache.h's epoch-based
+// eviction (a 3-epoch scheme targeting ~90% load, recency-preferring but not
+// exact FIFO/LRU, so it needs safety margin rather than sizing flush against
+// the bare block count) without spending meaningfully more than 1.6% of
+// MAX_MAX_SIG_CACHE_SIZE's own headroom below.
+static const unsigned int DEFAULT_MAX_SIG_CACHE_SIZE = 256;
 // Maximum sig cache size allowed
 static const int64_t MAX_MAX_SIG_CACHE_SIZE = 16384;
 

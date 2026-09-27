@@ -514,6 +514,46 @@ CoinsTip()
 Uncache(removed);
 }
 
+// 4.5.1 (F-199): see validation.h for the full design rationale (the
+// re-derived floor, and why this is WARN rather than 4.4.3/F-194's REFUSE).
+// Pure decision, no I/O -- directly unit-tested (miner_tests.cpp).
+bool MaxMempoolBelowDesignFloor(bool fMiningGateLive, int64_t nMaxMempoolBytes) {
+    if (!fMiningGateLive) {
+        return false;
+    }
+    return nMaxMempoolBytes < int64_t(MIN_MAX_MEMPOOL_SIZE_DESIGN_FLOOR) * 1000000;
+}
+
+// 4.5.1 (F-199): thin logging glue around the decision above, called from
+// ConnectBlock's own existing llmq::RejectConflictingBlocks()-gated block --
+// the same "is spork 3 active and synced" check IsTxSafeForMining and the
+// ChainLocks safety walk already consult, not a new one invented for this.
+// Warns at most once per process: this is a standing misconfiguration, not a
+// per-block event, and ConnectBlock runs far too often to re-log it there.
+void WarnIfMaxMempoolBelowDesignFloor(bool fMiningGateLive, int64_t nMaxMempoolBytes) {
+    static bool fWarnedMaxMempoolBelowFloor = false;
+    if (fWarnedMaxMempoolBelowFloor) {
+        return;
+    }
+    if (!MaxMempoolBelowDesignFloor(fMiningGateLive, nMaxMempoolBytes)) {
+        return;
+    }
+
+    const std::string strWarning = strprintf(
+        "-maxmempool is set to %d MB, below the %d MB design-point floor "
+        "(docs/transaction-decoupling.md §16.6, docs/findings.md F-197/F-198/F-199) "
+        "now that the mining gate is live (spork 3 active and chain synced). "
+        "A sustained design-point burst can hold ~312,000 transactions in the "
+        "mempool for up to ten minutes (K-12's WAIT_FOR_ISLOCK_TIMEOUT) -- "
+        "below the floor this risks uncontrolled trimming or memory pressure "
+        "under load. Raise -maxmempool to at least %d MB.",
+        nMaxMempoolBytes / 1000000, MIN_MAX_MEMPOOL_SIZE_DESIGN_FLOOR,
+        MIN_MAX_MEMPOOL_SIZE_DESIGN_FLOOR);
+    LogPrintf("%s: %s\n", __func__, strWarning);
+    SetMiscWarning(strWarning);
+    fWarnedMaxMempoolBelowFloor = true;
+}
+
 static bool IsCurrentForFeeEstimation()
 
 EXCLUSIVE_LOCKS_REQUIRED(cs_main)
@@ -2731,6 +2771,14 @@ bool CChainState::ConnectBlock(const CBlock &block, CValidationState &state, CBl
     // RAPTOREUM : CHECK TRANSACTIONS FOR INSTANTSEND
 
     if (llmq::RejectConflictingBlocks()) {
+        // 4.5.1 (F-199): the mining gate is live -- warn (not refuse; see
+        // validation.h) if -maxmempool sits below its re-derived design
+        // floor, matching 4.4.3/F-194's "require, not merely document"
+        // precedent for -servebodyrange.
+        WarnIfMaxMempoolBelowDesignFloor(
+            /*fMiningGateLive=*/true,
+            gArgs.GetArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000);
+
         // Require other nodes to comply, send them some data in case they are missing it.
         for (const auto &tx: block.vtx) {
             // skip txes that have no inputs
