@@ -755,4 +755,94 @@ BOOST_AUTO_TEST_CASE(gbt_transaction_entry_omits_data_only_in_commitment_mode) {
     BOOST_CHECK_EQUAL(find_value(commitment, "sigops").get_int64(), nSigOps);
 }
 
+// F-192 (4.4.2): submitblock's commitment-mode orchestration -- resolve a
+// CCommitmentBlock's committed transactions from the LOCAL mempool and
+// materialise the full CBlock via the pre-existing MaterialiseBlock
+// (primitives/block.cpp, already tested since 2.2.4/F-155). Extracted as its
+// own function (rpc/mining.h/.cpp) so this orchestration -- pure lookup plus
+// the pre-existing MaterialiseBlock call, no new validation logic -- is
+// directly unit-testable against a standalone CTxMemPool, matching F-191's
+// own established convention for this file's dispatch-adjacent glue.
+BOOST_AUTO_TEST_CASE(materialise_submitted_commitment_block_resolves_from_mempool) {
+    CMutableTransaction coinbaseTx;
+    coinbaseTx.vin.resize(1);
+    coinbaseTx.vin[0].prevout.SetNull();
+    coinbaseTx.vout.resize(1);
+    coinbaseTx.vout[0].nValue = 5 * COIN;
+    CTransactionRef coinbase = MakeTransactionRef(coinbaseTx);
+
+    CMutableTransaction tx1m;
+    tx1m.vin.resize(1);
+    tx1m.vin[0].prevout = COutPoint(uint256S("0x1"), 0);
+    tx1m.vout.resize(1);
+    tx1m.vout[0].nValue = 1 * COIN;
+    CTransactionRef tx1 = MakeTransactionRef(tx1m);
+
+    CMutableTransaction tx2m;
+    tx2m.vin.resize(1);
+    tx2m.vin[0].prevout = COutPoint(uint256S("0x2"), 0);
+    tx2m.vout.resize(1);
+    tx2m.vout[0].nValue = 2 * COIN;
+    CTransactionRef tx2 = MakeTransactionRef(tx2m);
+
+    CCommitmentBlock commitments;
+    commitments.nVersion = 4;
+    commitments.hashPrevBlock = uint256S("0xbeef");
+    commitments.nTime = 1700000000;
+    commitments.nBits = 0x207fffff;
+    commitments.nNonce = 1;
+    commitments.coinbase = coinbase;
+    commitments.vCommitments = {tx1->GetHash(), tx2->GetHash()};
+
+    CTxMemPool pool;
+    TestMemPoolEntryHelper entry;
+    pool.addUnchecked(entry.FromTx(tx1));
+    pool.addUnchecked(entry.FromTx(tx2));
+
+    CBlock rebuilt = MaterialiseSubmittedCommitmentBlock(commitments, pool);
+    BOOST_REQUIRE_EQUAL(rebuilt.vtx.size(), 3U);
+    BOOST_CHECK(rebuilt.vtx[0]->GetHash() == coinbase->GetHash());
+    BOOST_CHECK(rebuilt.vtx[1]->GetHash() == tx1->GetHash());
+    BOOST_CHECK(rebuilt.vtx[2]->GetHash() == tx2->GetHash());
+    // fChecked must not be inherited from anywhere -- CheckBlock returns
+    // early on it, and MaterialiseBlock's own fresh CBlock() guarantees this.
+    BOOST_CHECK(!rebuilt.fChecked);
+}
+
+BOOST_AUTO_TEST_CASE(materialise_submitted_commitment_block_throws_on_a_missing_body) {
+    CMutableTransaction coinbaseTx;
+    coinbaseTx.vin.resize(1);
+    coinbaseTx.vin[0].prevout.SetNull();
+    coinbaseTx.vout.resize(1);
+    coinbaseTx.vout[0].nValue = 5 * COIN;
+    CTransactionRef coinbase = MakeTransactionRef(coinbaseTx);
+
+    CCommitmentBlock commitments;
+    commitments.coinbase = coinbase;
+    commitments.vCommitments = {uint256S("0xdead")};
+
+    // Message-specific, not just "some UniValue was thrown" -- MaterialiseBlock
+    // (primitives/block.cpp) has its OWN, separate null/mismatch guard, so a
+    // mutation that removed only this function's own per-transaction check
+    // would still throw a UniValue (via that other guard) and a type-only
+    // assertion would not catch it. Checking the actual message pins down
+    // WHICH guard fired.
+    CTxMemPool emptyPool;
+    BOOST_CHECK_EXCEPTION(MaterialiseSubmittedCommitmentBlock(commitments, emptyPool), UniValue,
+                         [](const UniValue &e) {
+                             return find_value(e, "message").get_str().find("not found in local mempool") !=
+                                    std::string::npos;
+                         });
+}
+
+BOOST_AUTO_TEST_CASE(materialise_submitted_commitment_block_throws_on_a_null_commitment_block) {
+    CCommitmentBlock commitments; // SetNull()'d by construction, no coinbase
+    CTxMemPool emptyPool;
+    BOOST_CHECK_EXCEPTION(MaterialiseSubmittedCommitmentBlock(commitments, emptyPool), UniValue,
+                         [](const UniValue &e) {
+                             return find_value(e, "message").get_str().find("does not carry a coinbase") !=
+                                    std::string::npos;
+                         });
+}
+
 BOOST_AUTO_TEST_SUITE_END()

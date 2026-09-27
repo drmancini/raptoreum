@@ -15,6 +15,8 @@ class CBlock;
 
 class CBlockHeader;
 
+class CCommitmentBlock;
+
 class CScript;
 
 class CTransaction;
@@ -36,6 +38,13 @@ std::string ScriptToAsmStr(const CScript &script, const bool fAttemptSighashDeco
 [[nodiscard]] bool DecodeHexTx(CMutableTransaction &tx, const std::string &strHexTx);
 
 [[nodiscard]] bool DecodeHexBlk(CBlock &, const std::string &strHexBlk);
+
+// 4.4.2 (F-192): submitblock's explicit "format":"commitment" alternate --
+// mirrors DecodeHexBlk exactly, for the wire type a miner's own submission
+// names when it submits by identifiers rather than full transaction bytes.
+// Never used to auto-detect a serialization: the caller must already know
+// which type a given hex string is (see rpc/mining.cpp's submitblock).
+[[nodiscard]] bool DecodeHexCommitmentBlk(CCommitmentBlock &, const std::string &strHexBlk);
 
 bool DecodeHexBlockHeader(CBlockHeader &, const std::string &hex_header);
 
