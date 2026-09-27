@@ -5,6 +5,7 @@
 #ifndef BITCOIN_BLOCKENCODINGS_H
 #define BITCOIN_BLOCKENCODINGS_H
 
+#include <consensus/consensus.h>
 #include <primitives/block.h>
 
 class CTxMemPool;
@@ -40,7 +41,14 @@ class BlockTransactionsRequest {
 public:
     // A BlockTransactionsRequest message
     uint256 blockhash;
-    std::vector <uint16_t> indexes;
+    // F-200 (4.5.2 Part A): widened from uint16_t (max 65,535) -- this
+    // branch's own MAX_DIP0001_BLOCK_SIZE (8,000,000, consensus/consensus.h)
+    // needs up to 250,000 identifiers, which overflows a uint16_t outright.
+    // Wire-format-neutral: DifferenceFormatter serializes via
+    // WriteCompactSize/ReadCompactSize (variable-length CompactSize, not a
+    // fixed-width field), so this only relaxes the C++-side bound, exactly
+    // like PrefilledTransaction::index below.
+    std::vector <uint32_t> indexes;
 
     SERIALIZE_METHODS(BlockTransactionsRequest, obj
     )
@@ -67,11 +75,31 @@ public:
     }
 };
 
+/** F-201 (4.5.2 Part B): whether a BLOCKTXN response summing to
+ *  nTotalSerializedSize bytes should be declined in favour of a full-block
+ *  fallback, given a size ceiling. SendBlockTransactions (net_processing.cpp)
+ *  currently builds every requested transaction into ONE BlockTransactions
+ *  object with zero size checking -- at design throughput (~373 B/tx
+ *  average, F-30), as few as ~8,000 requested transactions already exceeds
+ *  MAX_PROTOCOL_MESSAGE_LENGTH (3 MB, net.h) and gets this node disconnected
+ *  by the peer it's replying to (net.cpp's oversized-message check). Kept as
+ *  a pure predicate, separate from SendBlockTransactions's CNode/CConnman
+ *  side effects, so the decision itself is unit-testable without a network
+ *  harness -- same shape as bodyrange.h's ShouldDisconnectForBodyRangeAttempts. */
+bool ShouldDeclineBlockTransactionsForSize(uint64_t nTotalSerializedSize, uint64_t nSizeCeiling);
+
 // Dumb serialization/storage-helper for CBlockHeaderAndShortTxIDs and PartiallyDownloadedBlock
 struct PrefilledTransaction {
     // Used as an offset since last prefilled tx in CBlockHeaderAndShortTxIDs,
-    // as a proper transaction-in-block-index in PartiallyDownloadedBlock
-    uint16_t index;
+    // as a proper transaction-in-block-index in PartiallyDownloadedBlock.
+    // F-200 (4.5.2 Part A): widened from uint16_t, see BlockTransactionsRequest::indexes
+    // above for why. Serialized via COMPACTSIZE (CompactSizeFormatter), an
+    // already variable-length wire encoding -- confirmed by direct read of
+    // serialize.h's CompactSizeFormatter::Ser/Unser -- so widening this
+    // field's own C++ type does not change what goes on the wire for any
+    // value that already fit in a uint16_t; it only relaxes the acceptable
+    // upper bound.
+    uint32_t index;
     CTransactionRef tx;
 
     SERIALIZE_METHODS(PrefilledTransaction, obj) {
@@ -119,8 +147,15 @@ public:
         READWRITE(obj.header, obj.nonce, Using < VectorFormatter < CustomUintFormatter <
                                          SHORTTXIDS_LENGTH>>>(obj.shorttxids), obj.prefilledtxn);
         if (ser_action.ForRead()) {
-            if (obj.BlockTxCount() > std::numeric_limits<uint16_t>::max()) {
-                throw std::ios_base::failure("indexes overflowed 16 bits");
+            // F-200 (4.5.2 Part A): bound to the design's own already-decided
+            // consensus cap (COMMITMENT_BUDGET_MAX_INPUTS, D-19, 1.2/F-98-F-99),
+            // not to the widened index type's own incidental max. A bare
+            // "does it fit in uint32_t" check here would silently readmit the
+            // exact "fits because the TYPE happens to be big enough" hazard
+            // this widening is supposed to close (F-197 item 4), just moved to
+            // a threshold nobody chose on purpose.
+            if (obj.BlockTxCount() > COMMITMENT_BUDGET_MAX_INPUTS) {
+                throw std::ios_base::failure("indexes overflowed the commitment input budget");
             }
             obj.FillShortTxIDSelector();
         }
