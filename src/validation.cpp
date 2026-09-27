@@ -277,6 +277,13 @@ static FILE *OpenUndoFile(const FlatFilePos &pos, bool fReadOnly = false);
 
 static FlatFileSeq BlockFileSeq();
 
+// 4.5.1 corrective (F-202): forward-declared so WarnIfMaxMempoolBelowDesignFloor
+// (defined above DoWarning's own definition further down this file) can reuse
+// it -- this project's own established SetMiscWarning-plus-one-shot-AlertNotify
+// warning convention -- instead of calling SetMiscWarning directly. See
+// DoWarning's own definition for the full shape.
+static void DoWarning(const std::string &strWarning);
+
 static FlatFileSeq UndoFileSeq();
 
 bool CheckFinalTx(const CTransaction &tx, int flags) {
@@ -550,7 +557,12 @@ void WarnIfMaxMempoolBelowDesignFloor(bool fMiningGateLive, int64_t nMaxMempoolB
         nMaxMempoolBytes / 1000000, MIN_MAX_MEMPOOL_SIZE_DESIGN_FLOOR,
         MIN_MAX_MEMPOOL_SIZE_DESIGN_FLOOR);
     LogPrintf("%s: %s\n", __func__, strWarning);
-    SetMiscWarning(strWarning);
+    // 4.5.1 corrective (F-202): reuse this project's own established
+    // SetMiscWarning-plus-one-shot-AlertNotify shape (DoWarning, below) rather
+    // than calling SetMiscWarning alone -- so -alertnotify actually fires and
+    // the GUI status bar refreshes promptly (NotifyAlertChanged) instead of
+    // waiting on some unrelated later warning to trip DoWarning's own path.
+    DoWarning(strWarning);
     fWarnedMaxMempoolBelowFloor = true;
 }
 
@@ -2771,12 +2783,16 @@ bool CChainState::ConnectBlock(const CBlock &block, CValidationState &state, CBl
     // RAPTOREUM : CHECK TRANSACTIONS FOR INSTANTSEND
 
     if (llmq::RejectConflictingBlocks()) {
-        // 4.5.1 (F-199): the mining gate is live -- warn (not refuse; see
-        // validation.h) if -maxmempool sits below its re-derived design
-        // floor, matching 4.4.3/F-194's "require, not merely document"
-        // precedent for -servebodyrange.
+        // 4.5.1 (F-199) / corrective (F-202): the mining gate is live -- warn
+        // (not refuse; see validation.h) if -maxmempool sits below its
+        // re-derived design floor, matching 4.4.3/F-194's "require, not
+        // merely document" precedent for -servebodyrange. fMiningGateLive is
+        // the REAL llmq::RejectConflictingBlocks() result (the same call this
+        // very guard already made), not a hardcoded literal -- F-202 fixed a
+        // mutation-coverage gap where a literal `true` here left the actual
+        // spork/sync gate this guard represents untested.
         WarnIfMaxMempoolBelowDesignFloor(
-            /*fMiningGateLive=*/true,
+            /*fMiningGateLive=*/llmq::RejectConflictingBlocks(),
             gArgs.GetArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000);
 
         // Require other nodes to comply, send them some data in case they are missing it.

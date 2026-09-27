@@ -2251,6 +2251,36 @@ bool AppInitMain(const util::Ref &context, NodeContext &node, interfaces::BlockA
         return InitError(_("Failed to load sporks cache from") + "\n" + (GetDataDir() / "sporks.dat").string());
     }
 
+    // 4.5.1 corrective (F-202): spork 3's activation state is now known --
+    // sporks.dat just loaded it above, and CSporkManager::IsSporkActive reads
+    // it directly (spork.cpp), no network round-trip needed. A node
+    // RESTARTING (crash, upgrade, routine restart) after spork 3 has already
+    // activated network-wide knows this before it starts serving, so refuse
+    // to start (this hasn't served anything yet -- zero availability cost)
+    // rather than silently starting under-provisioned into the regime
+    // validation.cpp's own runtime WarnIfMaxMempoolBelowDesignFloor only ever
+    // warns about (see its own doc comment, validation.h, for why that path
+    // stays WARN: it is the ONLY defense for a node that was already running
+    // when spork 3 first activates live). Reuses MaxMempoolBelowDesignFloor's
+    // own already-tested pure decision (F-199) with sporkManager.IsSporkActive
+    // alone as fMiningGateLive -- not llmq::RejectConflictingBlocks(), whose
+    // other half (smartnodeSync.IsBlockchainSynced()) is always false this
+    // early in startup and would make the check permanently inert. Matches
+    // the SHAPE of the existing "-maxmempool must be at least %d MB" refusal
+    // above (AppInitParameterInteraction) -- a genuine startup InitError, not
+    // a warning.
+    {
+        const int64_t nMempoolSizeMaxNow = gArgs.GetArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000;
+        if (MaxMempoolBelowDesignFloor(sporkManager.IsSporkActive(SPORK_3_INSTANTSEND_BLOCK_FILTERING),
+                                       nMempoolSizeMaxNow)) {
+            return InitError(strprintf(
+                    _("-maxmempool must be at least %d MB now that spork 3 "
+                      "(SPORK_3_INSTANTSEND_BLOCK_FILTERING) is already active on this "
+                      "network (docs/findings.md F-197/F-198/F-199/F-202)"),
+                    MIN_MAX_MEMPOOL_SIZE_DESIGN_FLOOR));
+        }
+    }
+
     // ********************************************************* Step 7b: load powcache.dat
     {
         fs::path pathDB = GetDataDir();
