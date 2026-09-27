@@ -15,8 +15,11 @@
 
 #include <chainparams.h>
 #include <consensus/validation.h>
+#include <evo/specialtx.h>
 #include <key.h>
 #include <keystore.h>
+#include <llmq/quorums_blockprocessor.h>
+#include <llmq/quorums_commitment.h>
 #include <node/context.h>
 #include <primitives/block.h>
 #include <rpc/mining.h>
@@ -82,6 +85,21 @@ static CMutableTransaction MakeSpendOfCoinbase(const CTransactionRef &coinbase, 
     return spendTx;
 }
 
+// F-196 Part B: submitblock's own "commitment" format branch is now gated by
+// the same serving-obligation check as getblocktemplate (4.4.3's own gate,
+// widened here to cover this call site too). Every PRE-EXISTING
+// commitment-mode test in this file exercises the resolution/materialisation
+// code paths those tests were actually written for, not this new gate --
+// they opt in via -servebodyrange for their own duration. Matches
+// denialofservice_tests' own save/restore precedent, but via ForceRemoveArg
+// (util/system.h) rather than ForceSetArg, since the flag starts genuinely
+// unset in this binary and must end that way too.
+struct ServeBodyRangeGuard {
+    ServeBodyRangeGuard() { gArgs.ForceSetArg("-servebodyrange", "1"); }
+
+    ~ServeBodyRangeGuard() { gArgs.ForceRemoveArg("-servebodyrange"); }
+};
+
 BOOST_FIXTURE_TEST_SUITE(submitblock_tests, TestChain100Setup)
 
 // "full" format, unnamed (the default) and named explicitly, must behave
@@ -131,6 +149,7 @@ BOOST_AUTO_TEST_CASE(unknown_format_is_rejected) {
 // would populate it, so this test resolves whatever candidate.vtx actually
 // contains rather than assuming it is only the one spend.
 BOOST_AUTO_TEST_CASE(commitment_format_round_trips_through_the_local_mempool) {
+    ServeBodyRangeGuard servebodyrangeGuard; // F-196 Part B: opt in, not testing the gate here
     CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
 
     CBlock candidate = CreateBlock({spendTx}, coinbaseKey);
@@ -156,6 +175,7 @@ BOOST_AUTO_TEST_CASE(commitment_format_round_trips_through_the_local_mempool) {
 // mempool" for the quorum-commitment transaction's hash; the block is still
 // accepted, and the chain tip actually advances to it.
 BOOST_AUTO_TEST_CASE(commitment_format_resolves_a_quorum_commitment_tx_the_mempool_never_held) {
+    ServeBodyRangeGuard servebodyrangeGuard; // F-196 Part B: opt in, not testing the gate here
     CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
     CBlock candidate = CreateBlock({spendTx}, coinbaseKey);
 
@@ -180,7 +200,132 @@ BOOST_AUTO_TEST_CASE(commitment_format_resolves_a_quorum_commitment_tx_the_mempo
     BOOST_CHECK_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), candidate.GetHash().ToString());
 }
 
+// F-195: FindMineableCommitmentTxByHash used to key its reconstruction to the
+// LIVE CHAIN TIP at call time (::ChainActive().Tip()), not to the submitted
+// block's own recorded parent (commitments.hashPrevBlock) -- so if the tip
+// moves between template creation and submission (a miner losing a race is
+// routine), the fallback reconstructs for the WRONG height and misses,
+// throwing "not found in local mempool" for what would otherwise be a valid
+// (if stale) block -- submitblock in "full" format would have accepted the
+// same block fine. Reproduces the reviewer's own probe: build a candidate at
+// tip N, let the tip advance to N+1 via a DIFFERENT block, then confirm the
+// stale-but-valid sibling at height N+1 still resolves and is accepted.
+BOOST_AUTO_TEST_CASE(commitment_format_resolves_a_stale_sibling_after_the_tip_moved) {
+    ServeBodyRangeGuard servebodyrangeGuard; // F-196 Part B: opt in, not testing the gate here
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    // Built against the CURRENT tip -- becomes a stale sibling the moment a
+    // different block advances the tip below.
+    CBlock staleCandidate = CreateBlock({spendTx}, coinbaseKey);
+
+    bool sawQuorumCommitment = false;
+    TestMemPoolEntryHelper entry;
+    for (size_t i = 1; i < staleCandidate.vtx.size(); i++) {
+        if (staleCandidate.vtx[i]->nType == TRANSACTION_QUORUM_COMMITMENT) {
+            sawQuorumCommitment = true;
+            continue; // the transaction under test: left out of the mempool on purpose
+        }
+        m_node.mempool->addUnchecked(entry.FromTx(staleCandidate.vtx[i]));
+    }
+    // If the fixture ever stops producing one, this test would silently stop
+    // testing the fallback path at all -- fail loudly instead.
+    BOOST_REQUIRE(sawQuorumCommitment);
+
+    // A DIFFERENT block, extending the SAME parent, wins the race: the real
+    // chain tip advances to height N+1 via a sibling of staleCandidate, not
+    // staleCandidate itself.
+    CBlock winner = CreateAndProcessBlock({}, coinbaseKey);
+    BOOST_REQUIRE(winner.GetHash() != staleCandidate.GetHash());
+    BOOST_REQUIRE(staleCandidate.hashPrevBlock == winner.hashPrevBlock);
+    BOOST_REQUIRE_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), winner.GetHash().ToString());
+
+    CCommitmentBlock commitments = CommitmentsFromBlock(staleCandidate);
+    const std::string hex = HexEncode(commitments);
+
+    // Resolution must succeed for the STALE sibling, keyed to its OWN
+    // recorded parent, regardless of what the live tip has since become.
+    // Deliberately not asserting result.isNull() or that the tip becomes
+    // staleCandidate: staleCandidate and winner have EQUAL work, so which
+    // one keeps the active tip is a first-seen tie-break unrelated to
+    // F-195 -- winner (already connected) keeps it, and staleCandidate is
+    // correctly accepted as a valid side branch ("inconclusive" is BIP22's
+    // own honest answer for a block never run through full ConnectBlock,
+    // not a rejection). What must NOT happen is the old bug: an uncaught
+    // "not found in local mempool" JSONRPCError, or an explicit "invalid"
+    // rejection. A real, indexed, non-failed block entry proves the block
+    // was genuinely decoded, resolved and passed CheckBlock -- none of which
+    // could happen if resolution had thrown.
+    UniValue result = CallSubmitBlock(m_node, hex, UniValue("commitment"));
+    if (result.isStr()) {
+        BOOST_CHECK(result.get_str() != "invalid");
+    }
+    LOCK(cs_main);
+    const CBlockIndex *pindex = LookupBlockIndex(staleCandidate.GetHash());
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_CHECK(!(pindex->nStatus & BLOCK_FAILED_MASK));
+}
+
+// F-195 (second candidate): the currently-known-best commitment for a quorum
+// session can change -- a better one arrives via AddMineableCommitment --
+// between template creation and submission, so GetMineableCommitmentTx's
+// CURRENT answer no longer matches what was actually mined into the
+// template. The deterministic "null commitment" form the template
+// originally used (this fixture never has a real DKG session, so it is
+// always the null form) is still reconstructible via the new
+// GetNullCommitmentTx and must be tried as a second candidate before giving
+// up.
+BOOST_AUTO_TEST_CASE(commitment_format_resolves_after_a_better_commitment_supersedes_the_null_one) {
+    ServeBodyRangeGuard servebodyrangeGuard;
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock candidate = CreateBlock({spendTx}, coinbaseKey);
+
+    CTransactionRef nullCommitmentTx;
+    for (const auto &tx : candidate.vtx) {
+        if (tx->nType == TRANSACTION_QUORUM_COMMITMENT) {
+            nullCommitmentTx = tx;
+            break;
+        }
+    }
+    BOOST_REQUIRE(nullCommitmentTx != nullptr);
+
+    llmq::CFinalCommitmentTxPayload originalPayload;
+    BOOST_REQUIRE(GetTxPayload(*nullCommitmentTx, originalPayload));
+    // The fixture never runs a real DKG session, so this is always the null
+    // form -- if that ever stops holding, this test would silently stop
+    // testing the fallback it claims to.
+    BOOST_REQUIRE(originalPayload.commitment.IsNull());
+
+    TestMemPoolEntryHelper entry;
+    for (size_t i = 1; i < candidate.vtx.size(); i++) {
+        if (candidate.vtx[i]->GetHash() == nullCommitmentTx->GetHash()) {
+            continue; // resolved via the fallback under test, not the mempool
+        }
+        m_node.mempool->addUnchecked(entry.FromTx(candidate.vtx[i]));
+    }
+
+    // Simulate a real, better commitment arriving for the SAME session
+    // (same llmqType/quorumHash) after candidate's template was built.
+    // AddMineableCommitment (quorums_blockprocessor.cpp) is the real
+    // mechanism a verified P2P QFCOMMITMENT message uses to register one;
+    // called directly here since this fixture never runs a live DKG.
+    llmq::CFinalCommitment better(Params().GetConsensus().llmqs.at(originalPayload.commitment.llmqType),
+                             originalPayload.commitment.quorumHash);
+    better.signers = {true};
+    better.validMembers = {true};
+    llmq::quorumBlockProcessor->AddMineableCommitment(better);
+
+    CCommitmentBlock commitments = CommitmentsFromBlock(candidate);
+    const std::string hex = HexEncode(commitments);
+
+    // GetMineableCommitmentTx now answers with `better`, not the null form
+    // candidate.vtx actually contains -- resolution must fall back to
+    // reconstructing the null form directly rather than giving up.
+    UniValue result = CallSubmitBlock(m_node, hex, UniValue("commitment"));
+    BOOST_CHECK(result.isNull());
+    BOOST_CHECK_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), candidate.GetHash().ToString());
+}
+
 BOOST_AUTO_TEST_CASE(commitment_format_throws_a_clean_error_on_a_missing_body) {
+    ServeBodyRangeGuard servebodyrangeGuard; // F-196 Part B: opt in, not testing the gate here
     CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
     // Deliberately never added to the mempool.
     CBlock candidate = CreateBlock({spendTx}, coinbaseKey);
@@ -193,6 +338,53 @@ BOOST_AUTO_TEST_CASE(commitment_format_throws_a_clean_error_on_a_missing_body) {
                                     std::string::npos;
                          });
     BOOST_CHECK(::ChainActive().Tip()->GetBlockHash().ToString() != candidate.GetHash().ToString());
+}
+
+// F-196 Part B: EnforceCommitmentModeServingObligation (4.4.3's own gate) was
+// only ever called from getblocktemplate -- submitblock's own "commitment"
+// format branch (4.4.2) incurs the exact same serving obligation (a
+// commitment-mode block's assembly-time-only transactions are held by no
+// other node until served) but was reachable without it: a client can build
+// its own CCommitmentBlock from an ordinary full-mode template, or poll one
+// node and submit to a different one, entirely bypassing a commitment-mode
+// getblocktemplate call on the submitting node. Every committed transaction
+// here IS staged into the mempool (unlike the missing-body test above) so
+// that, absent this gate, the submission would fully resolve and succeed --
+// isolating this test to the gate itself, not a resolution failure.
+BOOST_AUTO_TEST_CASE(commitment_format_refuses_without_servebodyrange) {
+    BOOST_REQUIRE(!gArgs.IsArgSet("-servebodyrange"));
+
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock candidate = CreateBlock({spendTx}, coinbaseKey);
+
+    TestMemPoolEntryHelper entry;
+    for (size_t i = 1; i < candidate.vtx.size(); i++) {
+        m_node.mempool->addUnchecked(entry.FromTx(candidate.vtx[i]));
+    }
+
+    CCommitmentBlock commitments = CommitmentsFromBlock(candidate);
+    const std::string hex = HexEncode(commitments);
+
+    BOOST_CHECK_EXCEPTION(CallSubmitBlock(m_node, hex, UniValue("commitment")), UniValue,
+                         [](const UniValue &e) {
+                             const std::string msg = find_value(e, "message").get_str();
+                             return msg.find("submitblock") != std::string::npos &&
+                                    msg.find("-servebodyrange") != std::string::npos &&
+                                    msg.find("must not run on a live/exposed network") != std::string::npos;
+                         });
+    // Never even reached ProcessNewBlock -- the gate refused before any
+    // resolution/materialisation work, so the block was never accepted.
+    BOOST_CHECK(::ChainActive().Tip()->GetBlockHash().ToString() != candidate.GetHash().ToString());
+
+    // Same candidate, opted in: the gate is the ONLY thing that changed --
+    // resolution/materialisation/acceptance still all work, confirming the
+    // failure above was specifically the gate, not e.g. a body this test
+    // forgot to stage.
+    {
+        ServeBodyRangeGuard servebodyrangeGuard;
+        UniValue result = CallSubmitBlock(m_node, hex, UniValue("commitment"));
+        BOOST_CHECK(result.isNull());
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

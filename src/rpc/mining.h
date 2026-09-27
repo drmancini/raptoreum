@@ -92,13 +92,37 @@ UniValue BuildGBTTransactionEntry(const CTransaction &tx, const std::map <uint25
  *  dispatch-adjacent glue). */
 CBlock MaterialiseSubmittedCommitmentBlock(const CCommitmentBlock &commitments, const CTxMemPool &mempool);
 
-/** F-193: reconstruct each quorum-commitment transaction that CreateNewBlock could
- *  legally mine into the NEXT block (one per enabled LLMQ param set, at the current
- *  tip height + 1 -- exactly miner.cpp's own loop), and return the one whose hash
- *  matches txid. Returns nullptr if none matches, if DIP0003 isn't enabled, or if
- *  there is no chain tip. Requires cs_main (GetMineableCommitmentTx's own
- *  precondition); the caller is responsible for holding it. */
-CTransactionRef FindMineableCommitmentTxByHash(const uint256 &txid);
+/** F-193 (fixed further by F-195): reconstruct each quorum-commitment
+ *  transaction that CreateNewBlock could legally mine into the block that
+ *  follows hashPrevBlock (one per enabled LLMQ param set, at that parent's
+ *  height + 1 -- exactly miner.cpp's own loop), and return the one whose hash
+ *  matches txid.
+ *
+ *  F-195 (fixed): this used to key nHeight/pindexPrev to the LIVE CHAIN TIP
+ *  at call time (::ChainActive().Tip()) rather than to the submitted block's
+ *  OWN recorded parent. That is wrong: if the tip has moved between template
+ *  creation and submission (a miner losing a race is routine, or a
+ *  new/better quorum commitment arriving via AddMineableCommitment mid-
+ *  mining), the old code reconstructed the WRONG height/commitment, missed,
+ *  and threw "not found in local mempool" for what would otherwise be a
+ *  valid (if stale) block. Callers now pass the block's own hashPrevBlock
+ *  (every CCommitmentBlock carries this as part of its CBlockHeader base),
+ *  resolved via LookupBlockIndex, instead.
+ *
+ *  For the changed-commitment case -- a different/better commitment arrived
+ *  for the same session after the template was built, so the currently-known
+ *  commitment no longer matches what was actually mined -- this also tries
+ *  the deterministic "no commitment known yet" (null) form as a second
+ *  candidate per quorum param set, via CQuorumBlockProcessor's own new
+ *  GetNullCommitmentTx (mirrors GetMineableCommitment's own "null commitment
+ *  required" branch, quorums_blockprocessor.cpp) before giving up on that
+ *  param set.
+ *
+ *  Returns nullptr if no candidate matches, if DIP0003 isn't enabled, or if
+ *  hashPrevBlock does not resolve to a known block index. Requires cs_main
+ *  (GetMineableCommitmentTx/GetNullCommitmentTx's own precondition); the
+ *  caller is responsible for holding it. */
+CTransactionRef FindMineableCommitmentTxByHash(const uint256 &txid, const uint256 &hashPrevBlock);
 
 // 4.4.3 (F-194): enforces the miner's own active serving obligation
 // (docs/transaction-decoupling.md's own §9.1a/§14.10) the moment
@@ -131,6 +155,18 @@ CTransactionRef FindMineableCommitmentTxByHash(const uint256 &txid);
 // format parameter, not auto-detection). `-servebodyrange` is opt-in by
 // design ("must not run on a live/exposed network unopted-in"); refusing
 // keeps it that way.
-void EnforceCommitmentModeServingObligation(bool fCommitmentMode);
+//
+// F-196 Part B (fixed): the serving obligation is incurred by SUBMITTING a
+// commitment-mode block, not by requesting a commitment-mode template --
+// `submitblock format="commitment"` is reachable without ever calling a
+// commitment-mode `getblocktemplate` first (a client can build its own
+// CCommitmentBlock from an ordinary full-mode template, or poll one node and
+// submit to a different one -- normal pool topology). This gate is now
+// called from both `getblocktemplate` and `submitblock`'s "commitment"
+// format branch, before any commitment-mode work happens. `rpcName` names
+// the calling RPC ("getblocktemplate"/"submitblock") purely for the thrown
+// message's own wording; the gate's logic is otherwise identical for both
+// call sites.
+void EnforceCommitmentModeServingObligation(bool fCommitmentMode, const std::string &rpcName);
 
 #endif

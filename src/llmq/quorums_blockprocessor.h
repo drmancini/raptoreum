@@ -74,6 +74,20 @@ namespace llmq {
 
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+        // F-195: the deterministic "no commitment known yet" transaction for this
+        // quorum session, constructed directly rather than looked up -- mirrors
+        // GetMineableCommitment's own "null commitment required" branch, but always
+        // takes it, bypassing the currently-known-best-commitment lookup. Used as a
+        // fallback candidate by rpc/mining.cpp's FindMineableCommitmentTxByHash when
+        // the CURRENTLY known commitment for a session has changed (a better one
+        // arrived via AddMineableCommitment) since an earlier template was built from
+        // this same, still-deterministic null form. Returns false under the same
+        // conditions as GetMineableCommitmentTx (no commitment required at this
+        // height, or the quorum hash for this session isn't known yet).
+        bool GetNullCommitmentTx(const Consensus::LLMQParams &llmqParams, int nHeight, CTransactionRef &ret) const
+
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
         bool HasMinedCommitment(Consensus::LLMQType llmqType, const uint256 &quorumHash) const;
 
         CFinalCommitmentPtr

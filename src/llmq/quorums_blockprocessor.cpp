@@ -615,4 +615,40 @@ namespace llmq {
         return true;
     }
 
+// F-195: same shape as GetMineableCommitmentTx above, except it always takes the
+// "null commitment required" branch (GetMineableCommitment's own comment: "Will
+// return true and a null commitment if no mineable commitment is known and none
+// was mined yet") instead of consulting mineableCommitmentsByQuorum for whatever
+// is CURRENTLY known best. That lookup is exactly what makes GetMineableCommitmentTx
+// unsuitable as the only fallback candidate: its answer can change over time as
+// better commitments arrive, while a stale submission was built from whatever the
+// null form was AT THE TIME -- still fully deterministic from (llmqParams, height),
+// just not from the currently-known-best state.
+    bool CQuorumBlockProcessor::GetNullCommitmentTx(const Consensus::LLMQParams &llmqParams, int nHeight,
+                                                     CTransactionRef &ret) const {
+        AssertLockHeld(cs_main);
+
+        if (!IsCommitmentRequired(llmqParams, nHeight)) {
+            return false;
+        }
+
+        uint256 quorumHash = GetQuorumBlockHash(llmqParams, nHeight);
+        if (quorumHash.IsNull()) {
+            return false;
+        }
+
+        CFinalCommitmentTxPayload qc;
+        qc.commitment = CFinalCommitment(llmqParams, quorumHash);
+        qc.nHeight = nHeight;
+
+        CMutableTransaction tx;
+        tx.nVersion = 3;
+        tx.nType = TRANSACTION_QUORUM_COMMITMENT;
+        SetTxPayload(tx, qc);
+
+        ret = MakeTransactionRef(tx);
+
+        return true;
+    }
+
 } // namespace llmq
