@@ -58,6 +58,7 @@ BITCOIN_TESTS =\
   test/chainlocks_tests.cpp \
   test/commitmentblock_tests.cpp \
   test/commitmentmode_activation_tests.cpp \
+  test/commitmentmode_registration_tests.cpp \
   test/bls_tests.cpp \
   test/bswap_tests.cpp \
   test/checkdatasig_tests.cpp \
