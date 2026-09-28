@@ -154,7 +154,24 @@ public:
             // exact "fits because the TYPE happens to be big enough" hazard
             // this widening is supposed to close (F-197 item 4), just moved to
             // a threshold nobody chose on purpose.
-            if (obj.BlockTxCount() > COMMITMENT_BUDGET_MAX_INPUTS) {
+            //
+            // F-202 (4.5.2 fix, review): +1, not bare COMMITMENT_BUDGET_MAX_
+            // INPUTS -- that constant bounds aggregate NON-coinbase input
+            // count (consensus/tx_verify.h's own GetBlockInputCount, D-19's
+            // doc comment: "the coinbase's own dummy input is excluded"),
+            // not total transaction count, but BlockTxCount() counts every
+            // transaction, coinbase included. The real maximum is
+            // COMMITMENT_BUDGET_MAX_INPUTS one-input, non-coinbase
+            // transactions (the input-minimizing, tx-count-maximizing shape)
+            // plus exactly one coinbase = COMMITMENT_BUDGET_MAX_INPUTS + 1
+            // total transactions. The bare (no +1) bound rejected exactly
+            // that maximal block, one short of the true limit, disagreeing
+            // by one with PartiallyDownloadedBlock::InitData's own
+            // candidateindex bound just below (blockencodings.cpp), which
+            // already correctly permits a 0-based index up to
+            // COMMITMENT_BUDGET_MAX_INPUTS -- the (COMMITMENT_BUDGET_MAX_
+            // INPUTS + 1)-th transaction.
+            if (obj.BlockTxCount() > COMMITMENT_BUDGET_MAX_INPUTS + 1) {
                 throw std::ios_base::failure("indexes overflowed the commitment input budget");
             }
             obj.FillShortTxIDSelector();

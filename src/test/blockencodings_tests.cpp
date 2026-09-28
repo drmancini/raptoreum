@@ -436,15 +436,31 @@ BOOST_AUTO_TEST_CASE(BlockTransactionsRequestWideIndexRoundTripTest) {
 // F-200 (4.5.2 Part A): CBlockHeaderAndShortTxIDs::BlockTxCount()'s
 // deserialize-time overflow guard (blockencodings.h) must bind to the
 // design's own consensus cap, COMMITMENT_BUDGET_MAX_INPUTS (700,000, D-19)
-// -- not to the widened type's own incidental max (~4.29 billion for
-// uint32_t). The four cases below pin that binding precisely: a count that
-// fits the OLD uint16_t ceiling still passes; a count between the old
-// ceiling and the cap (this branch's own 8 MB/250,000-identifier need --
-// impossible before this fix) now also passes; the cap itself passes
-// exactly; one past the cap still throws. If the guard were ever reverted
-// to bind against uint32_t's own max instead of COMMITMENT_BUDGET_MAX_INPUTS,
-// the last case would silently stop throwing -- that is the mutation this
-// test is built to catch.
+// -- not to the widened type's own incidental max (bounded in practice to
+// ReadCompactSize's own MAX_SIZE, ~33.5 million, serialize.h -- not
+// uint32_t's full ~4.29 billion range, since PrefilledTransaction::index is
+// wire-encoded via COMPACTSIZE and ReadCompactSize rejects anything over
+// MAX_SIZE before it ever reaches the field). The cases below pin that
+// binding precisely: a count that fits the OLD uint16_t ceiling still
+// passes; a count between the old ceiling and the cap (this branch's own
+// 8 MB/250,000-identifier need -- impossible before this fix) now also
+// passes; the cap itself passes exactly.
+//
+// F-202 (4.5.2 fix, review): the guard bound itself was off by one.
+// COMMITMENT_BUDGET_MAX_INPUTS bounds aggregate NON-coinbase input count
+// (consensus/consensus.h's own MaxBlockInputs doc comment: "the coinbase's
+// own dummy input is excluded"), not total transaction count -- but
+// BlockTxCount() counts every transaction, coinbase included. A maximal
+// valid block is COMMITMENT_BUDGET_MAX_INPUTS single-input, non-coinbase
+// transactions plus exactly one coinbase = COMMITMENT_BUDGET_MAX_INPUTS + 1
+// total transactions, and the guard previously rejected exactly that block
+// (BlockTxCount() > COMMITMENT_BUDGET_MAX_INPUTS, one short of the true
+// maximum), disagreeing by one with PartiallyDownloadedBlock::InitData's own
+// candidateindex bound (blockencodings.cpp), which already correctly
+// permits a 0-based index up to COMMITMENT_BUDGET_MAX_INPUTS (the
+// (COMMITMENT_BUDGET_MAX_INPUTS + 1)-th transaction). If the guard is ever
+// reverted to the old, one-short bound, `...PlusOneWorks` below starts
+// throwing -- that is the mutation this pair is built to catch.
 static CBlockHeaderAndShortTxIDs RoundTripWithShortTxIdCount(size_t count) {
         TestHeaderAndShortIDs shortIDs(BuildBlockTestCase());
         shortIDs.shorttxids.assign(count, 0);
@@ -472,8 +488,45 @@ BOOST_AUTO_TEST_CASE(BlockTxCountAtCommitmentBudgetMaxInputsWorks) {
         BOOST_CHECK_NO_THROW(RoundTripWithShortTxIdCount(COMMITMENT_BUDGET_MAX_INPUTS));
 }
 
-BOOST_AUTO_TEST_CASE(BlockTxCountOverCommitmentBudgetMaxInputsThrows) {
-        BOOST_CHECK_THROW(RoundTripWithShortTxIdCount(COMMITMENT_BUDGET_MAX_INPUTS + 1), std::ios_base::failure);
+BOOST_AUTO_TEST_CASE(BlockTxCountAtCommitmentBudgetMaxInputsPlusOneWorks) {
+        // F-202: the real maximum (700,000 non-coinbase + 1 coinbase) must
+        // be ACCEPTED, not rejected -- this is the exact case the pre-fix
+        // off-by-one guard dropped.
+        BOOST_CHECK_NO_THROW(RoundTripWithShortTxIdCount(COMMITMENT_BUDGET_MAX_INPUTS + 1));
+}
+
+BOOST_AUTO_TEST_CASE(BlockTxCountOverCommitmentBudgetMaxInputsPlusOneThrows) {
+        BOOST_CHECK_THROW(RoundTripWithShortTxIdCount(COMMITMENT_BUDGET_MAX_INPUTS + 2), std::ios_base::failure);
+}
+
+BOOST_AUTO_TEST_CASE(MaximalCommitmentBudgetBlockWithCoinbaseInitializesOk) {
+        // F-202: the reviewer's own exact scenario, end to end -- not just
+        // the header-level guard, but PartiallyDownloadedBlock::InitData too
+        // -- a maximal 700,000-non-coinbase-input commitment-budget block,
+        // 700,001 total transactions counting one coinbase. Pre-fix, this
+        // never reached InitData at all: BlockTxCount() > COMMITMENT_BUDGET_
+        // MAX_INPUTS threw at deserialization first.
+        CTxMemPool pool;
+        CBlock block(BuildBlockTestCase());
+        TestHeaderAndShortIDs shortIDs(block);
+        shortIDs.prefilledtxn.assign(1, PrefilledTransaction{0, block.vtx[0]});
+        shortIDs.shorttxids.resize(COMMITMENT_BUDGET_MAX_INPUTS);
+        for (size_t i = 0; i < shortIDs.shorttxids.size(); i++) {
+            // Unique, not zero: InitData treats a colliding shorttxid as a
+            // real short-ID collision (READ_STATUS_FAILED), which would
+            // mask the guard-boundary behaviour this test exists to prove.
+            shortIDs.shorttxids[i] = i + 1;
+        }
+
+        CDataStream stream(SER_NETWORK, PROTOCOL_VERSION);
+        stream << shortIDs;
+        CBlockHeaderAndShortTxIDs result;
+        BOOST_REQUIRE_NO_THROW(stream >> result);
+        BOOST_REQUIRE_EQUAL(result.BlockTxCount(), COMMITMENT_BUDGET_MAX_INPUTS + 1);
+
+        PartiallyDownloadedBlock partialBlock(&pool);
+        BOOST_CHECK_EQUAL(partialBlock.InitData(result, extra_txn), READ_STATUS_OK);
+        BOOST_CHECK(partialBlock.IsTxAvailable(0));
 }
 
 // F-201 (4.5.2 Part B): SendBlockTransactions (net_processing.cpp) builds a
