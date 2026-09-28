@@ -129,6 +129,35 @@ std::pair<std::string, std::vector<unsigned char>> FirstSentMessage(CNode &node)
     return {hdr.GetCommand(), payload};
 }
 
+// 1.4 (K-7, F-217): getblocktxn_over_derived_ceiling_declines_without_full_block_fallback
+// below needs a REAL block whose non-coinbase transactions sum past the new,
+// much larger derived ceiling (net.h's raised MAX_PROTOCOL_MESSAGE_LENGTH) --
+// which is itself past MAX_DIP0001_BLOCK_SIZE (8,000,000, consensus.h), the
+// pre-existing legacy cap that applies whenever the commitment-mode budget
+// is off. Reaching it therefore needs a genuinely active EUpdate::COMMITMENT_MODE
+// bit at this block's own height, not just a bare g_commitmentBudgetActive
+// assignment: CommitmentModeAtHeight (validation.h, F-210) pins the flag
+// per-pindex from the real UpdateManager for the whole of ConnectBlock/
+// AcceptBlock, overriding any ambient value the moment ProcessNewBlock is
+// called. Registering a real Update with the HeightActivated fast path is
+// this codebase's own established way to get this in a test -- exactly
+// acceptancebit_tests.cpp's SetCommitmentModeActiveForTest/CommitmentBudgetGuard
+// pair, duplicated here per this file's own existing convention of not
+// sharing test-only helpers across files (DERIVED_BLOCKTXN_CEILING above is
+// the same pattern for a different constant).
+static const int64_t COMMITMENT_MODE_TEST_NEVER_HEIGHT = 2000000000;
+
+static void SetCommitmentModeActiveForTest(bool active) {
+        g_commitmentBudgetActive = active;
+        Updates().Add(Update(EUpdate::COMMITMENT_MODE, "Commitment Mode (test)", 3, 1, 0, 1, 1, 0, false,
+                              VoteThreshold(0, 0, 1), VoteThreshold(0, 0, 1), false,
+                              active ? 0 : COMMITMENT_MODE_TEST_NEVER_HEIGHT));
+}
+
+struct CommitmentBudgetGuard {
+        ~CommitmentBudgetGuard() { SetCommitmentModeActiveForTest(false); }
+};
+
 struct ConnectedPeer {
     CNode node;
     PeerLogicValidation &peerLogic;
@@ -246,7 +275,21 @@ BOOST_AUTO_TEST_CASE(getblocktxn_over_derived_ceiling_declines_without_full_bloc
         // decline silently (log only), same shape as this same handler's
         // existing "getblocktxn for a block we don't have" branch -- no
         // BLOCKTXN, no full-block GETDATA, nothing queued or sent at all.
-        const CBlock block = BuildBlockOverBlockTxnCeiling(*this, /*numTx=*/40);
+        //
+        // F-217 raised the real ceiling from ~3 MiB to ~32 MiB (net.h), so
+        // genuinely exceeding it now needs a block bigger than
+        // MAX_DIP0001_BLOCK_SIZE's own pre-existing 8,000,000-byte legacy
+        // cap -- which needs EUpdate::COMMITMENT_MODE genuinely active at
+        // this block's height (see SetCommitmentModeActiveForTest's own
+        // comment above). numTx=400 at this helper's ~89.3 KB/tx shape is
+        // ~35.7 MB of non-coinbase transactions, comfortably past the new
+        // ~33.5 MB derived ceiling with margin, and comfortably under
+        // COMMITMENT_BUDGET_BODY_BYTES (110,000,000, consensus.h) and
+        // COMMITMENT_BUDGET_MAX_INPUTS (700,000) so the block itself is
+        // otherwise a perfectly ordinary, valid one under the active budget.
+        CommitmentBudgetGuard guard;
+        SetCommitmentModeActiveForTest(true);
+        const CBlock block = BuildBlockOverBlockTxnCeiling(*this, /*numTx=*/400);
         BOOST_REQUIRE_EQUAL(::ChainActive().Tip()->GetBlockHash(), block.GetHash());
 
         BlockTransactionsRequest req;
