@@ -26,8 +26,34 @@
 // thrown BOOST_REQUIRE between setting g_commitmentBudgetActive = true and
 // resetting it would leave the global on for every later test in the process.
 struct CommitmentBudgetGuard {
-    ~CommitmentBudgetGuard() { g_commitmentBudgetActive = false; }
+    ~CommitmentBudgetGuard();
 };
+
+// 4.6.1 (F-207): a bare `g_commitmentBudgetActive = true` no longer has any
+// effect on ConnectBlock/AcceptBlock specifically -- CommitmentModeAtHeight
+// (validation.h) pins the flag itself, per pindex, from the real
+// EUpdate::COMMITMENT_MODE bit for the whole of those two calls. The tests
+// below that call ConnectBlock/AcceptBlock directly (rather than
+// CheckCommitmentBlock/CheckBlock alone) instead register that bit against
+// the real UpdateManager those two functions query -- Updates(), the
+// currently-selected regtest CChainParams' own instance, the identical
+// object acceptancebit_tests.cpp's ROUND_VOTING crash-test already
+// exercises this way. HeightActivated (update.h's own fast path, precedented
+// by DEPLOYMENT_V17/ROUND_VOTING's mainnet entries in chainparams.cpp) makes
+// this a plain height comparison, so it works even against the
+// stack-local, not fully chain-linked `indexDummy` these tests build: any
+// pindex height >= 0 reads Active when `active`, and no test chain here
+// ever reaches COMMITMENT_MODE_TEST_NEVER_HEIGHT when not.
+static const int64_t COMMITMENT_MODE_TEST_NEVER_HEIGHT = 2000000000;
+
+static void SetCommitmentModeActiveForTest(bool active) {
+    g_commitmentBudgetActive = active;
+    Updates().Add(Update(EUpdate::COMMITMENT_MODE, "Commitment Mode (test)", 3, 1, 0, 1, 1, 0, false,
+                         VoteThreshold(0, 0, 1), VoteThreshold(0, 0, 1), false,
+                         active ? 0 : COMMITMENT_MODE_TEST_NEVER_HEIGHT));
+}
+
+CommitmentBudgetGuard::~CommitmentBudgetGuard() { SetCommitmentModeActiveForTest(false); }
 
 BOOST_FIXTURE_TEST_SUITE(commitmentblock_tests, BasicTestingSetup)
 
@@ -726,7 +752,7 @@ BOOST_AUTO_TEST_CASE(connectblock_enforces_nonfinal_coinbase_when_relocation_is_
     auto dbTx = evoDb->BeginTransaction();   // rolled back when dbTx goes out of scope
 
     CommitmentBudgetGuard guard;
-    g_commitmentBudgetActive = true;
+    SetCommitmentModeActiveForTest(true);
     CValidationState state;
     bool ok = ::ChainstateActive().ConnectBlock(block, state, &indexDummy, viewNew, Params(), passetsCache.get(),
                                                 /*fJustCheck=*/true);
@@ -769,7 +795,7 @@ BOOST_AUTO_TEST_CASE(connectblock_enforces_type_check_on_a_non_coinbase_tx) {
     auto dbTx = evoDb->BeginTransaction();
 
     CommitmentBudgetGuard guard;
-    g_commitmentBudgetActive = true;
+    SetCommitmentModeActiveForTest(true);
     CValidationState state;
     bool ok = ::ChainstateActive().ConnectBlock(block, state, &indexDummy, viewNew, Params(), passetsCache.get(),
                                                 /*fJustCheck=*/true);
@@ -867,7 +893,7 @@ BOOST_AUTO_TEST_CASE(acceptblock_calls_checkcommitmentblock) {
     // the block was rejected for some unrelated reason.
     LOCK(cs_main);
     CommitmentBudgetGuard guard;
-    g_commitmentBudgetActive = true;
+    SetCommitmentModeActiveForTest(true);
     CValidationState state;
     bool ok = ::ChainstateActive().AcceptBlock(shared_pblock, state, Params(), &pindex, /*fRequested=*/true,
                                                nullptr, nullptr);

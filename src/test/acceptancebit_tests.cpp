@@ -334,13 +334,33 @@ BOOST_AUTO_TEST_CASE(equal_work_tiebreak_survives_bodies_arriving_second) {
 // parent back to header-only via the real DisconnectTip (which correctly
 // reverses its coin/evoDB effects, unlike hand-editing nStatus over live
 // state), leaving only its own nTx/nChainTx bookkeeping to reset directly.
+// 4.6.1 (F-207): both tests below drive AcceptBlock/ConnectBlock indirectly
+// via ProcessNewBlock, and CommitmentModeAtHeight (validation.h) now pins
+// g_commitmentBudgetActive itself, per pindex, from the real
+// EUpdate::COMMITMENT_MODE bit for the duration of each -- a bare
+// assignment here no longer reaches them. Registering the bit against
+// Updates() instead (the same real UpdateManager instance this file's own
+// ROUND_VOTING crash-test above already drives directly) with the
+// HeightActivated fast path (update.h, precedented by DEPLOYMENT_V17/
+// ROUND_VOTING's mainnet entries in chainparams.cpp) makes this a plain
+// height comparison against the real, chain-linked pindexes ProcessNewBlock
+// creates here.
+static const int64_t COMMITMENT_MODE_TEST_NEVER_HEIGHT = 2000000000;
+
+static void SetCommitmentModeActiveForTest(bool active) {
+    g_commitmentBudgetActive = active;
+    Updates().Add(Update(EUpdate::COMMITMENT_MODE, "Commitment Mode (test)", 3, 1, 0, 1, 1, 0, false,
+                         VoteThreshold(0, 0, 1), VoteThreshold(0, 0, 1), false,
+                         active ? 0 : COMMITMENT_MODE_TEST_NEVER_HEIGHT));
+}
+
 struct CommitmentBudgetGuard {
-    ~CommitmentBudgetGuard() { g_commitmentBudgetActive = false; }
+    ~CommitmentBudgetGuard() { SetCommitmentModeActiveForTest(false); }
 };
 
 BOOST_AUTO_TEST_CASE(out_of_order_arrival_parks_a_child_until_its_parent_downloads) {
     CommitmentBudgetGuard guard;
-    g_commitmentBudgetActive = true;
+    SetCommitmentModeActiveForTest(true);
 
     ChainstateManager &chainman = EnsureChainman(m_node);
     CChainState &chainstate = ::ChainstateActive();
@@ -473,7 +493,7 @@ BOOST_AUTO_TEST_CASE(out_of_order_arrival_parks_a_child_until_its_parent_downloa
 // its own to account for.
 BOOST_AUTO_TEST_CASE(commitment_only_ancestor_parks_a_fully_bodied_descendant) {
     CommitmentBudgetGuard guard;
-    g_commitmentBudgetActive = true;
+    SetCommitmentModeActiveForTest(true);
 
     ChainstateManager &chainman = EnsureChainman(m_node);
     CChainState &chainstate = ::ChainstateActive();
