@@ -17,6 +17,24 @@ enum class EUpdate {
     DEPLOYMENT_V17 = 0,
     ROUND_VOTING = 1,
     QUORUMS_200_8 = 2,
+    // 4.6.1 (F-207): the transaction/block-decoupling commitment-mode bit.
+    // Mirrors ROUND_VOTING's own precedent (chainparams.cpp:212-213) of one
+    // bit gating several independently-named behaviours -- here, the
+    // commitment-block format, the D-19 body-byte/input-count caps
+    // (consensus/consensus.h), and CheckCommitmentBlock/
+    // ContextualCheckCommitmentBlock validation (validation.cpp), all
+    // previously gated by the test-only g_commitmentBudgetActive flag.
+    // Deliberately NOT registered via updateManager.Add() on ANY network
+    // yet (mirrors QUORUMS_200_8's own testnet-only precedent of a bit that
+    // exists without being registered everywhere): the real activation
+    // criterion is 4.2's own row, confirmed genuinely unbuilt by F-205, so
+    // no real startHeight/threshold exists to commit to here. Until some
+    // future step registers it for real, IsActive() is Unknown/false on
+    // every network, identical to g_commitmentBudgetActive's own permanent
+    // production default -- this wiring changes HOW the gate works
+    // (real per-height UpdateManager state instead of a manually-toggled
+    // global), not WHETHER it is on today.
+    COMMITMENT_MODE = 3,
 
     MAX_VERSION_BITS_DEPLOYMENTS
 };

@@ -74,8 +74,9 @@ inline unsigned int MaxBlockInputs(bool fCommitmentBudgetActive = false) {
  * than today"; the honest, directly-measured worst case at K-3's real per-tx
  * ceiling is ~320 us/sigop (F-97), ~80 s, ~67% of the 120 s interval -- see
  * transaction-decoupling.md SS1A and findings.md D-18. Only meaningful when
- * g_commitmentBudgetActive (validation.h) is set; test-only until 4.6 has a
- * real activation bit.
+ * g_commitmentBudgetActive (validation.h) is set -- wired to the real
+ * EUpdate::COMMITMENT_MODE deployment bit as of 4.6.1 (F-207); see that
+ * flag's own comment for how it is now height-gated.
  */
 static const unsigned int COMMITMENT_BUDGET_SIGOPS = 250000;
 
