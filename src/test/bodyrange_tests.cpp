@@ -730,19 +730,29 @@ BOOST_AUTO_TEST_CASE(chunk_hashes_accepts_an_empty_chunk) {
 
 // 2.2.4: the aggregate-cap-and-eligibility decision, pure and testable
 // without CNodeState/CAnnouncerRing/g_body_retry_state scaffolding.
+//
+// 4.5.3 (F-202): ShouldRequestBodyRange gained nPeerInFlight/nMaxPeerInFlight
+// -- the per-peer analogue of MAX_BLOCKS_IN_TRANSIT_PER_PEER, composing with
+// the pre-existing aggregate nInFlight/nMaxInFlight pair rather than
+// replacing it. All pre-existing cases below pass a peer count comfortably
+// under its own cap (0 of 4) so they keep testing exactly what they always
+// tested; the per-peer boundary gets its own dedicated cases further down.
 BOOST_AUTO_TEST_CASE(should_request_allows_an_eligible_ready_uncapped_candidate) {
     BOOST_CHECK(ShouldRequestBodyRange(/*fWasAnnounced=*/true, /*nNow=*/1000, /*nNextAttempt=*/500,
-                                         /*nInFlight=*/2, /*nMaxInFlight=*/10));
+                                         /*nInFlight=*/2, /*nMaxInFlight=*/10,
+                                         /*nPeerInFlight=*/0, /*nMaxPeerInFlight=*/4));
 }
 
 BOOST_AUTO_TEST_CASE(should_request_refuses_a_peer_that_never_announced) {
     BOOST_CHECK(!ShouldRequestBodyRange(/*fWasAnnounced=*/false, /*nNow=*/1000, /*nNextAttempt=*/500,
-                                          /*nInFlight=*/2, /*nMaxInFlight=*/10));
+                                          /*nInFlight=*/2, /*nMaxInFlight=*/10,
+                                          /*nPeerInFlight=*/0, /*nMaxPeerInFlight=*/4));
 }
 
 BOOST_AUTO_TEST_CASE(should_request_refuses_before_the_backoff_deadline) {
     BOOST_CHECK(!ShouldRequestBodyRange(/*fWasAnnounced=*/true, /*nNow=*/499, /*nNextAttempt=*/500,
-                                          /*nInFlight=*/2, /*nMaxInFlight=*/10));
+                                          /*nInFlight=*/2, /*nMaxInFlight=*/10,
+                                          /*nPeerInFlight=*/0, /*nMaxPeerInFlight=*/4));
 }
 
 BOOST_AUTO_TEST_CASE(should_request_allows_exactly_at_the_backoff_deadline) {
@@ -750,17 +760,46 @@ BOOST_AUTO_TEST_CASE(should_request_allows_exactly_at_the_backoff_deadline) {
     // matches net_processing.cpp's existing whole-block retry boundary
     // (`nNowRetry < retry.nNextAttempt` skips; the equal case falls through).
     BOOST_CHECK(ShouldRequestBodyRange(/*fWasAnnounced=*/true, /*nNow=*/500, /*nNextAttempt=*/500,
-                                         /*nInFlight=*/2, /*nMaxInFlight=*/10));
+                                         /*nInFlight=*/2, /*nMaxInFlight=*/10,
+                                         /*nPeerInFlight=*/0, /*nMaxPeerInFlight=*/4));
 }
 
 BOOST_AUTO_TEST_CASE(should_request_refuses_once_the_aggregate_cap_is_saturated) {
     BOOST_CHECK(!ShouldRequestBodyRange(/*fWasAnnounced=*/true, /*nNow=*/1000, /*nNextAttempt=*/500,
-                                          /*nInFlight=*/10, /*nMaxInFlight=*/10));
+                                          /*nInFlight=*/10, /*nMaxInFlight=*/10,
+                                          /*nPeerInFlight=*/0, /*nMaxPeerInFlight=*/4));
 }
 
 BOOST_AUTO_TEST_CASE(should_request_allows_one_below_the_aggregate_cap) {
     BOOST_CHECK(ShouldRequestBodyRange(/*fWasAnnounced=*/true, /*nNow=*/1000, /*nNextAttempt=*/500,
-                                         /*nInFlight=*/9, /*nMaxInFlight=*/10));
+                                         /*nInFlight=*/9, /*nMaxInFlight=*/10,
+                                         /*nPeerInFlight=*/0, /*nMaxPeerInFlight=*/4));
+}
+
+// 4.5.3 (F-202): the new per-peer cap -- a peer already at its own in-flight
+// limit is refused even though the aggregate budget still has room, exactly
+// mirroring net_processing.cpp's own MAX_BLOCKS_IN_TRANSIT_PER_PEER check
+// (`nodestate->nBlocksInFlight >= MAX_BLOCKS_IN_TRANSIT_PER_PEER`), which
+// binds independently of whatever whole-block aggregate state exists.
+BOOST_AUTO_TEST_CASE(should_request_refuses_once_the_peer_cap_is_saturated_even_with_aggregate_room) {
+    BOOST_CHECK(!ShouldRequestBodyRange(/*fWasAnnounced=*/true, /*nNow=*/1000, /*nNextAttempt=*/500,
+                                          /*nInFlight=*/2, /*nMaxInFlight=*/10,
+                                          /*nPeerInFlight=*/4, /*nMaxPeerInFlight=*/4));
+}
+
+BOOST_AUTO_TEST_CASE(should_request_allows_one_below_the_peer_cap) {
+    BOOST_CHECK(ShouldRequestBodyRange(/*fWasAnnounced=*/true, /*nNow=*/1000, /*nNextAttempt=*/500,
+                                         /*nInFlight=*/2, /*nMaxInFlight=*/10,
+                                         /*nPeerInFlight=*/3, /*nMaxPeerInFlight=*/4));
+}
+
+// Composition with the aggregate cap: a peer comfortably under its OWN cap
+// is still refused once the shared aggregate budget is saturated -- the two
+// caps are independent ANDed conditions, neither one alone is sufficient.
+BOOST_AUTO_TEST_CASE(should_request_refuses_when_aggregate_saturated_even_under_the_peer_cap) {
+    BOOST_CHECK(!ShouldRequestBodyRange(/*fWasAnnounced=*/true, /*nNow=*/1000, /*nNextAttempt=*/500,
+                                          /*nInFlight=*/10, /*nMaxInFlight=*/10,
+                                          /*nPeerInFlight=*/0, /*nMaxPeerInFlight=*/4));
 }
 
 // 2.2.4: NextBodyRetryBackoffMicros -- the exact arithmetic 1.3.6/H-2's
