@@ -11,6 +11,7 @@
 #include <blockencodings.h>
 #include <announcerring.h>
 #include <bodyrange.h>
+#include <coveragetelemetry.h>
 #include <chainparams.h>
 #include <commitments_negotiation.h>
 #include <consensus/validation.h>
@@ -514,6 +515,27 @@ namespace {
     std::map <uint256, BodyRangeAccumulation> mapBodyRangePartial
     GUARDED_BY(cs_main);
 
+    /** 4.2 (F-206, build-plan.md's 4.2 row): per-range coverage -- keyed by
+     *  CoverageRangeIndex(height, COVERAGE_RANGE_SIZE) (coveragetelemetry.h),
+     *  NOT by block hash and NOT per-peer. This is the cross-peer, standing
+     *  view of which spans of chain history this node has evidence for at
+     *  all -- populated from the BODYRANGE response handler below, on every
+     *  peer's first-chunk (nStartIndex == 0) answer, hit or miss. See
+     *  net_processing.h's GetBodyRangeCoverageStats for the read side.
+     *
+     *  In-memory only, matching this file's own established precedent for
+     *  similar transient body-range state (mapBodyRangeInFlight,
+     *  mapBodyRangePartial, g_body_retry_state all reset on restart too):
+     *  SS14.5's own "a query and a counter, not a challenge economy" framing
+     *  does not require this to survive a restart, and losing it only means
+     *  re-accumulating going forward, not losing a security property. Never
+     *  pruned or rotated -- a live mainnet-scale deployment running this for
+     *  a long time may eventually want an eviction/rollup policy once the
+     *  bucket count grows large; flagged, not built here (docs/findings.md's
+     *  F-206). */
+    std::map<int, RangeCoverageStats> mapBodyRangeCoverage
+    GUARDED_BY(cs_main);
+
     /** F-158: how long an accumulation may sit untouched before it's
      *  considered abandoned rather than merely between backoff-paced
      *  chunks -- generous relative to BODY_RETRY_MAX_MICROS (the single
@@ -658,6 +680,20 @@ namespace {
         //! (same concept, different scope) so the two are never misread for
         //! each other at a call site.
         int nBodyRangePeerInFlight;
+        //! 4.2 (F-206, build-plan.md's 4.2 row): per-peer body-range
+        //! miss-rate telemetry (coveragetelemetry.h) -- every validated
+        //! GETBODYRANGE round trip with this peer, hit or miss, recorded in
+        //! the BODYRANGE response handler below regardless of chunk
+        //! position (unlike mapBodyRangeCoverage's own first-chunk-only
+        //! gating: a peer's RELIABILITY is evidenced by every round trip, not
+        //! just the one that first proves a range exists at all). Default-
+        //! initialised (BodyRangeTally's own in-class initialisers), so no
+        //! explicit reset is needed in CNodeState's constructor below --
+        //! matches ObjectDownloadState's own self-initialising precedent
+        //! just above rather than nBodyRangePeerInFlight's explicit-int
+        //! precedent, since this is a struct with real default members, not
+        //! a bare int.
+        BodyRangeTally bodyRangeTally;
         //! Whether we consider this a preferred download peer.
         bool fPreferredDownload;
         //! Whether this peer wants invs or headers (when possible) for block announcements.
@@ -1626,8 +1662,61 @@ bool GetNodeStateStats(NodeId nodeid, CNodeStateStats &stats) {
         if (queue.pindex)
             stats.vHeightInFlight.push_back(queue.pindex->nHeight);
     }
+    // 4.2 (F-206): per-peer body-range miss-rate telemetry.
+    stats.nBodyRangeHits = state->bodyRangeTally.nHits;
+    stats.nBodyRangeMisses = state->bodyRangeTally.nMisses;
 
     return true;
+}
+
+// 4.2 (F-206, build-plan.md's 4.2 row): the read side of mapBodyRangeCoverage
+// above -- returns every bucket that has at least one recorded observation.
+// See net_processing.h's own doc for what a caller (an RPC, or a future 4.6
+// activation criterion) is expected to do with this.
+void GetBodyRangeCoverageStats(std::vector<BodyRangeCoverageEntry> &vStatsOut) {
+    vStatsOut.clear();
+    LOCK(cs_main);
+    for (const auto &kv: mapBodyRangeCoverage) {
+        BodyRangeCoverageEntry entry;
+        entry.nRangeStartHeight = kv.first * COVERAGE_RANGE_SIZE;
+        entry.nRangeEndHeightInclusive = entry.nRangeStartHeight + COVERAGE_RANGE_SIZE - 1;
+        entry.stats = kv.second;
+        vStatsOut.push_back(entry);
+    }
+}
+
+// F-207 (independent adversarial review of F-206): test-only seam. This
+// project's own established convention (bodyrange.h's ShouldRequestBodyRange/
+// IsBodyRangeChunkAligned/etc.) keeps SendMessages' own fetch-selection
+// machinery (-fetchbodyrange, NODE_COMMITMENTS peer capability,
+// FindNextBlocksToDownload's announcer-ring eligibility) untested, extracting
+// only the pure decision predicates it depends on. That convention does not
+// give a test any way to get a real mapBodyRangeInFlight entry in place
+// without reimplementing that whole selection path -- and the F-207 bug
+// (hit-recording ordered before content validation) lives entirely in the
+// untested BODYRANGE response-handler glue itself, not in a predicate, so a
+// predicate-level test cannot catch it. This seam exists solely so
+// src/test/bodyrange_hit_recording_tests.cpp can seed exactly one in-flight
+// request and then drive the real handler end-to-end through a genuine
+// PeerLogicValidation::ProcessMessages pass (matching blocktxn_tests.cpp's
+// own ConnectedPeer/QueueMessage harness). Mirrors the real insertion site's
+// own bookkeeping (SendMessages' "Message: getbodyrange" section) exactly --
+// same map write, same nBodyRangeInFlight/nBodyRangePeerInFlight increments
+// -- so FinalizeNode's own teardown asserts (nBodyRangePeerInFlight == 0,
+// nBodyRangeInFlight == 0) stay satisfied regardless of whether the entry is
+// later consumed by the response handler or reaped by FinalizeNode itself.
+void SeedBodyRangeInFlightForTest(const uint256 &hashBlock, NodeId peer, uint32_t nStartIndex, uint32_t nCount) {
+    LOCK(cs_main);
+    CNodeState *state = State(peer);
+    assert(state != nullptr);
+    BodyRangeInFlight inFlight;
+    inFlight.peer = peer;
+    inFlight.nStartIndex = nStartIndex;
+    inFlight.nCount = nCount;
+    inFlight.nRequestTime = GetTimeMicros();
+    mapBodyRangeInFlight[hashBlock] = inFlight;
+    nBodyRangeInFlight++;
+    state->nBodyRangePeerInFlight++;
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -3868,6 +3957,26 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
             }
             EraseBodyRangeInFlight(it);
 
+            // F-207 (independent adversarial review of F-206, CONFIRMED
+            // HIGH): hit-recording (both the per-peer tally just below and
+            // the cross-peer coverage observation further down) must NOT
+            // happen here, on ValidateBodyRangeResponse alone.
+            // ValidateBodyRangeResponse only confirms wire SHAPE -- right
+            // nStartIndex, count within bounds, non-null entries -- it says
+            // nothing about whether the returned bodies actually match what
+            // this range committed to. A response that passes shape
+            // validation but fails ValidateBodyRangeChunkHashes below is
+            // garbage content from a peer that is about to be banned for
+            // it -- recording that as a coverage HIT before the ban lets an
+            // eraser inject a fake "everything's fine here" signal into the
+            // exact data this telemetry exists to keep honest (SS14.9), for
+            // the one-time cost of a single banned IP per fake hit. Both hit
+            // sites are now recorded only after ValidateBodyRangeChunkHashes
+            // has actually succeeded, below. An empty response has no
+            // content to validate -- there is nothing ValidateBodyRangeChunk-
+            // Hashes could check on zero bodies -- so the MISS side (both
+            // per-peer and cross-peer) is unaffected and still recorded
+            // immediately below, exactly as before.
             if (resp.vBodies.empty()) {
                 // An honest miss (bodyrange.h's own CBodyRange doc: no
                 // fFound field, a miss IS vBodies.empty()) -- the block is
@@ -3878,6 +3987,31 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
                 // g_body_retry_state's own backoff (already advanced when
                 // this request was sent) is what paces the next attempt, to
                 // this or another peer.
+                if (CNodeState *peerState = State(pfrom->GetId())) {
+                    RecordBodyRangeTally(peerState->bodyRangeTally, /*fHit=*/false);
+                }
+                //
+                // 4.2 (F-206): also a per-range COVERAGE observation, but
+                // only on the first chunk of a fetch (nStartIndex == 0) --
+                // bodyrange.h's own MISS classification means "unresolvable
+                // or unserveable now", independent of nStartIndex, so a miss
+                // on a LATER chunk of an already-partially-fetched block
+                // (e.g. the block was withdrawn mid-transfer) is not an
+                // honest "this peer never had any of it" signal the way a
+                // first-chunk miss is, and would otherwise let one abandoned
+                // multi-chunk fetch skew a bucket's counts relative to a
+                // single-chunk one. Unlike the per-peer tally just above,
+                // this is deliberately NOT keyed to this specific peer --
+                // mapBodyRangeCoverage is the cross-peer, standing view of
+                // the range itself.
+                if (resp.nStartIndex == 0) {
+                    CBlockIndex *pindexMissed = LookupBlockIndex(resp.hashBlock);
+                    if (pindexMissed != nullptr) {
+                        RecordCoverageObservation(
+                            mapBodyRangeCoverage[CoverageRangeIndex(pindexMissed->nHeight, COVERAGE_RANGE_SIZE)],
+                            /*fHit=*/false, GetTimeMicros());
+                    }
+                }
                 return true;
             }
 
@@ -3923,6 +4057,26 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
                             strprintf("Peer %d sent a bodyrange chunk that does not match %s",
                                      pfrom->GetId(), resp.hashBlock.ToString()));
                 return true;
+            }
+
+            // F-207 (independent adversarial review of F-206, CONFIRMED
+            // HIGH): the hit-recording that used to sit right after
+            // ValidateBodyRangeResponse above (shape only) now lives here,
+            // after ValidateBodyRangeChunkHashes has actually proven this
+            // chunk's CONTENT matches what the range committed to -- a
+            // shape-valid, hash-invalid response never reaches this point
+            // (the Misbehaving branch just above returns first), so it can
+            // no longer be counted as evidence the range was genuinely
+            // served. Recorded here, at first-validated-chunk arrival,
+            // still independent of whether this accumulation ever
+            // completes -- a slow or later-abandoned multi-chunk transfer
+            // still contributes what this one chunk already proved.
+            if (CNodeState *peerState = State(pfrom->GetId())) {
+                RecordBodyRangeTally(peerState->bodyRangeTally, /*fHit=*/true);
+            }
+            if (resp.nStartIndex == 0) {
+                RecordCoverageObservation(mapBodyRangeCoverage[CoverageRangeIndex(pindex->nHeight, COVERAGE_RANGE_SIZE)],
+                                           /*fHit=*/true, GetTimeMicros());
             }
 
             // F-159 (second independent review, CONFIRMED MEDIUM -- a

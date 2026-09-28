@@ -47,6 +47,8 @@ BITCOIN_TESTS =\
   test/bodystore_tests.cpp \
   test/bodyrange_tests.cpp \
   test/commitments_negotiation_tests.cpp \
+  test/bodyrange_hit_recording_tests.cpp \
+  test/coveragetelemetry_tests.cpp \
   test/announcerring_tests.cpp \
   test/blockchain_tests.cpp \
   test/blockencodings_tests.cpp \
