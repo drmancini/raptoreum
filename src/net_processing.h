@@ -7,9 +7,12 @@
 #define BITCOIN_NET_PROCESSING_H
 
 #include <consensus/params.h>
+#include <coveragetelemetry.h>
 #include <net.h>
 #include <sync.h>
 #include <validationinterface.h>
+
+#include <vector>
 
 class CTxMemPool;
 
@@ -109,10 +112,43 @@ struct CNodeStateStats {
     int nSyncHeight = -1;
     int nCommonHeight = -1;
     std::vector<int> vHeightInFlight;
+    //! 4.2 (F-206, build-plan.md's 4.2 row): per-peer body-range miss-rate
+    //! telemetry (coveragetelemetry.h) -- every validated GETBODYRANGE round
+    //! trip with this peer, hit or miss, since the connection was
+    //! established. Reset on reconnect, matching nMisbehavior's own
+    //! per-connection scope (CNodeState is torn down on disconnect); not
+    //! persisted across restarts, matching this file's own established
+    //! convention for similar transient per-peer body-range state
+    //! (nBodyRangePeerInFlight and friends, net_processing.cpp).
+    uint64_t nBodyRangeHits = 0;
+    uint64_t nBodyRangeMisses = 0;
 };
 
 /** Get statistics from node state */
 bool GetNodeStateStats(NodeId nodeid, CNodeStateStats &stats);
+
+/** 4.2 (F-206, build-plan.md's 4.2 row): one coverage-range bucket
+ *  (coveragetelemetry.h's CoverageRangeIndex/COVERAGE_RANGE_SIZE) as
+ *  reported by GetBodyRangeCoverageStats below -- the height span it covers
+ *  plus its accumulated cross-peer observation stats. */
+struct BodyRangeCoverageEntry {
+    int nRangeStartHeight;
+    int nRangeEndHeightInclusive;
+    RangeCoverageStats stats;
+};
+
+/** 4.2 (F-206): snapshot of every coverage bucket this node has observed at
+ *  least one first-chunk GETBODYRANGE round trip in, from ANY peer, since
+ *  startup (or the last reset) -- the cross-peer, standing view of which
+ *  spans of chain history this node has evidence for at all. See
+ *  coveragetelemetry.h for RangeCoverageStats' own fields and
+ *  docs/transaction-decoupling.md SS14.9 for what the shape of these numbers
+ *  across repeated polls is meant to reveal (this function does not
+ *  interpret that shape itself -- SS14.5: "a query and a counter, not a
+ *  challenge economy"). Buckets with zero observations are never present
+ *  (mapBodyRangeCoverage, net_processing.cpp, is populated lazily on first
+ *  observation only). Ordering is unspecified. */
+void GetBodyRangeCoverageStats(std::vector<BodyRangeCoverageEntry> &vStatsOut);
 
 bool IsBanned(NodeId nodeid)
 
@@ -145,5 +181,13 @@ void RelayTransaction(const uint256 &, const CConnman &connman);
 extern unsigned int g_perf_inv_max;
 extern unsigned int g_perf_inv_interval;
 extern bool g_perf_inv_nosort;
+
+/** F-207 (independent adversarial review of F-206): test-only. Seeds a single
+ *  mapBodyRangeInFlight entry directly, bypassing SendMessages' own real
+ *  fetch-selection machinery, so a test can drive the real BODYRANGE
+ *  response handler end-to-end via PeerLogicValidation::ProcessMessages. See
+ *  net_processing.cpp's own doc comment at the definition for why this
+ *  exists instead of a predicate-level test. */
+void SeedBodyRangeInFlightForTest(const uint256 &hashBlock, NodeId peer, uint32_t nStartIndex, uint32_t nCount);
 
 #endif // BITCOIN_NET_PROCESSING_H

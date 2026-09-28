@@ -185,6 +185,7 @@ BITCOIN_CORE_H = \
   bodystore.h \
   bodyrange.h \
   commitments_negotiation.h \
+  coveragetelemetry.h \
   announcerring.h \
   flatfile.h \
   fs.h \
@@ -378,6 +379,7 @@ libraptoreum_server_a_SOURCES = \
   bodystore.cpp \
   bodyrange.cpp \
   commitments_negotiation.cpp \
+  coveragetelemetry.cpp \
   announcerring.cpp \
   flatfile.cpp \
   httprpc.cpp \
