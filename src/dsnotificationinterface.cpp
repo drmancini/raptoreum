@@ -56,6 +56,14 @@ void CDSNotificationInterface::UpdatedBlockTip(const CBlockIndex *pindexNew, con
     // Update global DIP0001 activation status
     fDIP0001ActiveAtTip = Params().GetConsensus().DIP0001Enabled;
 
+    // 4.6.1 (F-207): refresh the commitment-mode tip cache the same way,
+    // for callers that only ever care about "now" (mempool policy, block
+    // assembly, RPC reporting) -- not for reindex-chainstate correctness,
+    // which ConnectBlock/AcceptBlock's own CommitmentModeAtHeight guard
+    // provides per-block regardless of this cache. See
+    // g_commitmentBudgetActive's own comment (validation.h) for the split.
+    g_commitmentBudgetActive = Updates().IsActive(EUpdate::COMMITMENT_MODE, pindexNew);
+
     if (fInitialDownload)
         return;
 
