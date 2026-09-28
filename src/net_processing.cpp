@@ -12,6 +12,7 @@
 #include <announcerring.h>
 #include <bodyrange.h>
 #include <chainparams.h>
+#include <commitments_negotiation.h>
 #include <consensus/validation.h>
 #include <hash.h>
 #include <merkleblock.h>
@@ -5809,8 +5810,14 @@ bool PeerLogicValidation::SendMessages(CNode *pto) {
             // would strand it with no re-request mechanism at all --
             // verified directly (feature_body_refetch.py: passes at the
             // parent commit, hangs at this regression's introduction).
+            // 4.6.2 (build-plan.md's 4.6 row): the manual -fetchbodyrange
+            // opt-in is now ORed with the real, height-gated activation
+            // trigger (commitments_negotiation.h) rather than being the
+            // sole gate -- see that header for what still needs 4.6.1's
+            // real bit substituted in.
             bool fFetchBodyRangeCapable =
-                gArgs.GetBoolArg("-fetchbodyrange", false) && CanReceiveCommitments(pto->nServices);
+                ShouldNegotiateCommitmentsNow(::ChainActive().Tip(), gArgs.GetBoolArg("-fetchbodyrange", false)) &&
+                CanReceiveCommitments(pto->nServices);
             FindNextBlocksToDownload(pto->GetId(), MAX_BLOCKS_IN_TRANSIT_PER_PEER - state.nBlocksInFlight, vToDownload,
                                      vBodyBlocks, fFetchBodyRangeCapable, staller, consensusParams);
             for (const CBlockIndex *pindex: vToDownload) {
@@ -5838,7 +5845,10 @@ bool PeerLogicValidation::SendMessages(CNode *pto) {
         // C1, not built here). The aggregate cap (nBodyRangeInFlight vs.
         // -maxbodyrangeinflight) is checked per candidate, last, by
         // ShouldRequestBodyRange (bodyrange.h).
-        if (gArgs.GetBoolArg("-fetchbodyrange", false) &&
+        // 4.6.2: same trigger swap as fFetchBodyRangeCapable above -- this
+        // reaper must run whenever the fetch-issuing gate below can, or a
+        // real-activation-driven in-flight request would never get reaped.
+        if (ShouldNegotiateCommitmentsNow(::ChainActive().Tip(), gArgs.GetBoolArg("-fetchbodyrange", false)) &&
             nNow - nBodyRangeMaintenanceLastRun > BODY_RANGE_MAINTENANCE_INTERVAL_MICROS) {
             // 2.2.4: reap any in-flight request stuck against a peer that
             // stayed CONNECTED but never answered at all -- IsBodyRangeRequestStale's
@@ -5903,7 +5913,13 @@ bool PeerLogicValidation::SendMessages(CNode *pto) {
             }
         }
 
-        if (gArgs.GetBoolArg("-fetchbodyrange", false) && !pto->fClient && pto->CanRelay() &&
+        // 4.6.2: same trigger swap -- this is the "send side" F-205's thread
+        // 2 cites (the point the GETBODYRANGE request message is actually
+        // pushed onto the wire), not a commitment-form block SEND path (none
+        // exists over ordinary relay today -- see this sub-step's own report
+        // for why C8's "whole-block as default" claim holds trivially).
+        if (ShouldNegotiateCommitmentsNow(::ChainActive().Tip(), gArgs.GetBoolArg("-fetchbodyrange", false)) &&
+            !pto->fClient && pto->CanRelay() &&
             !vBodyBlocks.empty() && CanReceiveCommitments(pto->nServices)) {
             unsigned int nMaxBodyRangeInFlight =
                 (unsigned int) gArgs.GetArg("-maxbodyrangeinflight", DEFAULT_MAX_BODYRANGE_INFLIGHT);
