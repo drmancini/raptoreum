@@ -127,6 +127,16 @@ std::atomic<int> g_perf_withhold_count{-1};
 /** 1.2 (D-18, F-88); see validation.h. */
 std::atomic<bool> g_commitmentBudgetActive{false};
 
+/** 4.6.1 (F-207); see validation.h. */
+CommitmentModeAtHeight::CommitmentModeAtHeight(const CBlockIndex *pindex)
+        : previousValue(g_commitmentBudgetActive) {
+    g_commitmentBudgetActive = Updates().IsActive(EUpdate::COMMITMENT_MODE, pindex);
+}
+
+CommitmentModeAtHeight::~CommitmentModeAtHeight() {
+    g_commitmentBudgetActive = previousValue;
+}
+
 bool HaveBodies(const CBlockIndex *pindex) {
     return pindex != nullptr && (pindex->nStatus & BLOCK_HAVE_BODIES);
 }
@@ -2303,6 +2313,17 @@ bool CChainState::ConnectBlock(const CBlock &block, CValidationState &state, CBl
     assert(*pindex->phashBlock == block.GetHash());
     int64_t nTimeStart = GetTimeMicros();
 
+    // 4.6.1 (F-207): pin g_commitmentBudgetActive to THIS block's own real,
+    // height-gated EUpdate::COMMITMENT_MODE state for the rest of this call
+    // -- including the nested CheckBlock re-check immediately below. Closes
+    // TODO(4.6): a `-reindex`/`-reindex-chainstate` replay reaches
+    // ConnectBlock once per historical block, each at that block's own
+    // pindex/height, in order, so this can never apply a later block's (or
+    // the current tip's) activation state to an earlier one. See
+    // g_commitmentBudgetActive's own comment (validation.h) for the full
+    // picture.
+    CommitmentModeAtHeight commitmentModeGuard(pindex);
+
     // Check it again in case a previous version let a bad block in
     // NOTE: We don't currently (re-)invoke ContextualCheckBlock() or
     // ContextualCheckBlockHeader() here. This means that if we add a new
@@ -2413,18 +2434,14 @@ bool CChainState::ConnectBlock(const CBlock &block, CValidationState &state, CBl
     // nLockTimeFlags/LOCKTIME_VERIFY_SEQUENCE just above, which governs BIP68
     // relative locktimes and already has its own connect-time enforcement
     // (the SequenceLocks call in the loop below). Gated by
-    // g_commitmentBudgetActive -- test-only, provably inert on any real
-    // chain today, but this is NOT the height gate F-100/this row's own plan
-    // required (a full mainnet -reindex-chainstate as the acceptance test,
-    // never run -- M-4, a full-arc adversarial review, 2026-09-20). A plain
-    // boolean is not a substitute: 4.6 wiring a real deployment bit to this
-    // SAME flag would newly enforce these 3 rules against all of mainnet
-    // history on every future -reindex-chainstate (which skips
-    // ContextualCheckBlock today, see that function's own comment on why),
-    // exactly the risk height-gating exists to avoid. TODO(4.6): add
-    // `&& pindex->nHeight >= <activation height>` here and at F-83's own
-    // g_commitmentBudgetActive gate in AcceptBlock below, not just a global
-    // flag flip.
+    // g_commitmentBudgetActive, which CommitmentModeAtHeight above now pins
+    // to THIS block's own real EUpdate::COMMITMENT_MODE height-gate for the
+    // whole of ConnectBlock (4.6.1, F-207, closing this TODO -- was
+    // previously a plain test-only global with no height gate at all, which
+    // would have newly enforced these 3 rules against all of mainnet
+    // history on every future -reindex-chainstate, which skips
+    // ContextualCheckBlock today, see that function's own comment on why;
+    // AcceptBlock's own F-83 gate below got the identical fix).
     int nLockTimeFlagsAbsolute = 0;
     if (chainparams.GetConsensus().BIPCSVEnabled) {
         nLockTimeFlagsAbsolute |= LOCKTIME_MEDIAN_TIME_PAST;
@@ -4955,6 +4972,16 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock> &pblock, CVali
     if (!accepted_header)
         return false;
 
+    // 4.6.1 (F-207): pin g_commitmentBudgetActive to THIS block's own real,
+    // height-gated EUpdate::COMMITMENT_MODE state for the rest of this call
+    // -- including the CheckCommitmentBlock gate below and the nested
+    // CheckBlock/ContextualCheckBlock calls further down. Closes TODO(4.6)
+    // for a full `-reindex` (which, unlike -reindex-chainstate, DOES
+    // re-run AcceptBlock for every historical block re-read from blk*.dat).
+    // See g_commitmentBudgetActive's own comment (validation.h) for the
+    // full picture and ConnectBlock's identical guard above.
+    CommitmentModeAtHeight commitmentModeGuard(pindex);
+
     // Try to process all requested blocks that we don't have, but only
     // process an unrequested block if it's new and has enough work to
     // advance our tip, and isn't too many blocks ahead.
@@ -5002,8 +5029,10 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock> &pblock, CVali
     // loop over every transaction before ever calling AcceptBlock (Fable
     // review, 2026-09-19). The ordering guarantee that matters is the one
     // named above. Gated by g_commitmentBudgetActive, matching D-14's "one
-    // fork" activation for every other 1.x rule -- test-only until 4.6 has a
-    // real bit.
+    // fork" activation for every other 1.x rule -- pinned to this block's
+    // own real EUpdate::COMMITMENT_MODE height-gate by the
+    // CommitmentModeAtHeight guard near the top of this function (4.6.1,
+    // F-207).
     //
     // Nothing yet delivers a genuine standalone CCommitmentBlock over the
     // wire (that split is phase 2's fetch protocol, F-83's own scoping); this
