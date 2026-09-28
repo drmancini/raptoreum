@@ -20,6 +20,7 @@
 #include <chainparams.h>
 #include <checkpoints.h>
 #include <commitments_negotiation.h>
+#include <coveragetelemetry.h>
 #include <node/coinstats.h>
 #include <compat/sanity.h>
 #include <consensus/validation.h>
@@ -129,6 +130,14 @@ static const bool DEFAULT_STOPAFTERBLOCKIMPORT = false;
 
 // Dump addresses to banlist.dat every 15 minutes (900s)
 static constexpr int DUMP_BANS_INTERVAL = 60 * 15;
+// F-212: dump coveragetelemetry.dat on the same cadence as banlist.dat --
+// gap 3's own persistence fix needs to survive more than just a clean
+// shutdown (the shutdown-time CFlatDB<CCoverageTelemetryCache>::Dump call,
+// Shutdown() below, covers that already) to genuinely stop discarding
+// accumulated history-wide evidence, matching SS14.5's own requirement.
+// Reuses DUMP_BANS_INTERVAL's own already-established value rather than
+// picking a new number with no basis.
+static constexpr int DUMP_COVERAGE_TELEMETRY_INTERVAL = DUMP_BANS_INTERVAL;
 
 
 static CDSNotificationInterface *pdsNotificationInterface = nullptr;
@@ -269,6 +278,17 @@ void PrepareShutdown(NodeContext &node) {
         }
         CFlatDB <CPowCache> flatdb7("powcache.dat", "powCache");
         flatdb7.Dump(CPowCache::Instance());
+        // F-212 (gap 3): coveragetelemetry.dat -- see coveragetelemetry.h's
+        // own CCoverageTelemetryCache doc comment. mapBodyRangeCoverage is
+        // process-global state (net_processing.cpp's own anonymous
+        // namespace), independent of node.peer_logic's own object lifetime,
+        // so reading it here -- before node.peer_logic.reset() just below --
+        // is safe and matches every other cache dump in this block running
+        // before that reset too.
+        CFlatDB <CCoverageTelemetryCache> flatdb8("coveragetelemetry.dat", "magicCoverageTelemetryCache");
+        CCoverageTelemetryCache coverageTelemetryCache;
+        GetCoverageTelemetrySnapshot(coverageTelemetryCache.mapHeightStatus);
+        flatdb8.Dump(coverageTelemetryCache);
     }
 
     // After the threads that potentially access these pointers have been stopped,
@@ -2282,6 +2302,28 @@ bool AppInitMain(const util::Ref &context, NodeContext &node, interfaces::BlockA
         }
     }
 
+    // ********************************************************* Step 7a-bis: load coveragetelemetry.dat
+
+    // F-212 (gap 3): fold persisted cross-peer coverage history back into
+    // the live ledger before this node accepts any peer traffic --
+    // mapBodyRangeCoverage (net_processing.cpp) starts genuinely empty at
+    // this point (no networking has started, matching sporks.dat's own
+    // load-before-networking timing just above), so this is a straight
+    // load, not a race with concurrently-arriving BODYRANGE traffic. No
+    // chain state is needed to load or apply this (it is a bare
+    // height->record map), so unlike sporks.dat/powcache.dat there is no
+    // ordering dependency on LoadBlockIndexDB (Step 7c, below) either way --
+    // placed here simply to keep every small non-consensus cache load
+    // together in one place, matching this file's own established grouping.
+    uiInterface.InitMessage(_("Loading coverage telemetry cache..."));
+    CFlatDB <CCoverageTelemetryCache> flatdb8("coveragetelemetry.dat", "magicCoverageTelemetryCache");
+    CCoverageTelemetryCache coverageTelemetryCache;
+    if (!flatdb8.Load(coverageTelemetryCache)) {
+        return InitError(_("Failed to load coverage telemetry cache from") + "\n" +
+                          (GetDataDir() / "coveragetelemetry.dat").string());
+    }
+    LoadCoverageTelemetrySnapshot(coverageTelemetryCache.mapHeightStatus);
+
     // ********************************************************* Step 7b: load powcache.dat
     {
         fs::path pathDB = GetDataDir();
@@ -2994,6 +3036,18 @@ bool AppInitMain(const util::Ref &context, NodeContext &node, interfaces::BlockA
     node.scheduler->scheduleEvery([banman] {
         banman->DumpBanlist();
     }, DUMP_BANS_INTERVAL * 1000);
+
+    // F-212 (gap 3): periodic coveragetelemetry.dat dump, matching
+    // banlist.dat's own precedent just above -- without this, only a CLEAN
+    // shutdown (Shutdown(), this file) ever persists accumulated coverage
+    // history, and a crashed or killed node loses everything since its last
+    // clean stop, defeating the point of gap 3's own fix.
+    node.scheduler->scheduleEvery([] {
+        CFlatDB <CCoverageTelemetryCache> flatdb("coveragetelemetry.dat", "magicCoverageTelemetryCache");
+        CCoverageTelemetryCache coverageTelemetryCache;
+        GetCoverageTelemetrySnapshot(coverageTelemetryCache.mapHeightStatus);
+        flatdb.Dump(coverageTelemetryCache);
+    }, DUMP_COVERAGE_TELEMETRY_INTERVAL * 1000);
 
     return true;
 }

@@ -127,28 +127,78 @@ struct CNodeStateStats {
 /** Get statistics from node state */
 bool GetNodeStateStats(NodeId nodeid, CNodeStateStats &stats);
 
-/** 4.2 (F-206, build-plan.md's 4.2 row): one coverage-range bucket
- *  (coveragetelemetry.h's CoverageRangeIndex/COVERAGE_RANGE_SIZE) as
+/** 4.2 (F-206, build-plan.md's 4.2 row); F-212 (this rework's own data-model
+ *  types): one coverage-range bucket (coveragetelemetry.h's
+ *  CoverageRangeIndex/COVERAGE_RANGE_SIZE/SummarizeCoverageRange) as
  *  reported by GetBodyRangeCoverageStats below -- the height span it covers
- *  plus its accumulated cross-peer observation stats. */
+ *  plus a ROLLED-UP summary of every height in that span the cross-peer
+ *  ledger has an opinion about. `stats` is computed on demand by scanning
+ *  the underlying per-height ledger (coveragetelemetry.h's own doc comment
+ *  on why this is now a rollup rather than the ledger's own storage
+ *  granularity), not maintained incrementally the way the pre-F-212
+ *  RangeCoverageStats this struct's `stats` field used to hold was. */
 struct BodyRangeCoverageEntry {
     int nRangeStartHeight;
     int nRangeEndHeightInclusive;
-    RangeCoverageStats stats;
+    CoverageRangeSummary stats;
 };
 
-/** 4.2 (F-206): snapshot of every coverage bucket this node has observed at
- *  least one first-chunk GETBODYRANGE round trip in, from ANY peer, since
- *  startup (or the last reset) -- the cross-peer, standing view of which
- *  spans of chain history this node has evidence for at all. See
- *  coveragetelemetry.h for RangeCoverageStats' own fields and
+/** 4.2 (F-206); F-212: snapshot of every coverage bucket this node has at
+ *  least one observed height in, from ANY peer, since startup (or the last
+ *  restart folded persisted history back in -- see
+ *  LoadCoverageTelemetrySnapshot below) -- the cross-peer, standing view of
+ *  which spans of chain history this node has evidence for at all. See
+ *  coveragetelemetry.h for CoverageRangeSummary's own fields and
  *  docs/transaction-decoupling.md SS14.9 for what the shape of these numbers
  *  across repeated polls is meant to reveal (this function does not
  *  interpret that shape itself -- SS14.5: "a query and a counter, not a
- *  challenge economy"). Buckets with zero observations are never present
- *  (mapBodyRangeCoverage, net_processing.cpp, is populated lazily on first
- *  observation only). Ordering is unspecified. */
+ *  challenge economy"). Buckets with zero observed heights are never
+ *  present. Ordering is unspecified. */
 void GetBodyRangeCoverageStats(std::vector<BodyRangeCoverageEntry> &vStatsOut);
+
+/** F-212 (gap 1's own shape-detail escape hatch): one height's own raw,
+ *  deduped coverage record, as reported by GetBodyRangeCoverageHeights
+ *  below. A bucket rollup (BodyRangeCoverageEntry/GetBodyRangeCoverageStats
+ *  above) cannot by itself tell a 300-block contiguous erasure apart from
+ *  300 scattered corrupt blocks (SS14.9's own example) -- both would roll up
+ *  to the same nMissOnly count. This is the per-height detail a caller needs
+ *  to actually see that shape; it is deliberately NOT this phase's job to
+ *  compute the shape FOR the caller (SS14.5: "a query and a counter"). */
+struct BodyRangeCoverageHeightEntry {
+    int nHeight;
+    HeightCoverageStatus status;
+    int64_t nFirstObservedTime;
+    int64_t nLastObservedTime;
+    int64_t nLastChangeTime;
+};
+
+/** F-212: every OBSERVED height (coveragetelemetry.h's CoverageHeightMap is
+ *  sparse -- a height with no entry has never been observed) in
+ *  `[nStartHeight, nEndHeightInclusive]`, in ascending height order. Bounded
+ *  by the caller's own range so a query against a long-synced chain cannot
+ *  accidentally dump millions of records at once -- matching this file's
+ *  own getbodyrangecoverage RPC convention of never doing unbounded work on
+ *  a plain data-read call. */
+void GetBodyRangeCoverageHeights(int nStartHeight, int nEndHeightInclusive,
+                                  std::vector<BodyRangeCoverageHeightEntry> &vHeightsOut);
+
+/** F-212 (gap 3): copies the live, cs_main-guarded cross-peer coverage
+ *  ledger out into `out` -- the read side init.cpp's own shutdown-time and
+ *  periodic CFlatDB<CCoverageTelemetryCache>::Dump calls use. A plain
+ *  snapshot copy, not a reference -- the live ledger stays guarded by
+ *  cs_main and must never be handed out unlocked (this file's own
+ *  net_processing.cpp doc comment on mapBodyRangeCoverage). */
+void GetCoverageTelemetrySnapshot(CoverageHeightMap &out);
+
+/** F-212 (gap 3): folds `snapshot` (freshly loaded from coveragetelemetry.dat
+ *  by init.cpp's own CFlatDB<CCoverageTelemetryCache>::Load call, once, at
+ *  startup, before networking begins) into the live, cs_main-guarded
+ *  cross-peer coverage ledger, via coveragetelemetry.h's own
+ *  MergeCoverageTelemetrySnapshot (the same monotonic-upgrade rule live
+ *  observations use). Intended to run exactly once, early in startup, while
+ *  the live ledger is still empty -- but safe to call at any time, since the
+ *  merge itself makes no assumption about the live ledger's own state. */
+void LoadCoverageTelemetrySnapshot(const CoverageHeightMap &snapshot);
 
 bool IsBanned(NodeId nodeid)
 
