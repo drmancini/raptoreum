@@ -24,16 +24,23 @@ enum class EUpdate {
     // (consensus/consensus.h), and CheckCommitmentBlock/
     // ContextualCheckCommitmentBlock validation (validation.cpp), all
     // previously gated by the test-only g_commitmentBudgetActive flag.
-    // Deliberately NOT registered via updateManager.Add() on ANY network
-    // yet (mirrors QUORUMS_200_8's own testnet-only precedent of a bit that
-    // exists without being registered everywhere): the real activation
-    // criterion is 4.2's own row, confirmed genuinely unbuilt by F-205, so
-    // no real startHeight/threshold exists to commit to here. Until some
-    // future step registers it for real, IsActive() is Unknown/false on
-    // every network, identical to g_commitmentBudgetActive's own permanent
-    // production default -- this wiring changes HOW the gate works
-    // (real per-height UpdateManager state instead of a manually-toggled
-    // global), not WHETHER it is on today.
+    // 4.6.3 (F-214): registered on devnet and regtest ONLY (chainparams.cpp),
+    // mirroring QUORUMS_200_8's own real precedent of a bit registered on
+    // fewer than all four networks (chainparams.cpp:CTestNetParams, testnet
+    // only). Both registrations use startHeight=100,000,000 -- a deliberate,
+    // structurally-unreachable placeholder, not a real activation height:
+    // UpdateManager::State's roundNumber<-1 early return (update/update.cpp)
+    // reports Defined for any realistic test-chain tip, never reaching the
+    // vote-counting path. Still NOT registered on mainnet or testnet: F-213's
+    // owner coverage precondition (point 4, checking GetBodyRangeCoverageHeights
+    // reads FULL across the full Smartnode retention range on real nodes) has
+    // not been run, so no network with real, permanent history commits to
+    // this bit at all yet -- extending F-210's original "unregistered
+    // everywhere" precedent to the two networks where that reasoning still
+    // applies. IsActive() therefore remains Unknown/false on mainnet and
+    // testnet today, and false-but-technically-Defined on devnet/regtest
+    // (registered, but startHeight unreachable) -- neither differs from
+    // g_commitmentBudgetActive's own permanent production default.
     COMMITMENT_MODE = 3,
 
     MAX_VERSION_BITS_DEPLOYMENTS
