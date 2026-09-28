@@ -10,17 +10,22 @@
 #include <consensus/validation.h>
 #include <validation.h>
 #include <smartnode/smartnode-payments.h>
+#include <smartnode/smartnode-sync.h>
 #include <core_io.h>
+#include <key_io.h>
+#include <llmq/quorums_instantsend.h>
 #include <miner.h>
 #include <policy/policy.h>
 #include <pow.h>
 #include <pubkey.h>
 #include <rpc/mining.h>
 #include <script/standard.h>
+#include <spork.h>
 #include <txmempool.h>
 #include <uint256.h>
 #include <util/system.h>
 #include <util/strencodings.h>
+#include <warnings.h>
 
 #include <test/test_raptoreum.h>
 
@@ -916,6 +921,109 @@ BOOST_AUTO_TEST_CASE(enforce_commitment_mode_serving_obligation_refuses_without_
     // binary must see this exactly as unset as it was before this test ran.
     gArgs.ForceRemoveArg("-servebodyrange");
     BOOST_REQUIRE(!gArgs.IsArgSet("-servebodyrange"));
+}
+
+// F-199 (4.5.1): the -maxmempool design-point floor (F-197/F-198's
+// re-derivation, MIN_MAX_MEMPOOL_SIZE_DESIGN_FLOOR, policy/policy.h),
+// enforced rather than merely documented, matching 4.4.3/F-194's own
+// precedent for -servebodyrange -- but WARN, not REFUSE (see validation.h/
+// .cpp for why: this condition is evaluated on every node on every connected
+// block once spork 3 activates network-wide, not at a single retryable RPC
+// boundary, so aborting/rejecting there would be wildly disproportionate to
+// a local config-tuning problem).
+//
+// Split into a pure decision function (this) and a thin logging-glue caller
+// in ConnectBlock, the same split this project already uses for
+// WantsCommitmentModeTemplate/BuildGBTTransactionEntry -- the decision is
+// directly unit-testable; LogPrintf/SetMiscWarning's own output is not.
+BOOST_AUTO_TEST_CASE(max_mempool_below_design_floor_only_when_gate_live_and_size_short) {
+    const int64_t floorBytes = int64_t(MIN_MAX_MEMPOOL_SIZE_DESIGN_FLOOR) * 1000000;
+
+    // Gate not live (spork 3 inactive or node not yet synced): never flags,
+    // regardless of how small -maxmempool is.
+    BOOST_CHECK(!MaxMempoolBelowDesignFloor(/*fMiningGateLive=*/false, /*nMaxMempoolBytes=*/1));
+    BOOST_CHECK(!MaxMempoolBelowDesignFloor(/*fMiningGateLive=*/false, floorBytes - 1));
+
+    // Gate live, strictly below the floor: flags.
+    BOOST_CHECK(MaxMempoolBelowDesignFloor(/*fMiningGateLive=*/true, floorBytes - 1));
+
+    // Gate live, exactly at the floor: compliant, does not flag.
+    BOOST_CHECK(!MaxMempoolBelowDesignFloor(/*fMiningGateLive=*/true, floorBytes));
+
+    // Gate live, above the floor: compliant.
+    BOOST_CHECK(!MaxMempoolBelowDesignFloor(/*fMiningGateLive=*/true, floorBytes + 1));
+
+    // The shipped default (raised past the floor with real headroom, F-199)
+    // never trips the gate once it's live -- the two 4.5.1 deliverables
+    // (default and enforcement) must agree with each other.
+    BOOST_CHECK(!MaxMempoolBelowDesignFloor(/*fMiningGateLive=*/true,
+                                            int64_t(DEFAULT_MAX_MEMPOOL_SIZE) * 1000000));
+}
+
+// F-202 (4.5.1 corrective): the test above exercises MaxMempoolBelowDesignFloor
+// as a pure function with hand-picked fMiningGateLive literals -- it says
+// nothing about whether ConnectBlock's own call site actually threads the
+// REAL llmq::RejectConflictingBlocks() result into that parameter, as opposed
+// to a hardcoded literal that happens to coincide with its own guard
+// (`if (llmq::RejectConflictingBlocks())`) in every normal, unmutated
+// execution. An independent review found exactly that: hoisting the warn
+// call out from under the guard (so it fires unconditionally) left the full
+// suite green, because the pre-fix literal was `true` regardless of guard or
+// position.
+//
+// This drives the REAL condition -- spork 3's actual on/off state and
+// smartnodeSync's actual sync state -- through this codebase's own
+// production methods, not a mock: CSporkManager::UpdateSpork (signed,
+// matching assets_tests.cpp's established convention for activating a spork
+// in a unit test) and CSmartnodeSync::SwitchToNextAsset (the real state-
+// machine transition; one call already clears IsBlockchainSynced()'s
+// SMARTNODE_SYNC_BLOCKCHAIN threshold). A real block is then connected via
+// TestChainSetup's own CreateAndProcessBlock (ProcessNewBlock, the genuine
+// ConnectBlock path), and the resulting operator-visible warning string
+// (GetWarnings, warnings.h) is checked directly -- not the pure function in
+// isolation.
+BOOST_FIXTURE_TEST_CASE(connect_block_threads_the_real_reject_conflicting_blocks_state, TestChain100Setup) {
+    // Precondition: this test binary's own global default state -- spork 3
+    // off, node not yet past SMARTNODE_SYNC_BLOCKCHAIN -- asserted, not
+    // assumed, since both are process-global and this is the first test to
+    // touch either.
+    BOOST_REQUIRE(!sporkManager.IsSporkActive(SPORK_3_INSTANTSEND_BLOCK_FILTERING));
+    BOOST_REQUIRE(!smartnodeSync.IsBlockchainSynced());
+    BOOST_REQUIRE(!llmq::RejectConflictingBlocks());
+
+    // A deliberately tiny -maxmempool, strictly below the design floor.
+    gArgs.ForceSetArg("-maxmempool", "1");
+    BOOST_REQUIRE(GetWarnings(false).find("-maxmempool") == std::string::npos);
+
+    // Gate not live (spork 3 off, not synced): connecting a real block must
+    // NOT warn, even though -maxmempool is already short of the floor. This
+    // is the exact case a hardcoded `true` at the call site would get wrong
+    // the moment it is no longer structurally shielded by the guard.
+    CreateAndProcessBlock({}, coinbaseKey);
+    BOOST_CHECK(GetWarnings(false).find("-maxmempool") == std::string::npos);
+
+    // Drive the gate live for real.
+    CKey sporkKey;
+    sporkKey.MakeNewKey(false);
+    BOOST_REQUIRE(sporkManager.SetSporkAddress(EncodeDestination(sporkKey.GetPubKey().GetID())));
+    BOOST_REQUIRE(sporkManager.SetPrivKey(EncodeSecret(sporkKey)));
+    BOOST_REQUIRE(sporkManager.UpdateSpork(SPORK_3_INSTANTSEND_BLOCK_FILTERING, 0, *m_node.connman));
+    smartnodeSync.SwitchToNextAsset(*m_node.connman);
+    BOOST_REQUIRE(sporkManager.IsSporkActive(SPORK_3_INSTANTSEND_BLOCK_FILTERING));
+    BOOST_REQUIRE(smartnodeSync.IsBlockchainSynced());
+    BOOST_REQUIRE(llmq::RejectConflictingBlocks());
+
+    // Gate now live: connecting a real block must warn.
+    CreateAndProcessBlock({}, coinbaseKey);
+    BOOST_CHECK(GetWarnings(false).find("-maxmempool") != std::string::npos);
+
+    // Restore global state for the rest of this test binary's run.
+    SetMiscWarning("");
+    gArgs.ForceRemoveArg("-maxmempool");
+    BOOST_REQUIRE(!gArgs.IsArgSet("-maxmempool"));
+    sporkManager.UpdateSpork(SPORK_3_INSTANTSEND_BLOCK_FILTERING, 4070908800ULL, *m_node.connman);
+    smartnodeSync.Reset(/*fForce=*/false, /*fNotifyReset=*/false);
+    BOOST_REQUIRE(!llmq::RejectConflictingBlocks());
 }
 
 BOOST_AUTO_TEST_SUITE_END()
