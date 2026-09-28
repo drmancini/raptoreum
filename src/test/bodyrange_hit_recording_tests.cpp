@@ -32,22 +32,34 @@
 // existing three tests' assertions were ported from the old bucket-level
 // BodyRangeTally read (CoverageTallyForHeight) to the new per-height
 // HeightCoverageStatus read (CoverageStatusForHeight) -- see this file's own
-// CoverageStatusForHeight doc comment. The completion tests need a pindex
-// that genuinely LACKS its body yet (BLOCK_HAVE_DATA set, BLOCK_HAVE_BODIES
-// clear) for ProcessFetchedBodyRange to do real work at all (validation.cpp's
-// own guard: `!(nStatus & BLOCK_HAVE_DATA) || HaveBodies(pindex)` is a no-op
-// return, not a failure) -- a block mined locally via CreateAndProcessBlock
-// already has its body (the normal whole-block path), so those tests clear
-// BLOCK_HAVE_BODIES on the pindex directly before exercising the fetch path
-// -- matching acceptancebit_tests.cpp's own established convention (its own
-// `pindex->nStatus &= ~BLOCK_HAVE_BODIES` call sites) of clearing exactly
-// that bit and no other; BLOCK_HAVE_BODY_RECORD is deliberately left alone,
-// since HaveBodies (validation.cpp) gates on BLOCK_HAVE_BODIES only, and
-// this file's own first attempt at clearing both bits together produced an
-// unrelated crash later in the same test binary run (a different suite's
-// fixture teardown) -- consistent with disturbing the body-file store's own
-// process-global bookkeeping (bodystore.cpp) in a way nothing in this
-// codebase's existing tests does, so this file does not do it either.
+// CoverageStatusForHeight doc comment.
+//
+// All three of these tests need a pindex that genuinely LACKS its body yet
+// (BLOCK_HAVE_DATA set, BLOCK_HAVE_BODIES clear) for the fetch path to do
+// real work at all (validation.cpp's own ProcessFetchedBodyRange guard:
+// `!(nStatus & BLOCK_HAVE_DATA) || HaveBodies(pindex)` is a no-op return,
+// not a failure) -- a block mined and connected the normal way
+// (CreateAndProcessBlock) already has its body. An EARLIER version of this
+// file got there by connecting the block normally and then clearing
+// BLOCK_HAVE_BODIES directly on the already-connected pindex; pushing that
+// SAME already-fully-validated block back through
+// ProcessFetchedBodyRange/ActivateBestChain a second time (the two
+// completion tests only -- the two of these that ever call
+// ActivateBestChain at all) reproducibly crashed a DIFFERENT, unrelated
+// test's fixture teardown later in the same full-suite run
+// (`CCheckQueue<T>::~CCheckQueue()`'s own `m_worker_threads.empty()`
+// assertion) -- consistent with re-entering ConnectBlock's script-check
+// thread pool against an already-connected tip being outside what this
+// harness actually supports, not a logic bug in the telemetry code itself.
+// Fixed by never connecting the block normally in the first place:
+// BuildWithheldBlock below uses `g_perf_withhold_hashes`
+// (`PerfWithholdGuard`, matching acceptancebit_tests.cpp's own established
+// convention for exactly this) to make the block's FIRST `ProcessNewBlock`
+// call itself land it in a genuine commitment-only state -- no body ever
+// written, no earlier ConnectBlock pass to re-enter. This file's own
+// completion tests are the only real, single connection of that block's
+// data, through the same fetch path a genuine node completing a
+// commitment-only block would use.
 
 #include <bodyrange.h>
 #include <chain.h>
@@ -56,6 +68,7 @@
 #include <net.h>
 #include <net_processing.h>
 #include <protocol.h>
+#include <rpc/blockchain.h>
 #include <script/interpreter.h>
 #include <script/script.h>
 #include <streams.h>
@@ -110,19 +123,54 @@ CBlock BuildOneTxBlock(TestChainSetup &fixture, int nFillerBlocks = 0) {
     return fixture.CreateAndProcessBlock(txns, spk);
 }
 
-// Same idea, but with TWO non-coinbase transactions (spending
-// m_coinbase_txns[0] and [1]) -- BodyRangeWantedCount(pindex) == 2, so a
-// single GETBODYRANGE chunk of nCount=1 can never complete this block by
-// itself. Used by the gap-2 completion tests below, which need a block that
-// genuinely requires more than one chunk to reconstruct.
-CBlock BuildTwoTxBlock(TestChainSetup &fixture, int nFillerBlocks = 0) {
+// F-207's own precedent (blockbudget_tests.cpp/txvalidation_tests.cpp,
+// referenced by acceptancebit_tests.cpp's own identical guard): a thrown
+// BOOST_REQUIRE between inserting into g_perf_withhold_hashes and erasing
+// would leave the flag set for every later test in the process. Duplicated
+// here rather than shared, matching this file's own established per-file
+// harness-helper convention (see this file's own top-of-file doc comment).
+struct PerfWithholdGuard {
+    uint256 hash;
+
+    explicit PerfWithholdGuard(const uint256 &hashIn) : hash(hashIn) {
+        g_perf_withhold_hashes.insert(hash);
+    }
+
+    ~PerfWithholdGuard() { g_perf_withhold_hashes.erase(hash); }
+};
+
+// F-212: builds `txns` into a block and gets it accepted via the REAL
+// commitment-only path (PerfWithholdGuard, above) -- see this file's own
+// top-of-file doc comment for why this replaced connecting the block
+// normally and clearing BLOCK_HAVE_BODIES on it afterward. `nFillerBlocks`
+// serves the same non-colliding-height purpose as BuildOneTxBlock's own
+// parameter of the same name; the caller builds `txns` itself (typically
+// via BuildSpend, above) since the two multi-chunk completion tests below
+// need TWO real spends, not BuildOneTxBlock's one.
+CBlock BuildWithheldBlock(TestChainSetup &fixture, const std::vector<CMutableTransaction> &txns,
+                          int nFillerBlocks = 0) {
     for (int i = 0; i < nFillerBlocks; i++) {
         fixture.CreateAndProcessBlock({}, CScript() << OP_TRUE);
     }
 
     const CScript spk = CScript() << ToByteVector(fixture.coinbaseKey.GetPubKey()) << OP_CHECKSIG;
-    std::vector<CMutableTransaction> txns = {BuildSpend(fixture, 0, spk), BuildSpend(fixture, 1, spk)};
-    return fixture.CreateAndProcessBlock(txns, spk);
+    CBlock block = fixture.CreateBlock(txns, spk);
+    std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
+    const uint256 hash = block.GetHash();
+
+    {
+        PerfWithholdGuard guard(hash);
+        bool fNewBlock = false;
+        BOOST_REQUIRE(EnsureChainman(fixture.m_node).ProcessNewBlock(Params(), shared_pblock,
+                                                                      /*fForceProcessing=*/true, &fNewBlock));
+        BOOST_REQUIRE(fNewBlock);
+    }
+
+    CBlockIndex *pindex = LookupBlockIndex(hash);
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(pindex->nStatus & BLOCK_HAVE_DATA);
+    BOOST_REQUIRE(!HaveBodies(pindex));
+    return block;
 }
 
 // A transaction guaranteed to differ from the block's own real committed
@@ -193,7 +241,7 @@ struct ConnectedPeer {
 // exact height at all yet. mapBodyRangeCoverage is process-global
 // (net_processing.cpp file-scope state, never reset between test cases in
 // the same test binary), so every assertion below is against a height this
-// test case mines FRESH (BuildOneTxBlock/BuildMultiChunkBlock mine a new
+// test case mines FRESH (BuildOneTxBlock/BuildWithheldBlock mine a new
 // block each call), never a height reused across test cases -- unlike the
 // pre-F-212 version of this helper (bucket-level, so a second test case
 // sharing a bucket needed "check the CHANGE, not the absolute count"), a
@@ -274,18 +322,15 @@ BOOST_AUTO_TEST_CASE(hash_invalid_chunk_is_never_recorded_as_a_hit) {
 // commitments) IS still recorded as a hit post-fix -- confirms the fix
 // moved the recording rather than deleting it.
 BOOST_AUTO_TEST_CASE(hash_valid_chunk_is_still_recorded_as_a_hit) {
-    const CBlock block = BuildOneTxBlock(*this, /*nFillerBlocks=*/1);
+    // See this file's own top-of-file F-212 doc comment: this test needs a
+    // real completion to happen, via a pindex that genuinely never had its
+    // body stored (BuildWithheldBlock), not a normally-connected block with
+    // BLOCK_HAVE_BODIES cleared after the fact.
+    const CScript spk = CScript() << ToByteVector(coinbaseKey.GetPubKey()) << OP_CHECKSIG;
+    const CBlock block = BuildWithheldBlock(*this, {BuildSpend(*this, 0, spk)}, /*nFillerBlocks=*/1);
     CBlockIndex *pindex = LookupBlockIndex(block.GetHash());
     BOOST_REQUIRE(pindex != nullptr);
     BOOST_REQUIRE(block.vtx.size() >= 2);
-
-    // See this file's own top-of-file F-212 doc comment: this test needs a
-    // real completion to happen, which needs a pindex that does not already
-    // have its body (unlike a normally-mined-and-connected test block).
-    {
-        LOCK(cs_main);
-        pindex->nStatus &= ~BLOCK_HAVE_BODIES;
-    }
 
     BOOST_REQUIRE(CoverageStatusForHeight(pindex->nHeight) == HeightCoverageStatus::NOT_OBSERVED);
 
@@ -367,19 +412,16 @@ BOOST_AUTO_TEST_CASE(empty_response_is_still_recorded_as_a_miss) {
 // read as a clean hit, with zero visible signal that the body was never
 // actually completed).
 BOOST_AUTO_TEST_CASE(first_chunk_alone_leaves_a_multi_chunk_height_at_partial_not_full) {
-    const CBlock block = BuildTwoTxBlock(*this, /*nFillerBlocks=*/3);
+    const CScript spk = CScript() << ToByteVector(coinbaseKey.GetPubKey()) << OP_CHECKSIG;
+    const CBlock block = BuildWithheldBlock(*this, {BuildSpend(*this, 0, spk), BuildSpend(*this, 1, spk)},
+                                            /*nFillerBlocks=*/3);
     CBlockIndex *pindex = LookupBlockIndex(block.GetHash());
     BOOST_REQUIRE(pindex != nullptr);
-    // At least the two real spends BuildTwoTxBlock asked for -- possibly
-    // more (CreateAndProcessBlock's own template can add an automatic LLMQ
-    // commitment special transaction at this height; this test does not
-    // depend on the exact count, only that it takes more than one chunk).
+    // At least the two real spends requested above -- possibly more
+    // (CreateBlock's own template can add an automatic LLMQ commitment
+    // special transaction at this height; this test does not depend on the
+    // exact count, only that it takes more than one chunk).
     BOOST_REQUIRE_GE(block.vtx.size(), 3U);
-
-    {
-        LOCK(cs_main);
-        pindex->nStatus &= ~BLOCK_HAVE_BODIES;
-    }
 
     BOOST_REQUIRE(CoverageStatusForHeight(pindex->nHeight) == HeightCoverageStatus::NOT_OBSERVED);
 
@@ -413,15 +455,12 @@ BOOST_AUTO_TEST_CASE(first_chunk_alone_leaves_a_multi_chunk_height_at_partial_no
 // confirming the completion signal genuinely reflects reconstruction, not
 // merely "another chunk arrived."
 BOOST_AUTO_TEST_CASE(both_chunks_arriving_advances_a_multi_chunk_height_to_full) {
-    const CBlock block = BuildTwoTxBlock(*this, /*nFillerBlocks=*/4);
+    const CScript spk = CScript() << ToByteVector(coinbaseKey.GetPubKey()) << OP_CHECKSIG;
+    const CBlock block = BuildWithheldBlock(*this, {BuildSpend(*this, 0, spk), BuildSpend(*this, 1, spk)},
+                                            /*nFillerBlocks=*/4);
     CBlockIndex *pindex = LookupBlockIndex(block.GetHash());
     BOOST_REQUIRE(pindex != nullptr);
     BOOST_REQUIRE_GE(block.vtx.size(), 3U);
-
-    {
-        LOCK(cs_main);
-        pindex->nStatus &= ~BLOCK_HAVE_BODIES;
-    }
 
     ConnectedPeer peer(*m_node.peer_logic);
 
