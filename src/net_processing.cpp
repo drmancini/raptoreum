@@ -133,26 +133,36 @@ static_assert(MAX_STANDARD_TX_SIZE + 4096 < MAX_PROTOCOL_MESSAGE_LENGTH,
               "a single forced-through oversized body (BuildBodyRangeResponse's own first-body exception) "
               "must always fit in one P2P message too");
 
-/** 4.5.2 Part B (F-201): the byte ceiling SendBlockTransactions sums
- *  requested transactions' own serialized size against before committing to
- *  a single BLOCKTXN message. SendBlockTransactions previously built every
- *  requested transaction into ONE BlockTransactions object with zero size
- *  checking; at design-point scale (~373 B/tx average, F-30), as few as
- *  ~8,000 requested transactions already exceeds MAX_PROTOCOL_MESSAGE_LENGTH
- *  (3 MB, net.h) and gets THIS node disconnected by the peer it's replying
- *  to (net.cpp's oversized-message check). 2 MB gives a ~1 MiB / 33% safety
- *  margin under the 3 MB disconnect threshold (MEDIUM-confidence choice,
- *  F-197's own framing) -- generous enough to absorb BlockTransactions's own
- *  small fixed overhead (blockhash, the txn vector's CompactSize prefix,
- *  each element's own CompactSize length prefix under TransactionCompression)
- *  plus the P2P message header, none of which the per-tx GetSerializeSize
- *  sum in SendBlockTransactions counts, while still declining well before
- *  the peer's own hard disconnect line -- same shape as
- *  DEFAULT_MAX_BODYRANGE_BYTES's own margin just above. */
-static const uint64_t MAX_BLOCKTXN_RESPONSE_BYTES = 2 * 1024 * 1024;
-static_assert(MAX_BLOCKTXN_RESPONSE_BYTES + 4096 < MAX_PROTOCOL_MESSAGE_LENGTH,
-              "a BLOCKTXN response declined at the size ceiling must always have left room "
-              "for BlockTransactions's own overhead and the P2P message header");
+/** 4.5.2 Part B (F-201, redesigned F-202 per adversarial review): the byte
+ *  ceiling SendBlockTransactions sums requested transactions' own serialized
+ *  size against before committing to a single BLOCKTXN message.
+ *  SendBlockTransactions previously built every requested transaction into
+ *  ONE BlockTransactions object with zero size checking; at design-point
+ *  scale (~373 B/tx average, F-30), as few as ~8,000 requested transactions
+ *  already exceeds MAX_PROTOCOL_MESSAGE_LENGTH (3 MB, net.h) and gets THIS
+ *  node disconnected by the peer it's replying to (net.cpp's oversized-
+ *  message check).
+ *
+ *  F-202: the original fix (F-201) pinned this to a hardcoded 2 MB rather
+ *  than deriving it from MAX_PROTOCOL_MESSAGE_LENGTH -- review found this
+ *  regressed the (2 MB, 3 MB] range: a request that would have fit
+ *  comfortably under the real wire limit got declined anyway, on a ceiling
+ *  chosen with headroom to spare rather than derived from the actual
+ *  constraint. Deriving it here instead means nothing that could actually
+ *  have fit on the wire is declined, AND the ceiling tracks
+ *  MAX_PROTOCOL_MESSAGE_LENGTH automatically if/when that is raised later
+ *  (K-7, build-plan.md 1.4/4.6) -- no second constant to remember to update
+ *  in step. MAX_BLOCKTXN_RESPONSE_MARGIN (4096, matching
+ *  DEFAULT_MAX_BODYRANGE_BYTES's own margin just above) is generous headroom
+ *  for BlockTransactions's own small fixed overhead (32 B blockhash + up to
+ *  5 B CompactSize length prefix for the txn vector, ~37 B real cost) plus
+ *  the P2P message header, none of which the per-tx GetSerializeSize sum in
+ *  SendBlockTransactions counts. */
+static const uint64_t MAX_BLOCKTXN_RESPONSE_MARGIN = 4096;
+static const uint64_t MAX_BLOCKTXN_RESPONSE_BYTES = MAX_PROTOCOL_MESSAGE_LENGTH - MAX_BLOCKTXN_RESPONSE_MARGIN;
+static_assert(MAX_BLOCKTXN_RESPONSE_MARGIN > 32 + 5,
+              "the margin below MAX_PROTOCOL_MESSAGE_LENGTH must cover BlockTransactions's own blockhash "
+              "(32 B) plus its txn vector's CompactSize length prefix (up to 5 B)");
 
 /** 2.2.3b (F-143's accepted spec, announcerring.h): how many blocks behind
  *  the announcer ring's own EFFECTIVE height (CAnnouncerRing::EffectiveHeight
@@ -2443,13 +2453,14 @@ LOCKS_EXCLUDED(cs_main)
 
 inline void static
 SendBlockTransactions(const CBlock &block, const BlockTransactionsRequest &req, CNode *pfrom, CConnman *connman) {
-    // 4.5.2 Part B (F-201): bounds-check first (existing behavior), then sum
-    // each requested transaction's own serialized size before committing to
-    // a single BLOCKTXN message -- see MAX_BLOCKTXN_RESPONSE_BYTES's own
-    // comment for the margin's reasoning. GetSerializeSize here mirrors
-    // exactly what TransactionCompression (a plain DefaultFormatter, no
-    // compression scheme) will actually put on the wire for each element of
-    // BlockTransactions::txn -- confirmed by direct read of serialize.h.
+    // 4.5.2 Part B (F-201, redesigned F-202): bounds-check first (existing
+    // behavior), then sum each requested transaction's own serialized size
+    // before committing to a single BLOCKTXN message -- see
+    // MAX_BLOCKTXN_RESPONSE_BYTES's own comment for the ceiling's reasoning.
+    // GetSerializeSize here mirrors exactly what TransactionCompression (a
+    // plain DefaultFormatter, no compression scheme) will actually put on
+    // the wire for each element of BlockTransactions::txn -- confirmed by
+    // direct read of serialize.h.
     uint64_t nTotalSize = 0;
     for (size_t i = 0; i < req.indexes.size(); i++) {
         if (req.indexes[i] >= block.vtx.size()) {
@@ -2462,17 +2473,27 @@ SendBlockTransactions(const CBlock &block, const BlockTransactionsRequest &req, 
     }
 
     if (ShouldDeclineBlockTransactionsForSize(nTotalSize, MAX_BLOCKTXN_RESPONSE_BYTES)) {
-        // Reuse MAX_BLOCKTXN_DEPTH's own full-block fallback SHAPE just
-        // below (too OLD triggers it there; too BIG triggers it here) rather
-        // than inventing new wire continuation semantics for a message that
-        // has none today.
+        // F-202 (review): do NOT fall back to a full block here. The
+        // requested set is a SUBSET of block.vtx, so the full block
+        // serializes to at least nTotalSize -- if the subset didn't fit
+        // under the ceiling, the full block provably doesn't either. The
+        // original fallback (a CInv{MSG_BLOCK} GETDATA, MAX_BLOCKTXN_DEPTH's
+        // own shape) never prevented the disconnect it existed to avoid; it
+        // only delayed it by one round trip. Decline and log instead,
+        // mirroring this same handler's OWN existing "peer sent us a
+        // getblocktxn for a block we don't have" branch just below (no
+        // fallback queued there either) -- the requester already tracks
+        // this block as in-flight (MarkBlockAsInFlight, called before it
+        // ever sends GETBLOCKTXN) so its own existing stall/timeout recovery
+        // (BLOCK_STALLING_TIMEOUT, BLOCK_DOWNLOAD_TIMEOUT_BASE/_PER_PEER,
+        // validation.h, checked in SendMessages) takes over exactly as it
+        // does for any other block that never arrives -- no new machinery
+        // needed on either side.
         LogPrint(BCLog::NET,
-                 "Declining oversized BLOCKTXN response (%u bytes over a %u byte ceiling) to peer %d, falling back to a full block\n",
+                 "Declining oversized BLOCKTXN response (%u bytes over a %u byte ceiling) to peer %d; "
+                 "not falling back to a full block, which would be at least as large -- "
+                 "leaving this peer's own block-download timeout to recover\n",
                  nTotalSize, MAX_BLOCKTXN_RESPONSE_BYTES, pfrom->GetId());
-        CInv inv;
-        inv.type = MSG_BLOCK;
-        inv.hash = req.blockhash;
-        pfrom->vRecvGetData.push_back(inv);
         return;
     }
 
