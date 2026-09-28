@@ -19,6 +19,7 @@
 #include <chain.h>
 #include <chainparams.h>
 #include <checkpoints.h>
+#include <commitments_negotiation.h>
 #include <node/coinstats.h>
 #include <compat/sanity.h>
 #include <consensus/validation.h>
@@ -2880,6 +2881,27 @@ bool AppInitMain(const util::Ref &context, NodeContext &node, interfaces::BlockA
 
     // Map ports with UPnP
     StartMapPort(gArgs.GetBoolArg("-upnp", DEFAULT_UPNP), gArgs.GetBoolArg("-natpmp", DEFAULT_NATPMP));
+
+    // 4.6.2 (build-plan.md's 4.6 row): NODE_COMMITMENTS may also now be
+    // advertised once the real, height-gated activation bit is active --
+    // checked here rather than folded into the -commitmentblocks check
+    // above, since chain state (::ChainActive().Tip()) is not loaded yet at
+    // that earlier point and would always read as inactive. This correctly
+    // covers a node started fresh after activation. It does NOT cover a
+    // node already running when activation height is crossed: nLocalServices
+    // is fixed once, right here, and handed to CConnman below, and CNode's
+    // own copy (net.h) is `const`, fixed per-connection at accept/dial time
+    // -- neither is re-evaluated for the rest of this process's life.
+    // Making that live (re-read on every new connection, without a restart)
+    // needs CNode/CConnman's own service-bit plumbing made connection-time-
+    // dynamic, which is a broader change than this sub-step's "swap the
+    // trigger" scope -- flagged for the owner, not built here. Matches
+    // ordinary Bitcoin-Core-style fork deployment in practice: operators
+    // upgrade and restart around an activation, they do not run a single
+    // process across the boundary.
+    if (IsCommitmentFormatActive(::ChainActive().Tip())) {
+        nLocalServices = ServiceFlags(nLocalServices | NODE_COMMITMENTS);
+    }
 
     CConnman::Options connOptions;
     connOptions.nLocalServices = nLocalServices;
