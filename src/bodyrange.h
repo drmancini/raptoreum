@@ -231,7 +231,10 @@ bool ValidateBodyRangeChunkHashes(const CCommitmentBlock &commitments, uint32_t 
 
 /** 2.2.4 (build-plan.md's 2.2 row): the default aggregate cap on in-flight
  *  GETBODYRANGE requests across ALL peers at once (net_processing.cpp's own
- *  fetching client) -- not per-peer, a separate, still-unbuilt concern.
+ *  fetching client) -- not per-peer. 4.5.3 (F-202) built the per-peer
+ *  analogue alongside this one, `MAX_BODYRANGE_INFLIGHT_PER_PEER`
+ *  (net_processing.cpp -- file-local, unlike this constant, since nothing
+ *  else needs to share it the way init.cpp's help text needs this default).
  *  Shared between net_processing.cpp (the cap's own enforcement) and
  *  init.cpp (the -maxbodyrangeinflight help text default), matching
  *  DEFAULT_CHECKBLOCKS's own cross-file placement (validation.h). Single-
@@ -255,12 +258,26 @@ static const unsigned int DEFAULT_MAX_BODYRANGE_INFLIGHT = 16;
  *  arithmetic unchanged (only what the map is keyed on changed, per
  *  build-plan.md's 2.2.4 row); this function does not compute a backoff
  *  itself, it only asks whether the existing `nNextAttempt` has passed.
+ *  `nPeerInFlight`/`nMaxPeerInFlight` (4.5.3, F-202): the PER-PEER cap --
+ *  net_processing.cpp's own CNodeState::nBodyRangePeerInFlight against
+ *  MAX_BODYRANGE_INFLIGHT_PER_PEER, the still-per-candidate-peer analogue of
+ *  MAX_BLOCKS_IN_TRANSIT_PER_PEER (validation.h) for whole-block downloads.
+ *  Checked after the per-(peer,hash) eligibility above (announced + backoff)
+ *  but before the aggregate check below, since it is still scoped to THIS
+ *  candidate peer, just a resource limit rather than an eligibility fact --
+ *  a peer already sitting at its own cap is refused even when the aggregate
+ *  budget has room, exactly as a peer at MAX_BLOCKS_IN_TRANSIT_PER_PEER is
+ *  never offered a whole block regardless of any other peer's own state.
  *  `nInFlight`/`nMaxInFlight`: the aggregate cap, checked LAST since it is a
  *  global resource limit unrelated to this specific peer/hash pair's own
  *  eligibility -- a peer that is otherwise perfectly eligible still does
- *  not get a request once the cap is saturated. */
+ *  not get a request once the cap is saturated. The two caps are
+ *  independent ANDed conditions: composing with, never replacing, each
+ *  other -- a peer under its own per-peer cap can still be refused by the
+ *  aggregate cap, and vice versa. */
 bool ShouldRequestBodyRange(bool fWasAnnounced, int64_t nNow, int64_t nNextAttempt,
-                             unsigned int nInFlight, unsigned int nMaxInFlight);
+                             unsigned int nInFlight, unsigned int nMaxInFlight,
+                             unsigned int nPeerInFlight, unsigned int nMaxPeerInFlight);
 
 /** B3's per-block exponential backoff (docs/transaction-decoupling.md SS14.8:
  *  "must not key off accumulated work"), re-keyed to (peer, hash) rather
