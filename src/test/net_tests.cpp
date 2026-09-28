@@ -309,4 +309,64 @@ BOOST_AUTO_TEST_CASE(ipv4_peer_with_ipv6_addrMe_test)
                 BOOST_CHECK(1);
         }
 
+// 1.4 (K-7, F-217): MAX_PROTOCOL_MESSAGE_LENGTH's own boundary, exercised at
+// the real receive-side gate this task raised -- CNode::ReceiveMsgBytes
+// (net.cpp:663), not the lower-level CNetMessage::readHeader/readData calls
+// directly. A message declaring exactly MAX_PROTOCOL_MESSAGE_LENGTH is
+// accepted (the check is strictly '>'); one byte over disconnects. Neither
+// case needs any payload bytes: the check fires the moment the 24-byte
+// header is parsed and msg.in_data becomes true, before readData is ever
+// called (confirmed directly from net.cpp's own ReceiveMsgBytes loop), so
+// this stays a cheap, exact, deterministic test even though the real values
+// involved are tens of megabytes.
+static bool ReceiveDeclaredMessage(CNode &node, uint32_t nMessageSize) {
+        CMessageHeader hdr(Params().MessageStart(), "test", nMessageSize);
+        CDataStream hdrStream(SER_NETWORK, PROTOCOL_VERSION);
+        hdrStream << hdr;
+        bool complete = false;
+        return node.ReceiveMsgBytes(hdrStream.data(), hdrStream.size(), complete);
+}
+
+static std::unique_ptr<CNode> MakeTestNode() {
+        CAddress addr(CService(), NODE_NONE);
+        return MakeUnique<CNode>(0, NODE_NETWORK, 0, INVALID_SOCKET, addr, 0, 0, CAddress{}, std::string{}, false);
+}
+
+// Pins the actual chosen VALUE, not just the boundary shape -- the three
+// cases below all reference MAX_PROTOCOL_MESSAGE_LENGTH symbolically, so
+// they would pass identically whether this constant were still 3 MiB or
+// genuinely raised (confirmed the hard way: they passed unchanged when this
+// was checked against the pre-fix value during development). This is the
+// one assertion in the file that would actually fail pre-fix: MAX_SIZE
+// (serialize.h) is an independent constant this expression does not derive
+// from MAX_PROTOCOL_MESSAGE_LENGTH itself.
+BOOST_AUTO_TEST_CASE(protocol_message_length_is_max_size_minus_the_established_margin) {
+        BOOST_CHECK_EQUAL(MAX_PROTOCOL_MESSAGE_LENGTH, MAX_SIZE - 4096);
+}
+
+BOOST_AUTO_TEST_CASE(protocol_message_length_accepts_exactly_at_the_new_ceiling) {
+        std::unique_ptr<CNode> pnode = MakeTestNode();
+        BOOST_CHECK(ReceiveDeclaredMessage(*pnode, MAX_PROTOCOL_MESSAGE_LENGTH));
+}
+
+BOOST_AUTO_TEST_CASE(protocol_message_length_disconnects_one_byte_over_the_new_ceiling) {
+        // The mutation this is built to catch: if the check were ever
+        // reverted to '>=' or the constant silently widened, this is the
+        // case that would start passing again.
+        std::unique_ptr<CNode> pnode = MakeTestNode();
+        BOOST_CHECK(!ReceiveDeclaredMessage(*pnode, MAX_PROTOCOL_MESSAGE_LENGTH + 1));
+}
+
+// Defence in depth, proven rather than assumed: serialize.h's own
+// independent MAX_SIZE gate (CNetMessage::readHeader, net.cpp:737) still
+// exists and still fires on its own, one byte over ITS OWN ceiling --
+// confirming MAX_PROTOCOL_MESSAGE_LENGTH's static_assert (net.h) is
+// protecting a real, still-present second check, not one that was removed
+// or already unreachable.
+BOOST_AUTO_TEST_CASE(protocol_message_length_stays_strictly_below_the_independent_max_size_gate) {
+        BOOST_CHECK_LT(MAX_PROTOCOL_MESSAGE_LENGTH, MAX_SIZE);
+        std::unique_ptr<CNode> pnode = MakeTestNode();
+        BOOST_CHECK(!ReceiveDeclaredMessage(*pnode, MAX_SIZE + 1));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -77,8 +77,43 @@ static constexpr double MAX_ADDR_RATE_PER_SECOND = 0.1;
  *  is exempt from this limit). */
 static constexpr size_t
 MAX_ADDR_PROCESSING_TOKEN_BUCKET = MAX_ADDR_TO_SEND;
-/** Maximum length of incoming protocol messages (no message over 3 MiB is currently acceptable). */
-static const unsigned int MAX_PROTOCOL_MESSAGE_LENGTH = 3 * 1024 * 1024;
+/** Maximum length of incoming protocol messages.
+ *
+ *  1.4 (K-7, F-217): raised from upstream's 3 MiB. F-213 already found this
+ *  constant needs no synchronized/consensus activation to raise (net.cpp:663
+ *  -- CNode::ReceiveMsgBytes's own oversized-message disconnect -- is a
+ *  purely local, per-connection, receive-side check; two peers running
+ *  different values simply degrade, never diverge on chain state), and
+ *  4.5.2's own redesign (F-202: SendBlockTransactions declines an oversized
+ *  BLOCKTXN and leaves the requester's existing block-download stall/timeout
+ *  machinery to recover, rather than depending on this limit for
+ *  correctness) means raising it is a throughput improvement, not a
+ *  correctness requirement either.
+ *
+ *  The value is bounded by a SEPARATE, unconditional structural ceiling this
+ *  finding surfaced: serialize.h's own MAX_SIZE (32 MiB, ReadCompactSize's
+ *  universal sanity cap on every CompactSize-prefixed field, and also
+ *  CNetMessage::readHeader's own independent `nMessageSize > MAX_SIZE` gate,
+ *  net.cpp:737, checked BEFORE this constant is ever consulted). Raising
+ *  this past MAX_SIZE would be silently inert for receiving (readHeader
+ *  already disconnects first) and actively unsafe for sending (a node could
+ *  build and queue an outgoing message this constant calls "under the
+ *  ceiling" that the receiving peer's own readHeader then rejects and
+ *  disconnects over anyway -- see MAX_PROTOCOL_MESSAGE_LENGTH's own
+ *  static_assert below). Set to MAX_SIZE minus a fixed margin (4096,
+ *  reusing this codebase's own established margin convention --
+ *  net_processing.cpp's MAX_BLOCKTXN_RESPONSE_MARGIN/
+ *  DEFAULT_MAX_BODYRANGE_BYTES's static_asserts use the same value) so
+ *  net.cpp:663's own check remains the genuinely binding one rather than
+ *  becoming dead code shadowed by MAX_SIZE's own gate. */
+static const unsigned int MAX_PROTOCOL_MESSAGE_LENGTH = MAX_SIZE - 4096;
+static_assert(MAX_PROTOCOL_MESSAGE_LENGTH < MAX_SIZE,
+              "the P2P envelope ceiling must stay strictly below serialize.h's own unconditional "
+              "per-message sanity cap (ReadCompactSize's MAX_SIZE, enforced independently at "
+              "CNetMessage::readHeader before this constant is ever consulted) -- otherwise "
+              "net.cpp's own oversized-message disconnect (net.cpp:663) becomes permanently "
+              "unreachable dead code, and a node can queue an outgoing message this constant calls "
+              "safe that the receiving peer's own readHeader rejects anyway");
 /** Maximum length of strSubVer in `version` message */
 static const unsigned int MAX_SUBVERSION_LENGTH = 256;
 /** Maximum number of automatic outgoing nodes */
