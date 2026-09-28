@@ -543,6 +543,22 @@ public:
         updateManager.Add(
             Update(EUpdate::ROUND_VOTING, std::string("Round Voting"), 1, 10, 100, 5, 10, 5, false,
                 VoteThreshold(85, 85, 1), VoteThreshold(0, 0, 1)));
+        // F-214: mechanism-testing registration only. Reuses EUpdate::COMMITMENT_MODE
+        // (bit 3, already built by F-210) and mirrors ROUND_VOTING's shape above
+        // (thresholds, forcedUpdate=false, votingPeriod/votingMaxRounds/graceRounds)
+        // per F-213 point 5. startHeight=100,000,000 is a deliberate, structurally-
+        // unreachable placeholder, not a real activation height: it is 100,000,000
+        // rounds*roundSize away from any realistic devnet chain tip, and
+        // UpdateManager::State's own roundNumber<-1 early return (update/update.cpp)
+        // reports Defined for any such block without ever reaching the vote-counting
+        // path. NOT registered on mainnet or testnet -- F-213's owner coverage
+        // precondition (point 4) has not been run against real nodes yet, so no
+        // network with real, permanent history gets this bit at all, matching
+        // F-210's own prior "unregistered everywhere" precedent for the identical
+        // reason.
+        updateManager.Add(
+            Update(EUpdate::COMMITMENT_MODE, std::string("Commitment Mode"), 3, 10, 100000000, 5, 10, 5, false,
+                VoteThreshold(85, 85, 1), VoteThreshold(0, 0, 1)));
 
         // The best chain should have at least this much work.
         consensus.nMinimumChainWork = uint256S("0x000000000000000000000000000000000000000000000000000000000000000");
@@ -711,6 +727,18 @@ public:
         updateManager.Add(
             Update(EUpdate::ROUND_VOTING, std::string("Round Voting"), 1, 10, 100, 10, 100, 10, false,
                 VoteThreshold(95, 95, 5), VoteThreshold(0, 0, 1)));
+        // F-214: mechanism-testing registration only -- same reasoning as the devnet
+        // registration above (chainparams.cpp's own CDevNetParams section). Reuses
+        // EUpdate::COMMITMENT_MODE (bit 3, F-210), mirrors this network's own
+        // ROUND_VOTING shape (votingPeriod/votingMaxRounds/graceRounds), and per
+        // F-213 point 5 keeps minerThreshold VoteThreshold(85,85,1), nodeThreshold
+        // VoteThreshold(0,0,1) disabled, forcedUpdate=false. startHeight=100,000,000
+        // is the same deliberate, structurally-unreachable placeholder as devnet's --
+        // not a real activation height. NOT registered on mainnet or testnet; see the
+        // devnet registration's own comment for why.
+        updateManager.Add(
+            Update(EUpdate::COMMITMENT_MODE, std::string("Commitment Mode"), 3, 10, 100000000, 10, 100, 10, false,
+                VoteThreshold(85, 85, 1), VoteThreshold(0, 0, 1)));
 
         // The best chain should have at least this much work.
         consensus.nMinimumChainWork = uint256S("0x00");
