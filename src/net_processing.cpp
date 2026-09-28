@@ -37,6 +37,7 @@
 #include <util/validation.h>
 #include <validation.h>
 #include <memory>
+#include <set>
 
 #include <spork.h>
 #include <governance/governance.h>
@@ -515,25 +516,43 @@ namespace {
     std::map <uint256, BodyRangeAccumulation> mapBodyRangePartial
     GUARDED_BY(cs_main);
 
-    /** 4.2 (F-206, build-plan.md's 4.2 row): per-range coverage -- keyed by
-     *  CoverageRangeIndex(height, COVERAGE_RANGE_SIZE) (coveragetelemetry.h),
-     *  NOT by block hash and NOT per-peer. This is the cross-peer, standing
-     *  view of which spans of chain history this node has evidence for at
-     *  all -- populated from the BODYRANGE response handler below, on every
-     *  peer's first-chunk (nStartIndex == 0) answer, hit or miss. See
-     *  net_processing.h's GetBodyRangeCoverageStats for the read side.
+    /** 4.2 (F-206, build-plan.md's 4.2 row); F-212 (rework, docs/findings.md):
+     *  the cross-peer coverage ledger -- keyed by absolute block HEIGHT
+     *  (coveragetelemetry.h's CoverageHeightMap), NOT by CoverageRangeIndex
+     *  bucket and NOT per-peer. This is the cross-peer, standing view of
+     *  which spans of chain history this node has evidence for at all --
+     *  populated from the BODYRANGE response handler below (first-chunk
+     *  observations, gated on nStartIndex == 0 exactly as before) AND from
+     *  the body-range COMPLETION point (F-212's own new hook: the height's
+     *  status only reaches HeightCoverageStatus::FULL once
+     *  ProcessFetchedBodyRange has actually confirmed the block's whole body
+     *  was reconstructed, closing F-209's own gap 2 -- a peer serving only
+     *  chunk 0 and withholding the rest now shows PARTIAL forever, not a
+     *  clean hit). Every observation is deduped by height
+     *  (RecordCoverageObservation's own monotonic-upgrade rule), closing
+     *  F-209's own gap 1: a block retried 18 times before succeeding leaves
+     *  exactly one record, not 17 misses plus 1 hit. See net_processing.h's
+     *  GetBodyRangeCoverageStats/GetBodyRangeCoverageHeights for the read
+     *  side.
      *
-     *  In-memory only, matching this file's own established precedent for
-     *  similar transient body-range state (mapBodyRangeInFlight,
-     *  mapBodyRangePartial, g_body_retry_state all reset on restart too):
-     *  SS14.5's own "a query and a counter, not a challenge economy" framing
-     *  does not require this to survive a restart, and losing it only means
-     *  re-accumulating going forward, not losing a security property. Never
-     *  pruned or rotated -- a live mainnet-scale deployment running this for
-     *  a long time may eventually want an eviction/rollup policy once the
-     *  bucket count grows large; flagged, not built here (docs/findings.md's
-     *  F-206). */
-    std::map<int, RangeCoverageStats> mapBodyRangeCoverage
+     *  Persisted (F-212's own gap-3 fix, superseding F-208's original
+     *  in-memory-only design): GetCoverageTelemetrySnapshot/
+     *  LoadCoverageTelemetrySnapshot below are the copy-out/copy-in seam
+     *  init.cpp uses to dump this to, and load it back from,
+     *  coveragetelemetry.dat (coveragetelemetry.h's CCoverageTelemetryCache,
+     *  matching this codebase's own established CFlatDB<T> convention) at
+     *  shutdown, periodically, and at startup -- so a restart no longer
+     *  discards accumulated history-wide evidence, matching SS14.5's own
+     *  requirement that the activation criterion see history-wide coverage,
+     *  not just what this node happened to need to fetch since its last
+     *  restart.
+     *
+     *  Still never pruned or rotated in memory -- a live mainnet-scale
+     *  deployment running this for a very long time could eventually
+     *  accumulate one record per block height ever observed, with no
+     *  eviction/rollup policy; flagged, not built here (coveragetelemetry.h's
+     *  own top-of-file doc comment, docs/findings.md's F-212). */
+    CoverageHeightMap mapBodyRangeCoverage
     GUARDED_BY(cs_main);
 
     /** F-158: how long an accumulation may sit untouched before it's
@@ -1669,20 +1688,69 @@ bool GetNodeStateStats(NodeId nodeid, CNodeStateStats &stats) {
     return true;
 }
 
-// 4.2 (F-206, build-plan.md's 4.2 row): the read side of mapBodyRangeCoverage
-// above -- returns every bucket that has at least one recorded observation.
-// See net_processing.h's own doc for what a caller (an RPC, or a future 4.6
-// activation criterion) is expected to do with this.
+// 4.2 (F-206, build-plan.md's 4.2 row); F-212: the read side of
+// mapBodyRangeCoverage above -- returns one rolled-up entry per bucket that
+// has at least one observed height in it. Unlike the pre-F-212 version, this
+// is no longer a direct map lookup (mapBodyRangeCoverage is keyed by height
+// now, not by bucket) -- it derives the distinct set of touched buckets by a
+// single linear pass over the height-keyed ledger, then rolls each one up
+// via coveragetelemetry.h's own SummarizeCoverageRange. See net_processing.h's
+// own doc for what a caller (an RPC, or a future 4.6 activation criterion) is
+// expected to do with this, and GetBodyRangeCoverageHeights below for the
+// per-height detail this rollup cannot itself provide (SS14.9's own
+// contiguous-vs-scattered distinction).
 void GetBodyRangeCoverageStats(std::vector<BodyRangeCoverageEntry> &vStatsOut) {
     vStatsOut.clear();
     LOCK(cs_main);
+
+    std::set<int> setTouchedBuckets;
     for (const auto &kv: mapBodyRangeCoverage) {
+        setTouchedBuckets.insert(CoverageRangeIndex(kv.first, COVERAGE_RANGE_SIZE));
+    }
+
+    for (int nBucket: setTouchedBuckets) {
         BodyRangeCoverageEntry entry;
-        entry.nRangeStartHeight = kv.first * COVERAGE_RANGE_SIZE;
+        entry.nRangeStartHeight = nBucket * COVERAGE_RANGE_SIZE;
         entry.nRangeEndHeightInclusive = entry.nRangeStartHeight + COVERAGE_RANGE_SIZE - 1;
-        entry.stats = kv.second;
+        entry.stats = SummarizeCoverageRange(mapBodyRangeCoverage, entry.nRangeStartHeight,
+                                              entry.nRangeEndHeightInclusive);
         vStatsOut.push_back(entry);
     }
+}
+
+// F-212: the per-height detail read side -- a bounded scan of the ledger
+// between the caller's own start/end heights, returned in ascending order.
+void GetBodyRangeCoverageHeights(int nStartHeight, int nEndHeightInclusive,
+                                  std::vector<BodyRangeCoverageHeightEntry> &vHeightsOut) {
+    vHeightsOut.clear();
+    LOCK(cs_main);
+    auto it = mapBodyRangeCoverage.lower_bound(nStartHeight);
+    auto itEnd = mapBodyRangeCoverage.upper_bound(nEndHeightInclusive);
+    for (; it != itEnd; ++it) {
+        BodyRangeCoverageHeightEntry entry;
+        entry.nHeight = it->first;
+        entry.status = it->second.status;
+        entry.nFirstObservedTime = it->second.nFirstObservedTime;
+        entry.nLastObservedTime = it->second.nLastObservedTime;
+        entry.nLastChangeTime = it->second.nLastChangeTime;
+        vHeightsOut.push_back(entry);
+    }
+}
+
+// F-212 (gap 3): the copy-out seam init.cpp uses at shutdown/periodically to
+// feed CFlatDB<CCoverageTelemetryCache>::Dump -- see net_processing.h's own
+// doc comment.
+void GetCoverageTelemetrySnapshot(CoverageHeightMap &out) {
+    LOCK(cs_main);
+    out = mapBodyRangeCoverage;
+}
+
+// F-212 (gap 3): the copy-in seam init.cpp uses once, at startup, after
+// CFlatDB<CCoverageTelemetryCache>::Load fills a fresh CCoverageTelemetryCache
+// from coveragetelemetry.dat -- see net_processing.h's own doc comment.
+void LoadCoverageTelemetrySnapshot(const CoverageHeightMap &snapshot) {
+    LOCK(cs_main);
+    MergeCoverageTelemetrySnapshot(mapBodyRangeCoverage, snapshot);
 }
 
 // F-207 (independent adversarial review of F-206): test-only seam. This
@@ -3991,25 +4059,29 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
                     RecordBodyRangeTally(peerState->bodyRangeTally, /*fHit=*/false);
                 }
                 //
-                // 4.2 (F-206): also a per-range COVERAGE observation, but
-                // only on the first chunk of a fetch (nStartIndex == 0) --
-                // bodyrange.h's own MISS classification means "unresolvable
-                // or unserveable now", independent of nStartIndex, so a miss
-                // on a LATER chunk of an already-partially-fetched block
-                // (e.g. the block was withdrawn mid-transfer) is not an
-                // honest "this peer never had any of it" signal the way a
-                // first-chunk miss is, and would otherwise let one abandoned
-                // multi-chunk fetch skew a bucket's counts relative to a
-                // single-chunk one. Unlike the per-peer tally just above,
-                // this is deliberately NOT keyed to this specific peer --
-                // mapBodyRangeCoverage is the cross-peer, standing view of
-                // the range itself.
+                // 4.2 (F-206); F-212: also a cross-peer COVERAGE
+                // observation, but only on the first chunk of a fetch
+                // (nStartIndex == 0) -- bodyrange.h's own MISS
+                // classification means "unresolvable or unserveable now",
+                // independent of nStartIndex, so a miss on a LATER chunk of
+                // an already-partially-fetched block (e.g. the block was
+                // withdrawn mid-transfer) is not an honest "this peer never
+                // had any of it" signal the way a first-chunk miss is.
+                // Under F-212's own per-height dedup this gating is no
+                // longer load-bearing for avoiding double-counting (a later
+                // miss can never downgrade an already-PARTIAL/FULL height
+                // either way), but the underlying reasoning -- a later-chunk
+                // miss says something about ONE peer's mid-transfer
+                // behaviour, not "this height has never been served" --
+                // still holds, so the gate is kept. Unlike the per-peer
+                // tally just above, this is deliberately NOT keyed to this
+                // specific peer -- mapBodyRangeCoverage is the cross-peer,
+                // standing view of the height itself.
                 if (resp.nStartIndex == 0) {
                     CBlockIndex *pindexMissed = LookupBlockIndex(resp.hashBlock);
                     if (pindexMissed != nullptr) {
-                        RecordCoverageObservation(
-                            mapBodyRangeCoverage[CoverageRangeIndex(pindexMissed->nHeight, COVERAGE_RANGE_SIZE)],
-                            /*fHit=*/false, GetTimeMicros());
+                        RecordCoverageObservation(mapBodyRangeCoverage, pindexMissed->nHeight,
+                                                   HeightCoverageStatus::MISS, GetTimeMicros());
                     }
                 }
                 return true;
@@ -4074,9 +4146,15 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
             if (CNodeState *peerState = State(pfrom->GetId())) {
                 RecordBodyRangeTally(peerState->bodyRangeTally, /*fHit=*/true);
             }
+            // F-212: a validated first chunk is only PARTIAL evidence now,
+            // not a full hit -- it proves someone served the START of this
+            // height's body, never (by itself) that the whole thing was
+            // ever reconstructed. See the completion hook further down
+            // (after ProcessFetchedBodyRange succeeds) for the FULL signal,
+            // which is what actually closes gap 2.
             if (resp.nStartIndex == 0) {
-                RecordCoverageObservation(mapBodyRangeCoverage[CoverageRangeIndex(pindex->nHeight, COVERAGE_RANGE_SIZE)],
-                                           /*fHit=*/true, GetTimeMicros());
+                RecordCoverageObservation(mapBodyRangeCoverage, pindex->nHeight, HeightCoverageStatus::PARTIAL,
+                                           GetTimeMicros());
             }
 
             // F-159 (second independent review, CONFIRMED MEDIUM -- a
@@ -4158,6 +4236,26 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
                 // -- nothing further to do here either way.
                 return true;
             }
+
+            // F-212 (gap 2's own fix): `ok` here means
+            // ProcessFetchedBodyRange has just confirmed this height's
+            // COMPLETE body was reconstructed and validated -- every chunk
+            // hash-checked on arrival (this handler's own F-207/F-158
+            // machinery above), acc.vBodies.size() == BodyRangeWantedCount
+            // (the "more chunks needed" branch above already returned
+            // otherwise). This is the strongest coverage signal this data
+            // model has, and the one piece of information the OLD
+            // first-chunk-only recording above could never see: a peer
+            // serving chunk 0 and silently withholding the rest never
+            // reaches this point (acc.vBodies.size() stays short of
+            // BodyRangeWantedCount forever, and the accumulation is
+            // eventually reaped as stale -- BODY_RANGE_PARTIAL_STALE_MICROS
+            // above), so that height's status simply never advances past
+            // PARTIAL. Recorded independent of resp.nStartIndex
+            // deliberately -- completion is a fact about the WHOLE height,
+            // not about which chunk happened to arrive last.
+            RecordCoverageObservation(mapBodyRangeCoverage, pindex->nHeight, HeightCoverageStatus::FULL,
+                                       GetTimeMicros());
 
             fShouldActivateBestChain = true;
         } // release cs_main before calling ActivateBestChain

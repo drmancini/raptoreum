@@ -497,24 +497,35 @@ UniValue getnettotals(const JSONRPCRequest &request) {
 }
 
 // 4.2 (F-206, build-plan.md's 4.2 row; docs/transaction-decoupling.md
-// SS14.5/SS14.9): the RPC surface for per-range coverage telemetry -- the
-// query SS14.5's activation criterion (4.6) or an operator needs, matching
-// this file's own established getpeerinfo/getnettotals shape (a plain data
-// dump, no gating logic, no I/O beyond the in-memory map). Read-only:
-// consensus-adjacency caution (this phase's own scope limit) means this must
-// never be able to influence validation, and it does not -- it only reads
-// mapBodyRangeCoverage back through GetBodyRangeCoverageStats.
+// SS14.5/SS14.9); F-212 (this rework): the RPC surface for per-range coverage
+// telemetry -- the query SS14.5's activation criterion (4.6) or an operator
+// needs, matching this file's own established getpeerinfo/getnettotals shape
+// (a plain data dump, no gating logic, no I/O beyond the in-memory map).
+// Read-only: consensus-adjacency caution (this phase's own scope limit) means
+// this must never be able to influence validation, and it does not -- it
+// only reads mapBodyRangeCoverage back through GetBodyRangeCoverageStats.
+//
+// F-212's own output rework: "hits"/"misses"/"lasthit"/"lastmiss" are gone,
+// replaced by "full"/"partial"/"misses" (distinct HEIGHT counts, deduped --
+// see coveragetelemetry.h's HeightCoverageStatus) and a single "lastchange"
+// (the most recent status UPGRADE in this bucket, coveragetelemetry.h's own
+// CoverageHeightRecord::nLastChangeTime doc). This is a deliberate breaking
+// change to a pre-production RPC (no external consumer exists yet) rather
+// than a field bolted on beside numbers the rework proved were miscounted.
 UniValue getbodyrangecoverage(const JSONRPCRequest &request) {
     RPCHelpMan{"getbodyrangecoverage",
-               "\n4.2: passive per-range body coverage telemetry (docs/transaction-decoupling.md\n"
-               "SS14.9). For every block-height bucket this node has observed at least one\n"
-               "first-chunk GETBODYRANGE round trip in, from any peer, since startup: the\n"
-               "accumulated hit/miss counts and first/last-seen timestamps. A query and a\n"
-               "counter (SS14.5), not a classifier -- telling honest loss (oldest-first,\n"
-               "file-aligned, scattered, or a shrinking gap) apart from deliberate erasure\n"
-               "(contiguous, mid-history, aligned to nothing, stable) is left to a caller\n"
-               "polling this repeatedly and reading the shape; this RPC does not judge it.\n"
-               "Buckets with zero observations are omitted.\n",
+               "\n4.2/F-212: passive per-range body coverage telemetry (docs/transaction-decoupling.md\n"
+               "SS14.9). For every block-height bucket this node has at least one OBSERVED\n"
+               "height in: how many distinct heights in that bucket reached each coverage\n"
+               "level (misses-only, first-chunk-only/\"partial\", full-body-reconstructed/\"full\"),\n"
+               "deduped per height -- a height retried many times before succeeding counts once,\n"
+               "at its best-ever status, never once per attempt. A query and a counter (SS14.5),\n"
+               "not a classifier -- telling honest loss (oldest-first, file-aligned, scattered, or\n"
+               "a shrinking gap) apart from deliberate erasure (contiguous, mid-history, aligned to\n"
+               "nothing, stable) is left to a caller polling this repeatedly and reading the shape;\n"
+               "this RPC does not judge it, and a bucket rollup alone cannot show WHERE within the\n"
+               "bucket the gaps are -- see getbodyrangecoverageheights for that detail.\n"
+               "Buckets with zero observed heights are omitted.\n",
                {},
                RPCResult{
                        RPCResult::Type::OBJ, "", "",
@@ -529,16 +540,16 @@ UniValue getbodyrangecoverage(const JSONRPCRequest &request) {
                                                   "First height in this bucket"},
                                                  {RPCResult::Type::NUM, "endheight",
                                                   "Last height in this bucket (inclusive)"},
-                                                 {RPCResult::Type::NUM, "hits",
-                                                  "Round trips (from any peer) that returned a non-empty body for a block in this bucket"},
+                                                 {RPCResult::Type::NUM, "full",
+                                                  "Distinct heights in this bucket whose full body was confirmed reconstructed at least once"},
+                                                 {RPCResult::Type::NUM, "partial",
+                                                  "Distinct heights in this bucket seen (first chunk validated) but never confirmed fully reconstructed"},
                                                  {RPCResult::Type::NUM, "misses",
-                                                  "Round trips (from any peer) that returned empty for a block in this bucket"},
+                                                  "Distinct heights in this bucket with only miss responses, never any positive evidence"},
                                                  {RPCResult::Type::NUM_TIME, "firstobserved",
-                                                  "The " + UNIX_EPOCH_TIME + " this bucket was first observed"},
-                                                 {RPCResult::Type::NUM_TIME, "lasthit",
-                                                  "The " + UNIX_EPOCH_TIME + " of the most recent hit in this bucket, 0 if none"},
-                                                 {RPCResult::Type::NUM_TIME, "lastmiss",
-                                                  "The " + UNIX_EPOCH_TIME + " of the most recent miss in this bucket, 0 if none"},
+                                                  "The " + UNIX_EPOCH_TIME + " the earliest height in this bucket was first observed"},
+                                                 {RPCResult::Type::NUM_TIME, "lastchange",
+                                                  "The " + UNIX_EPOCH_TIME + " of the most recent status upgrade among heights in this bucket, 0 if none"},
                                          }},
                                 }},
                        }
@@ -560,20 +571,100 @@ UniValue getbodyrangecoverage(const JSONRPCRequest &request) {
         UniValue r(UniValue::VOBJ);
         r.pushKV("startheight", entry.nRangeStartHeight);
         r.pushKV("endheight", entry.nRangeEndHeightInclusive);
-        r.pushKV("hits", entry.stats.tally.nHits);
-        r.pushKV("misses", entry.stats.tally.nMisses);
+        r.pushKV("full", entry.stats.nFull);
+        r.pushKV("partial", entry.stats.nPartial);
+        r.pushKV("misses", entry.stats.nMissOnly);
         // Recorded internally in microseconds (GetTimeMicros(), matching
         // this codebase's own body-range staleness/backoff convention,
         // net_processing.cpp) -- reported here in whole seconds, matching
         // every other NUM_TIME field in this file (e.g. pingtime's own
         // "/1e6" conversion above).
         r.pushKV("firstobserved", entry.stats.nFirstObservedTime / 1000000);
-        r.pushKV("lasthit", entry.stats.nLastHitTime / 1000000);
-        r.pushKV("lastmiss", entry.stats.nLastMissTime / 1000000);
+        r.pushKV("lastchange", entry.stats.nLastChangeTime / 1000000);
         ranges.push_back(r);
     }
     obj.pushKV("ranges", ranges);
     return obj;
+}
+
+// F-212 (gap 1's own shape-detail escape hatch): the per-height counterpart
+// to getbodyrangecoverage above -- a bucket rollup cannot tell a contiguous
+// erasure apart from scattered corruption (SS14.9's own example table), so
+// this returns the raw, deduped per-height records a caller needs to see
+// that shape for itself. Bounded by required start/end params, matching
+// this file's own general convention of never letting a plain data-read RPC
+// do unbounded work.
+UniValue getbodyrangecoverageheights(const JSONRPCRequest &request) {
+    RPCHelpMan{"getbodyrangecoverageheights",
+               "\nF-212: per-height coverage detail for a bounded height range -- the raw,\n"
+               "deduped record behind getbodyrangecoverage's own bucket rollup, for a caller\n"
+               "that needs to see WHICH heights in a range are covered and which are not (e.g.\n"
+               "to tell a 300-block contiguous erasure apart from 300 scattered corrupt blocks,\n"
+               "docs/transaction-decoupling.md SS14.9's own example -- both roll up to the same\n"
+               "bucket-level miss count). Only heights with at least one observation are\n"
+               "returned; an absent height in the requested range has never been observed at\n"
+               "all (SS14.9's own \"never asked\" case, distinct from a genuine miss).\n",
+               {
+                       {"start_height", RPCArg::Type::NUM, RPCArg::Optional::NO,
+                        "First height to query (inclusive)"},
+                       {"end_height", RPCArg::Type::NUM, RPCArg::Optional::NO,
+                        "Last height to query (inclusive)"},
+               },
+               RPCResult{
+                       RPCResult::Type::ARR, "", "",
+                       {
+                               {RPCResult::Type::OBJ, "", "",
+                                {
+                                        {RPCResult::Type::NUM, "height", "The block height"},
+                                        {RPCResult::Type::STR, "status",
+                                         "One of \"miss\", \"partial\" (first chunk seen, never confirmed fully reconstructed), or \"full\" (fully reconstructed at least once)"},
+                                        {RPCResult::Type::NUM_TIME, "firstobserved",
+                                         "The " + UNIX_EPOCH_TIME + " this height was first observed"},
+                                        {RPCResult::Type::NUM_TIME, "lastobserved",
+                                         "The " + UNIX_EPOCH_TIME + " of the most recent observation of any kind for this height"},
+                                        {RPCResult::Type::NUM_TIME, "lastchange",
+                                         "The " + UNIX_EPOCH_TIME + " of the most recent status upgrade for this height"},
+                                }},
+                       }
+               },
+               RPCExamples{
+                       HelpExampleCli("getbodyrangecoverageheights", "100000 100999")
+                       + HelpExampleRpc("getbodyrangecoverageheights", "100000, 100999")
+               },
+    }.Check(request);
+
+    const int nStartHeight = request.params[0].get_int();
+    const int nEndHeightInclusive = request.params[1].get_int();
+    if (nEndHeightInclusive < nStartHeight) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "end_height must be >= start_height");
+    }
+
+    std::vector <BodyRangeCoverageHeightEntry> vHeights;
+    GetBodyRangeCoverageHeights(nStartHeight, nEndHeightInclusive, vHeights);
+
+    UniValue ranges(UniValue::VARR);
+    for (const BodyRangeCoverageHeightEntry &entry: vHeights) {
+        UniValue r(UniValue::VOBJ);
+        r.pushKV("height", entry.nHeight);
+        switch (entry.status) {
+            case HeightCoverageStatus::FULL:
+                r.pushKV("status", "full");
+                break;
+            case HeightCoverageStatus::PARTIAL:
+                r.pushKV("status", "partial");
+                break;
+            case HeightCoverageStatus::MISS:
+            case HeightCoverageStatus::NOT_OBSERVED:
+            default:
+                r.pushKV("status", "miss");
+                break;
+        }
+        r.pushKV("firstobserved", entry.nFirstObservedTime / 1000000);
+        r.pushKV("lastobserved", entry.nLastObservedTime / 1000000);
+        r.pushKV("lastchange", entry.nLastChangeTime / 1000000);
+        ranges.push_back(r);
+    }
+    return ranges;
 }
 
 static UniValue GetNetworksInfo() {
@@ -946,6 +1037,7 @@ static const CRPCCommand commands[] =
                 {"network", "getaddednodeinfo",   &getaddednodeinfo,   {"node"}},
                 {"network", "getnettotals",       &getnettotals,       {}},
                 {"network", "getbodyrangecoverage", &getbodyrangecoverage, {}},
+                {"network", "getbodyrangecoverageheights", &getbodyrangecoverageheights, {"start_height", "end_height"}},
                 {"network", "getnetworkinfo",     &getnetworkinfo,     {}},
                 {"network", "setban",             &setban,             {"subnet",  "command", "bantime", "absolute"}},
                 {"network", "listbanned",         &listbanned,         {}},
