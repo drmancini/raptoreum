@@ -207,9 +207,58 @@ extern std::atomic<int> g_perf_withhold_count;
 
 /** 1.2 (D-18, F-88): gates the committed-count sigop budget (COMMITMENT_BUDGET_SIGOPS)
  *  in place of the byte-indexed legacy cap, and switches ATMP/ConnectBlock to
- *  GetAccurateSigOpCount. Test-only until 4.6 has a real deployment bit --
- *  mirrors g_perf_withhold_* above, not a consensus parameter yet. */
+ *  GetAccurateSigOpCount.
+ *
+ *  4.6.1 (F-207): wired to the real EUpdate::COMMITMENT_MODE bit, closing
+ *  TODO(4.6). This variable itself is unchanged -- every one of its ~15
+ *  read sites (CheckBlock, ContextualCheckBlock, CheckCommitmentBlock,
+ *  ContextualCheckCommitmentBlock, AcceptToMemoryPool, miner.cpp block
+ *  assembly, rpc/mining.cpp reporting) still reads this same global, same as
+ *  before -- what changed is who writes it and when:
+ *
+ *   - For anything evaluating "now" (mempool policy, block assembly, RPC
+ *     reporting, and the not-reindexed CheckBlock/ContextualCheckBlock/
+ *     CheckCommitmentBlock/ContextualCheckCommitmentBlock calls a genuinely
+ *     NEW block goes through): refreshed from Updates().IsActive(
+ *     EUpdate::COMMITMENT_MODE, tip) on every real tip connection
+ *     (dsnotificationinterface.cpp's UpdatedBlockTip), mirroring
+ *     fDIP0001ActiveAtTip's own established pattern exactly.
+ *
+ *   - For ConnectBlock and AcceptBlock specifically -- the two functions a
+ *     `-reindex`/`-reindex-chainstate` replay revisits once per HISTORICAL
+ *     block, each at that block's own real height, including blocks from
+ *     long before any real activation -- CommitmentModeAtHeight (below)
+ *     pins this global to that SPECIFIC pindex's own
+ *     Updates().IsActive(EUpdate::COMMITMENT_MODE, pindex) value for the
+ *     duration of the call, restoring the prior (tip-cache) value on
+ *     return. This is what actually closes TODO(4.6): a replay can no
+ *     longer apply a later block's (or the final tip's) activation state to
+ *     an earlier block, because every nested check underneath ConnectBlock/
+ *     AcceptBlock -- including their own internal CheckBlock/
+ *     ContextualCheckBlock/CheckCommitmentBlock/ContextualCheckCommitmentBlock
+ *     calls -- reads the pinned, per-block-correct value transitively.
+ *
+ *  Production default is unchanged either way: EUpdate::COMMITMENT_MODE is
+ *  not registered on any network yet (see update.h), so IsActive() is false
+ *  everywhere today, exactly like this flag's own permanent default. */
 extern std::atomic<bool> g_commitmentBudgetActive;
+
+/** 4.6.1 (F-207): RAII guard that pins g_commitmentBudgetActive to ONE
+ *  specific, already-indexed block's real per-height EUpdate::COMMITMENT_MODE
+ *  activation state for the guard's lifetime, restoring the previous value
+ *  on destruction. See g_commitmentBudgetActive's own comment above for why
+ *  this exists and which two functions install it. Single-threaded under
+ *  cs_main, same as every other g_commitmentBudgetActive writer -- not safe
+ *  to nest two instances covering different pindexes concurrently, and
+ *  ConnectBlock/AcceptBlock never do. */
+class CommitmentModeAtHeight {
+public:
+    explicit CommitmentModeAtHeight(const CBlockIndex *pindex);
+    ~CommitmentModeAtHeight();
+
+private:
+    bool previousValue;
+};
 
 /** Do we hold the transaction bodies for this block?
  *
