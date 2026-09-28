@@ -142,6 +142,19 @@ UniValue getpeerinfo(const JSONRPCRequest &request) {
                                                          {RPCResult::Type::NUM, "n",
                                                           "The heights of blocks we're currently asking from this peer"},
                                                  }},
+                                                {RPCResult::Type::NUM, "bodyrange_hits", true /*optional*/,
+                                                 "4.2 (F-206): validated GETBODYRANGE responses from this peer that "
+                                                 "were not empty, since the connection was established. Only present "
+                                                 "once at least one response has been observed."},
+                                                {RPCResult::Type::NUM, "bodyrange_misses", true /*optional*/,
+                                                 "4.2 (F-206): validated GETBODYRANGE responses from this peer that "
+                                                 "were empty (an honest miss -- withheld or never had it), since the "
+                                                 "connection was established. Only present once at least one response "
+                                                 "has been observed."},
+                                                {RPCResult::Type::NUM, "bodyrange_missrate", true /*optional*/,
+                                                 "bodyrange_misses / (bodyrange_hits + bodyrange_misses). Only present "
+                                                 "once at least one response has been observed -- a 0/0 rate would be "
+                                                 "indistinguishable from '0% miss rate' rather than 'never asked'."},
                                                 {RPCResult::Type::BOOL, "whitelisted",
                                                  "Whether the peer is whitelisted"},
                                                 {RPCResult::Type::OBJ_DYN, "bytessent_per_msg", "",
@@ -231,6 +244,16 @@ UniValue getpeerinfo(const JSONRPCRequest &request) {
                 heights.push_back(height);
             }
             obj.pushKV("inflight", heights);
+            // 4.2 (F-206): per-peer body-range miss-rate telemetry -- omit
+            // entirely rather than emit a misleading 0/0, matching
+            // pingtime's own "if available" convention above.
+            uint64_t nBodyRangeTotal = statestats.nBodyRangeHits + statestats.nBodyRangeMisses;
+            if (nBodyRangeTotal > 0) {
+                obj.pushKV("bodyrange_hits", statestats.nBodyRangeHits);
+                obj.pushKV("bodyrange_misses", statestats.nBodyRangeMisses);
+                obj.pushKV("bodyrange_missrate",
+                           (double) statestats.nBodyRangeMisses / (double) nBodyRangeTotal);
+            }
         }
         obj.pushKV("whitelisted", stats.fWhitelisted);
         obj.pushKV("addr_processed", stats.nAddrProcessed);
@@ -470,6 +493,86 @@ UniValue getnettotals(const JSONRPCRequest &request) {
     outboundLimit.pushKV("bytes_left_in_cycle", node.connman->GetOutboundTargetBytesLeft());
     outboundLimit.pushKV("time_left_in_cycle", node.connman->GetMaxOutboundTimeLeftInCycle());
     obj.pushKV("uploadtarget", outboundLimit);
+    return obj;
+}
+
+// 4.2 (F-206, build-plan.md's 4.2 row; docs/transaction-decoupling.md
+// SS14.5/SS14.9): the RPC surface for per-range coverage telemetry -- the
+// query SS14.5's activation criterion (4.6) or an operator needs, matching
+// this file's own established getpeerinfo/getnettotals shape (a plain data
+// dump, no gating logic, no I/O beyond the in-memory map). Read-only:
+// consensus-adjacency caution (this phase's own scope limit) means this must
+// never be able to influence validation, and it does not -- it only reads
+// mapBodyRangeCoverage back through GetBodyRangeCoverageStats.
+UniValue getbodyrangecoverage(const JSONRPCRequest &request) {
+    RPCHelpMan{"getbodyrangecoverage",
+               "\n4.2: passive per-range body coverage telemetry (docs/transaction-decoupling.md\n"
+               "SS14.9). For every block-height bucket this node has observed at least one\n"
+               "first-chunk GETBODYRANGE round trip in, from any peer, since startup: the\n"
+               "accumulated hit/miss counts and first/last-seen timestamps. A query and a\n"
+               "counter (SS14.5), not a classifier -- telling honest loss (oldest-first,\n"
+               "file-aligned, scattered, or a shrinking gap) apart from deliberate erasure\n"
+               "(contiguous, mid-history, aligned to nothing, stable) is left to a caller\n"
+               "polling this repeatedly and reading the shape; this RPC does not judge it.\n"
+               "Buckets with zero observations are omitted.\n",
+               {},
+               RPCResult{
+                       RPCResult::Type::OBJ, "", "",
+                       {
+                               {RPCResult::Type::NUM, "rangesize",
+                                "The width, in blocks, of one coverage bucket"},
+                               {RPCResult::Type::ARR, "ranges", "",
+                                {
+                                        {RPCResult::Type::OBJ, "", "",
+                                         {
+                                                 {RPCResult::Type::NUM, "startheight",
+                                                  "First height in this bucket"},
+                                                 {RPCResult::Type::NUM, "endheight",
+                                                  "Last height in this bucket (inclusive)"},
+                                                 {RPCResult::Type::NUM, "hits",
+                                                  "Round trips (from any peer) that returned a non-empty body for a block in this bucket"},
+                                                 {RPCResult::Type::NUM, "misses",
+                                                  "Round trips (from any peer) that returned empty for a block in this bucket"},
+                                                 {RPCResult::Type::NUM_TIME, "firstobserved",
+                                                  "The " + UNIX_EPOCH_TIME + " this bucket was first observed"},
+                                                 {RPCResult::Type::NUM_TIME, "lasthit",
+                                                  "The " + UNIX_EPOCH_TIME + " of the most recent hit in this bucket, 0 if none"},
+                                                 {RPCResult::Type::NUM_TIME, "lastmiss",
+                                                  "The " + UNIX_EPOCH_TIME + " of the most recent miss in this bucket, 0 if none"},
+                                         }},
+                                }},
+                       }
+               },
+               RPCExamples{
+                       HelpExampleCli("getbodyrangecoverage", "")
+                       + HelpExampleRpc("getbodyrangecoverage", "")
+               },
+    }.Check(request);
+
+    std::vector <BodyRangeCoverageEntry> vStats;
+    GetBodyRangeCoverageStats(vStats);
+
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("rangesize", COVERAGE_RANGE_SIZE);
+
+    UniValue ranges(UniValue::VARR);
+    for (const BodyRangeCoverageEntry &entry: vStats) {
+        UniValue r(UniValue::VOBJ);
+        r.pushKV("startheight", entry.nRangeStartHeight);
+        r.pushKV("endheight", entry.nRangeEndHeightInclusive);
+        r.pushKV("hits", entry.stats.tally.nHits);
+        r.pushKV("misses", entry.stats.tally.nMisses);
+        // Recorded internally in microseconds (GetTimeMicros(), matching
+        // this codebase's own body-range staleness/backoff convention,
+        // net_processing.cpp) -- reported here in whole seconds, matching
+        // every other NUM_TIME field in this file (e.g. pingtime's own
+        // "/1e6" conversion above).
+        r.pushKV("firstobserved", entry.stats.nFirstObservedTime / 1000000);
+        r.pushKV("lasthit", entry.stats.nLastHitTime / 1000000);
+        r.pushKV("lastmiss", entry.stats.nLastMissTime / 1000000);
+        ranges.push_back(r);
+    }
+    obj.pushKV("ranges", ranges);
     return obj;
 }
 
@@ -842,6 +945,7 @@ static const CRPCCommand commands[] =
                 {"network", "disconnectnode",     &disconnectnode,     {"address", "nodeid"}},
                 {"network", "getaddednodeinfo",   &getaddednodeinfo,   {"node"}},
                 {"network", "getnettotals",       &getnettotals,       {}},
+                {"network", "getbodyrangecoverage", &getbodyrangecoverage, {}},
                 {"network", "getnetworkinfo",     &getnetworkinfo,     {}},
                 {"network", "setban",             &setban,             {"subnet",  "command", "bantime", "absolute"}},
                 {"network", "listbanned",         &listbanned,         {}},

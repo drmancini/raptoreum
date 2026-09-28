@@ -184,6 +184,7 @@ BITCOIN_CORE_H = \
   hdchain.h \
   bodystore.h \
   bodyrange.h \
+  coveragetelemetry.h \
   announcerring.h \
   flatfile.h \
   fs.h \
@@ -376,6 +377,7 @@ libraptoreum_server_a_SOURCES = \
   evo/specialtx.cpp \
   bodystore.cpp \
   bodyrange.cpp \
+  coveragetelemetry.cpp \
   announcerring.cpp \
   flatfile.cpp \
   httprpc.cpp \
