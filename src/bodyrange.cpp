@@ -78,11 +78,15 @@ bool ValidateBodyRangeChunkHashes(const CCommitmentBlock &commitments, uint32_t 
 }
 
 bool ShouldRequestBodyRange(bool fWasAnnounced, int64_t nNow, int64_t nNextAttempt,
-                             unsigned int nInFlight, unsigned int nMaxInFlight) {
+                             unsigned int nInFlight, unsigned int nMaxInFlight,
+                             unsigned int nPeerInFlight, unsigned int nMaxPeerInFlight) {
     if (!fWasAnnounced) {
         return false;
     }
     if (nNow < nNextAttempt) {
+        return false;
+    }
+    if (nPeerInFlight >= nMaxPeerInFlight) {
         return false;
     }
     if (nInFlight >= nMaxInFlight) {
