@@ -1684,6 +1684,40 @@ void GetBodyRangeCoverageStats(std::vector<BodyRangeCoverageEntry> &vStatsOut) {
     }
 }
 
+// F-207 (independent adversarial review of F-206): test-only seam. This
+// project's own established convention (bodyrange.h's ShouldRequestBodyRange/
+// IsBodyRangeChunkAligned/etc.) keeps SendMessages' own fetch-selection
+// machinery (-fetchbodyrange, NODE_COMMITMENTS peer capability,
+// FindNextBlocksToDownload's announcer-ring eligibility) untested, extracting
+// only the pure decision predicates it depends on. That convention does not
+// give a test any way to get a real mapBodyRangeInFlight entry in place
+// without reimplementing that whole selection path -- and the F-207 bug
+// (hit-recording ordered before content validation) lives entirely in the
+// untested BODYRANGE response-handler glue itself, not in a predicate, so a
+// predicate-level test cannot catch it. This seam exists solely so
+// src/test/bodyrange_hit_recording_tests.cpp can seed exactly one in-flight
+// request and then drive the real handler end-to-end through a genuine
+// PeerLogicValidation::ProcessMessages pass (matching blocktxn_tests.cpp's
+// own ConnectedPeer/QueueMessage harness). Mirrors the real insertion site's
+// own bookkeeping (SendMessages' "Message: getbodyrange" section) exactly --
+// same map write, same nBodyRangeInFlight/nBodyRangePeerInFlight increments
+// -- so FinalizeNode's own teardown asserts (nBodyRangePeerInFlight == 0,
+// nBodyRangeInFlight == 0) stay satisfied regardless of whether the entry is
+// later consumed by the response handler or reaped by FinalizeNode itself.
+void SeedBodyRangeInFlightForTest(const uint256 &hashBlock, NodeId peer, uint32_t nStartIndex, uint32_t nCount) {
+    LOCK(cs_main);
+    CNodeState *state = State(peer);
+    assert(state != nullptr);
+    BodyRangeInFlight inFlight;
+    inFlight.peer = peer;
+    inFlight.nStartIndex = nStartIndex;
+    inFlight.nCount = nCount;
+    inFlight.nRequestTime = GetTimeMicros();
+    mapBodyRangeInFlight[hashBlock] = inFlight;
+    nBodyRangeInFlight++;
+    state->nBodyRangePeerInFlight++;
+}
+
 //////////////////////////////////////////////////////////////////////////////
 //
 // mapOrphanTransactions
@@ -3922,19 +3956,26 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
             }
             EraseBodyRangeInFlight(it);
 
-            // 4.2 (F-206, build-plan.md's 4.2 row): passive per-peer
-            // miss-rate telemetry -- every validated response counts, hit or
-            // miss, at every chunk position, since this alone (not
-            // whether the block ever fully completes) is what measures THIS
-            // PEER's own answering reliability. Recorded here, after
-            // ValidateBodyRangeResponse has already confirmed this is a
-            // genuine, shape-correct answer to a request this node actually
-            // sent this peer -- an unsolicited or malformed response never
-            // reaches this point (see the Misbehaving branch above).
-            if (CNodeState *peerState = State(pfrom->GetId())) {
-                RecordBodyRangeTally(peerState->bodyRangeTally, /*fHit=*/!resp.vBodies.empty());
-            }
-
+            // F-207 (independent adversarial review of F-206, CONFIRMED
+            // HIGH): hit-recording (both the per-peer tally just below and
+            // the cross-peer coverage observation further down) must NOT
+            // happen here, on ValidateBodyRangeResponse alone.
+            // ValidateBodyRangeResponse only confirms wire SHAPE -- right
+            // nStartIndex, count within bounds, non-null entries -- it says
+            // nothing about whether the returned bodies actually match what
+            // this range committed to. A response that passes shape
+            // validation but fails ValidateBodyRangeChunkHashes below is
+            // garbage content from a peer that is about to be banned for
+            // it -- recording that as a coverage HIT before the ban lets an
+            // eraser inject a fake "everything's fine here" signal into the
+            // exact data this telemetry exists to keep honest (SS14.9), for
+            // the one-time cost of a single banned IP per fake hit. Both hit
+            // sites are now recorded only after ValidateBodyRangeChunkHashes
+            // has actually succeeded, below. An empty response has no
+            // content to validate -- there is nothing ValidateBodyRangeChunk-
+            // Hashes could check on zero bodies -- so the MISS side (both
+            // per-peer and cross-peer) is unaffected and still recorded
+            // immediately below, exactly as before.
             if (resp.vBodies.empty()) {
                 // An honest miss (bodyrange.h's own CBodyRange doc: no
                 // fFound field, a miss IS vBodies.empty()) -- the block is
@@ -3945,6 +3986,9 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
                 // g_body_retry_state's own backoff (already advanced when
                 // this request was sent) is what paces the next attempt, to
                 // this or another peer.
+                if (CNodeState *peerState = State(pfrom->GetId())) {
+                    RecordBodyRangeTally(peerState->bodyRangeTally, /*fHit=*/false);
+                }
                 //
                 // 4.2 (F-206): also a per-range COVERAGE observation, but
                 // only on the first chunk of a fetch (nStartIndex == 0) --
@@ -3974,18 +4018,6 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
             if (pindex == nullptr) {
                 EraseBodyRangePartial(resp.hashBlock);
                 return true;
-            }
-
-            // 4.2 (F-206): the coverage-observation counterpart to the miss
-            // branch above -- a non-empty, shape-validated first-chunk
-            // response is direct evidence this range exists somewhere in the
-            // network, independent of whether THIS accumulation ever
-            // completes. Recorded here, at first-chunk arrival, rather than
-            // at full completion, so a slow or later-abandoned multi-chunk
-            // transfer still contributes what it already proved.
-            if (resp.nStartIndex == 0) {
-                RecordCoverageObservation(mapBodyRangeCoverage[CoverageRangeIndex(pindex->nHeight, COVERAGE_RANGE_SIZE)],
-                                           /*fHit=*/true, GetTimeMicros());
             }
 
             // F-159 (second independent review of F-158, CONFIRMED MEDIUM):
@@ -4024,6 +4056,26 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
                             strprintf("Peer %d sent a bodyrange chunk that does not match %s",
                                      pfrom->GetId(), resp.hashBlock.ToString()));
                 return true;
+            }
+
+            // F-207 (independent adversarial review of F-206, CONFIRMED
+            // HIGH): the hit-recording that used to sit right after
+            // ValidateBodyRangeResponse above (shape only) now lives here,
+            // after ValidateBodyRangeChunkHashes has actually proven this
+            // chunk's CONTENT matches what the range committed to -- a
+            // shape-valid, hash-invalid response never reaches this point
+            // (the Misbehaving branch just above returns first), so it can
+            // no longer be counted as evidence the range was genuinely
+            // served. Recorded here, at first-validated-chunk arrival,
+            // still independent of whether this accumulation ever
+            // completes -- a slow or later-abandoned multi-chunk transfer
+            // still contributes what this one chunk already proved.
+            if (CNodeState *peerState = State(pfrom->GetId())) {
+                RecordBodyRangeTally(peerState->bodyRangeTally, /*fHit=*/true);
+            }
+            if (resp.nStartIndex == 0) {
+                RecordCoverageObservation(mapBodyRangeCoverage[CoverageRangeIndex(pindex->nHeight, COVERAGE_RANGE_SIZE)],
+                                           /*fHit=*/true, GetTimeMicros());
             }
 
             // F-159 (second independent review, CONFIRMED MEDIUM -- a

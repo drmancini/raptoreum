@@ -182,4 +182,12 @@ extern unsigned int g_perf_inv_max;
 extern unsigned int g_perf_inv_interval;
 extern bool g_perf_inv_nosort;
 
+/** F-207 (independent adversarial review of F-206): test-only. Seeds a single
+ *  mapBodyRangeInFlight entry directly, bypassing SendMessages' own real
+ *  fetch-selection machinery, so a test can drive the real BODYRANGE
+ *  response handler end-to-end via PeerLogicValidation::ProcessMessages. See
+ *  net_processing.cpp's own doc comment at the definition for why this
+ *  exists instead of a predicate-level test. */
+void SeedBodyRangeInFlightForTest(const uint256 &hashBlock, NodeId peer, uint32_t nStartIndex, uint32_t nCount);
+
 #endif // BITCOIN_NET_PROCESSING_H
