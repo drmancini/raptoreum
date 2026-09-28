@@ -414,14 +414,58 @@ namespace {
 
     /** 2.2.4: the aggregate concurrent-chase cap -- bounds the total number
      *  of in-flight GETBODYRANGE requests across ALL peers at once, not
-     *  per-peer (a separate, already-noted concern this phase does not
-     *  build). Config-driven, matching this file's own -servebodyrange
-     *  precedent for a still-developing 2.2.x feature; the default
-     *  (DEFAULT_MAX_BODYRANGE_INFLIGHT, bodyrange.h -- shared with init.cpp's
-     *  own help text) is conservative since single-source fetching has no
-     *  reason to chase many bodies at once. */
+     *  per-peer. 4.5.3 (F-202) added MAX_BODYRANGE_INFLIGHT_PER_PEER
+     *  immediately below to close that gap. Config-driven, matching this
+     *  file's own -servebodyrange precedent for a still-developing 2.2.x
+     *  feature; the default (DEFAULT_MAX_BODYRANGE_INFLIGHT, bodyrange.h --
+     *  shared with init.cpp's own help text) is conservative since
+     *  single-source fetching has no reason to chase many bodies at once. */
     unsigned int nBodyRangeInFlight
     GUARDED_BY(cs_main) = 0;
+
+    /** 4.5.3 (F-202, docs/findings.md): the per-peer analogue of
+     *  MAX_BLOCKS_IN_TRANSIT_PER_PEER (validation.h) for whole-block
+     *  downloads -- bounds how many GETBODYRANGE requests a SINGLE peer may
+     *  have outstanding at once, closing the gap bodyrange.h's own
+     *  DEFAULT_MAX_BODYRANGE_INFLIGHT doc previously flagged explicitly:
+     *  without this, one peer could be the single-source announcer for
+     *  enough distinct blocks to consume the ENTIRE aggregate budget above
+     *  by itself, starving every other peer's own body-range fetches even
+     *  though each individual (peer, hash) request is otherwise perfectly
+     *  eligible.
+     *
+     *  Unlike MAX_BLOCKS_IN_TRANSIT_PER_PEER (a fixed, non-configurable
+     *  constant in validation.h, used from several call sites across this
+     *  file), this cap has exactly one enforcement call site (the
+     *  getbodyrange-issuing loop in SendMessages, via ShouldRequestBodyRange)
+     *  and no init.cpp help-text need, so it is file-local here rather than
+     *  promoted to a header -- matching BODY_RANGE_DISCONNECT_ATTEMPTS's own
+     *  placement immediately above, not DEFAULT_MAX_BODYRANGE_INFLIGHT's.
+     *
+     *  Value chosen as DEFAULT_MAX_BODYRANGE_INFLIGHT / 4 = 4 (a judgment
+     *  call -- F-197's own scope note explicitly left the number
+     *  unspecified): this project's own single-source design (bodyrange.h's
+     *  own doc) already limits a peer to at most one in-flight request per
+     *  DISTINCT block hash, so this cap only ever binds when one peer is
+     *  simultaneously the chosen announcer for several different blocks at
+     *  once -- a real but narrower scenario than "one peer always gets
+     *  everything." A quarter of the aggregate default guarantees at least
+     *  4 distinct peers can have body-range fetches in flight
+     *  SIMULTANEOUSLY before any one of them is ever refused purely for
+     *  being over ITS OWN share, bounding a single peer's worst-case
+     *  fraction of the shared budget the same way MAX_BLOCKS_IN_TRANSIT_PER_PEER's
+     *  own 16-of-16 ratio (100% -- no partitioning at all, since whole-block
+     *  download has no aggregate cap to share) is not itself a precedent
+     *  for the exact fraction here: this cap exists BECAUSE the aggregate
+     *  cap it composes with is shared, which whole-block download's own
+     *  analogue never had to reason about. The static_assert below pins the
+     *  chosen ratio so a future change to either default is forced to
+     *  reconsider this one rather than silently drifting apart. */
+    static const unsigned int MAX_BODYRANGE_INFLIGHT_PER_PEER = DEFAULT_MAX_BODYRANGE_INFLIGHT / 4;
+    static_assert(MAX_BODYRANGE_INFLIGHT_PER_PEER > 0 &&
+                  MAX_BODYRANGE_INFLIGHT_PER_PEER < DEFAULT_MAX_BODYRANGE_INFLIGHT,
+                  "MAX_BODYRANGE_INFLIGHT_PER_PEER must leave room for more than one peer to "
+                  "share DEFAULT_MAX_BODYRANGE_INFLIGHT at once");
 
     /** 2.2.4: one in-flight GETBODYRANGE request -- single-source, so at
      *  most one entry per block hash at a time (a second peer is never asked
@@ -487,27 +531,6 @@ namespace {
      *  own indexing convention), hence -1. */
     static unsigned int BodyRangeWantedCount(const CBlockIndex *pindex) {
         return pindex->nTx > 0 ? (unsigned int) (pindex->nTx - 1) : 0;
-    }
-
-    /** F-157: the three near-identical "erase a mapBodyRangeInFlight entry
-     *  and decrement its counterpart nBodyRangeInFlight" call sites
-     *  (FinalizeNode's disconnect cleanup, the stale-request reaper, and the
-     *  BODYRANGE handler's two single-entry erases) duplicated the same
-     *  invariant-maintenance pair, which a future edit to one site without
-     *  the other would silently desync (mapBodyRangeInFlight.size() would
-     *  stop matching nBodyRangeInFlight, corrupting the aggregate cap).
-     *  Factored into one place so the pairing can't drift. Takes an
-     *  iterator (not a hash) since every call site already holds one from
-     *  its own find()/loop -- erasing by iterator avoids a second lookup.
-     *  Returns map::erase's own next-iterator, so an erase-while-iterating
-     *  loop can write `it = EraseBodyRangeInFlight(it);` exactly as it would
-     *  `it = mapBodyRangeInFlight.erase(it);` directly. */
-    static std::map<uint256, BodyRangeInFlight>::iterator
-    EraseBodyRangeInFlight(std::map<uint256, BodyRangeInFlight>::iterator it)
-
-    EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
-        nBodyRangeInFlight--;
-        return mapBodyRangeInFlight.erase(it);
     }
 
     /** F-159: named wrapper kept for call-site readability even though
@@ -625,6 +648,15 @@ namespace {
         int64_t nDownloadingSince;
         int nBlocksInFlight;
         int nBlocksInFlightValidHeaders;
+        //! 4.5.3 (F-202): per-peer count of in-flight GETBODYRANGE requests --
+        //! mirrors nBlocksInFlight's own per-CNodeState tracking above, kept
+        //! in sync with the global mapBodyRangeInFlight/nBodyRangeInFlight
+        //! pair by EraseBodyRangeInFlight's single choke point (F-157's own
+        //! precedent) and by the request-issuing site in SendMessages.
+        //! Named distinctly from the file-scope aggregate nBodyRangeInFlight
+        //! (same concept, different scope) so the two are never misread for
+        //! each other at a call site.
+        int nBodyRangePeerInFlight;
         //! Whether we consider this a preferred download peer.
         bool fPreferredDownload;
         //! Whether this peer wants invs or headers (when possible) for block announcements.
@@ -758,6 +790,7 @@ namespace {
             nDownloadingSince = 0;
             nBlocksInFlight = 0;
             nBlocksInFlightValidHeaders = 0;
+            nBodyRangePeerInFlight = 0;
             fPreferredDownload = false;
             fPreferHeaders = false;
             fPreferHeaderAndIDs = false;
@@ -791,6 +824,49 @@ namespace {
             if (it == mapNodeState.end())
             return nullptr;
             return &it->second;
+    }
+
+    /** F-157: the three near-identical "erase a mapBodyRangeInFlight entry
+     *  and decrement its counterpart nBodyRangeInFlight" call sites
+     *  (FinalizeNode's disconnect cleanup, the stale-request reaper, and the
+     *  BODYRANGE handler's two single-entry erases) duplicated the same
+     *  invariant-maintenance pair, which a future edit to one site without
+     *  the other would silently desync (mapBodyRangeInFlight.size() would
+     *  stop matching nBodyRangeInFlight, corrupting the aggregate cap).
+     *  Factored into one place so the pairing can't drift. Takes an
+     *  iterator (not a hash) since every call site already holds one from
+     *  its own find()/loop -- erasing by iterator avoids a second lookup.
+     *  Returns map::erase's own next-iterator, so an erase-while-iterating
+     *  loop can write `it = EraseBodyRangeInFlight(it);` exactly as it would
+     *  `it = mapBodyRangeInFlight.erase(it);` directly.
+     *
+     *  4.5.3 (F-202): now also decrements the departing entry's OWN peer's
+     *  per-peer counter (CNodeState::nBodyRangePeerInFlight) -- the exact
+     *  same "one future edit would silently desync a counter" hazard F-157
+     *  already fixed for the aggregate/map pair applies identically to this
+     *  third counter, so it is maintained at this same single choke point
+     *  rather than duplicated at each of the three call sites again. This is
+     *  the reason this function moved here (after State()'s own definition,
+     *  previously it lived earlier in the file, before CNodeState existed)
+     *  -- it needs State() to reach the departing entry's own CNodeState.
+     *  Every real call site (FinalizeNode's per-peer sweep, the periodic
+     *  stale-request reaper, and the BODYRANGE handler's completion/mismatch
+     *  erases) only ever names a hash whose recorded peer is still connected
+     *  at the time of the call -- FinalizeNode's own sweep is itself what
+     *  removes a departing peer's entries, before mapNodeState.erase(nodeid)
+     *  runs -- but the null-check below is kept anyway rather than an
+     *  assert, matching this project's own preference for a defensive
+     *  guard over a crash on an invariant a future edit could otherwise
+     *  silently break. */
+    static std::map<uint256, BodyRangeInFlight>::iterator
+    EraseBodyRangeInFlight(std::map<uint256, BodyRangeInFlight>::iterator it)
+
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        nBodyRangeInFlight--;
+        if (CNodeState *peerState = State(it->second.peer)) {
+            peerState->nBodyRangePeerInFlight--;
+        }
+        return mapBodyRangeInFlight.erase(it);
     }
 
     void UpdatePreferredDownload(CNode *node, CNodeState *state)
@@ -1485,6 +1561,11 @@ void PeerLogicValidation::FinalizeNode(NodeId nodeid, bool &fUpdateConnectionTim
             ++it;
         }
     }
+    // 4.5.3 (F-202): every mapBodyRangeInFlight entry naming this peer was
+    // just erased above, and EraseBodyRangeInFlight decrements this exact
+    // peer's own nBodyRangePeerInFlight for each one -- so by construction
+    // none can remain outstanding against a peer that is finalizing.
+    assert(state->nBodyRangePeerInFlight == 0);
     // F-157 (Fable review of F-155/F-156): g_body_retry_state is keyed by
     // (NodeId, hash) -- its own per-block entries are only ever erased when
     // THIS SAME peer's later FindNextBlocksToDownload call resolves that
@@ -5909,8 +5990,14 @@ bool PeerLogicValidation::SendMessages(CNode *pto) {
                     return true;
                 }
 
+                // 4.5.3 (F-202): state.nBodyRangePeerInFlight/MAX_BODYRANGE_INFLIGHT_PER_PEER
+                // is the per-peer cap, composing with (not replacing) the
+                // pre-existing aggregate nBodyRangeInFlight/nMaxBodyRangeInFlight
+                // pair immediately after it -- see ShouldRequestBodyRange's
+                // own doc (bodyrange.h) for why both must pass independently.
                 if (!ShouldRequestBodyRange(fWasAnnounced, nNow, retry.nNextAttempt,
-                                            nBodyRangeInFlight, nMaxBodyRangeInFlight)) {
+                                            nBodyRangeInFlight, nMaxBodyRangeInFlight,
+                                            state.nBodyRangePeerInFlight, MAX_BODYRANGE_INFLIGHT_PER_PEER)) {
                     continue;
                 }
                 // F-159 (second independent review, LOW): find(), not
@@ -5956,6 +6043,7 @@ bool PeerLogicValidation::SendMessages(CNode *pto) {
                 inFlight.nRequestTime = nNow;
                 mapBodyRangeInFlight[hash] = inFlight;
                 nBodyRangeInFlight++;
+                state.nBodyRangePeerInFlight++;
 
                 connman->PushMessage(pto, msgMaker.Make(NetMsgType::GETBODYRANGE, req));
                 LogPrint(BCLog::NET, "Requesting body range for %s [%u, %u) peer=%d\n", hash.ToString(),
