@@ -240,6 +240,63 @@ extern std::atomic<bool> g_commitmentBudgetActive;
  *  absent -- not a closed audit of today's tree. */
 bool HaveBodies(const CBlockIndex *pindex);
 
+/** 4.5.1 (F-199): is -maxmempool's effective byte value below the re-derived
+ *  design-point floor (MIN_MAX_MEMPOOL_SIZE_DESIGN_FLOOR, policy/policy.h),
+ *  given whether the mining gate is currently live? Pure decision, split
+ *  from its own logging side effect (WarnIfMaxMempoolBelowDesignFloor below)
+ *  so it is directly unit-testable -- the same split this project already
+ *  uses for WantsCommitmentModeTemplate/BuildGBTTransactionEntry
+ *  (rpc/mining.h, F-191).
+ *
+ *  "Mining gate live" means llmq::RejectConflictingBlocks() -- spork 3
+ *  (SPORK_3_INSTANTSEND_BLOCK_FILTERING) active and the chain synced -- the
+ *  same condition IsTxSafeForMining consults to decide whether an unlocked
+ *  transaction is held out of a block for K-12's WAIT_FOR_ISLOCK_TIMEOUT
+ *  (llmq/quorums_chainlocks.cpp), which is what drives the mempool burst
+ *  size this floor is sized against (F-197/F-198). */
+bool MaxMempoolBelowDesignFloor(bool fMiningGateLive, int64_t nMaxMempoolBytes);
+
+/** 4.5.1 (F-199): logs a loud, one-time-per-process warning (and raises it via
+ *  DoWarning, validation.cpp -- SetMiscWarning plus a one-shot AlertNotify, F-202
+ *  corrective; see DoWarning's own definition) if MaxMempoolBelowDesignFloor(...)
+ *  is true. Matches 4.4.3/F-194's own REQUIRE precedent for -servebodyrange in
+ *  spirit -- "require, not merely document" -- but chooses WARN over REFUSE for
+ *  THIS runtime call site, a deliberate departure: -servebodyrange's gate sits
+ *  at a single, retryable RPC-request boundary (getblocktemplate/submitblock),
+ *  where refusing costs the caller one failed call and nothing else. This
+ *  condition is instead evaluated on EVERY node, mining or not, on EVERY
+ *  connected block once spork 3 activates network-wide (called from
+ *  ConnectBlock's own existing llmq::RejectConflictingBlocks()-gated block,
+ *  validation.cpp, with the REAL RejectConflictingBlocks() result threaded
+ *  into fMiningGateLive -- F-202 fixed a mutation-coverage gap where a
+ *  hardcoded literal sat there instead) -- a consensus-critical path with no
+ *  caller to retry. REFUSE there would mean either aborting an already-running,
+ *  already-synced node the instant the network flips a spork (turning a local
+ *  memory-tuning problem into an availability incident) or rejecting an
+ *  otherwise-valid block over a local misconfiguration unrelated to that
+ *  block's own validity -- disproportionate either way to what is a gradual
+ *  OOM risk, not an instantaneous exploit. This is the case of a node that was
+ *  ALREADY RUNNING before spork 3 activated live via a relayed spork message --
+ *  the only case this runtime WARN needs to cover.
+ *
+ *  F-202 correction -- a startup REFUSE now exists too, for the other case:
+ *  the original F-199 reasoning above for skipping init.cpp assumed spork 3's
+ *  activation state could never be known at startup. That assumption was
+ *  wrong for a RESTARTING node: sporks.dat persists mapSporksActive across
+ *  restarts (CSporkManager::Serialize, spork.h) and is loaded before any
+ *  block connects (init.cpp Step 7a, "Load sporks"), so if spork 3 has
+ *  already activated network-wide, a node that restarts (crash, upgrade,
+ *  routine restart) DOES know this before it starts serving -- see
+ *  AppInitMain's own Step 7a call site (init.cpp) for the startup InitError
+ *  built on MaxMempoolBelowDesignFloor(...) directly, reusing this same pure
+ *  decision function with sporkManager.IsSporkActive(...) alone (not the full
+ *  RejectConflictingBlocks(), which also requires smartnodeSync.IsBlockchainSynced()
+ *  -- meaningless at boot, before any sync has happened) as fMiningGateLive.
+ *  A node that was already running when spork 3 first activates live still
+ *  only has this runtime WARN to catch it, exactly as before -- REFUSE is
+ *  only available where the node hasn't started serving yet. */
+void WarnIfMaxMempoolBelowDesignFloor(bool fMiningGateLive, int64_t nMaxMempoolBytes);
+
 /** Test-only: run AcceptToMemoryPool's script checks on the script-check thread
  *  pool rather than inline on the calling thread (-perfparallelatmp). See the
  *  definition in validation.cpp. */
