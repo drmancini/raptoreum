@@ -583,21 +583,18 @@ public:
         updateManager.Add(
             Update(EUpdate::ROUND_VOTING, std::string("Round Voting"), 1, 10, 100, 5, 10, 5, false,
                 VoteThreshold(85, 85, 1), VoteThreshold(0, 0, 1)));
-        // F-214: mechanism-testing registration only. Reuses EUpdate::COMMITMENT_MODE
-        // (bit 3, already built by F-210) and mirrors ROUND_VOTING's shape above
-        // (thresholds, forcedUpdate=false, votingPeriod/votingMaxRounds/graceRounds)
-        // per F-213 point 5. startHeight=100,000,000 is a deliberate, structurally-
-        // unreachable placeholder, not a real activation height: it is 100,000,000
-        // rounds*roundSize away from any realistic devnet chain tip, and
-        // UpdateManager::State's own roundNumber<-1 early return (update/update.cpp)
-        // reports Defined for any such block without ever reaching the vote-counting
-        // path. NOT registered on mainnet or testnet -- F-213's owner coverage
-        // precondition (point 4) has not been run against real nodes yet, so no
-        // network with real, permanent history gets this bit at all, matching
-        // F-210's own prior "unregistered everywhere" precedent for the identical
-        // reason.
+        // F-214 (mechanism), F-228 (this devnet-only activation height): reuses
+        // EUpdate::COMMITMENT_MODE (bit 3, already built by F-210) and mirrors
+        // ROUND_VOTING's shape above (thresholds, forcedUpdate=false,
+        // votingPeriod/votingMaxRounds/graceRounds) per F-213 point 5.
+        // startHeight=100 mirrors ROUND_VOTING's own real, working devnet
+        // activation height directly above -- devnet carries no real value and
+        // no real users, so it needs none of F-213 point 4's mainnet coverage
+        // precondition; unlike mainnet/testnet (still deliberately unregistered,
+        // matching F-210's own precedent), a devnet activation height is a safe,
+        // low-stakes choice for genuinely exercising the mechanism end to end.
         updateManager.Add(
-            Update(EUpdate::COMMITMENT_MODE, std::string("Commitment Mode"), 3, 10, 100000000, 5, 10, 5, false,
+            Update(EUpdate::COMMITMENT_MODE, std::string("Commitment Mode"), 3, 10, 100, 5, 10, 5, false,
                 VoteThreshold(85, 85, 1), VoteThreshold(0, 0, 1)));
 
         // The best chain should have at least this much work.
