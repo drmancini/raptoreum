@@ -1072,6 +1072,168 @@ static CMutableTransaction MakeSpendOfCoinbase(const CTransactionRef &coinbase, 
     return spendTx;
 }
 
+// 2.4b (build-plan.md's 2.4 row, F-219): VerifyBodyRecordAtRest's own
+// baseline -- a genuinely intact, just-written record must verify OK. Every
+// other test below in this group proves a specific corruption shape is
+// CAUGHT; this one proves the check does not also cry wolf over ordinary,
+// correct data (a check that only ever fails is as useless as one that
+// never does).
+BOOST_AUTO_TEST_CASE(body_record_at_rest_verifies_ok_for_a_genuinely_intact_record) {
+    const CChainParams &chainparams = Params();
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock block = CreateAndProcessBlock({spendTx}, coinbaseKey);
+    CBlockIndex *pindex = LookupBlockIndex(block.GetHash());
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(HaveBodies(pindex));
+
+    BOOST_CHECK(VerifyBodyRecordAtRest(pindex, chainparams.GetConsensus()) == BodyRecordVerification::OK);
+}
+
+// A withheld block (BLOCK_HAVE_BODY_RECORD set, BLOCK_HAVE_BODIES clear) has
+// nothing claimed complete -- must read as NOT_HELD, never as a failure of
+// its own. Matches LookupServeableBodyPositionByHash's own established
+// "withheld reads as absent, not broken" convention (F-144/F-145).
+BOOST_AUTO_TEST_CASE(body_record_at_rest_reports_not_held_for_a_withheld_block) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    const CChainParams &chainparams = Params();
+
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock block = CreateBlock({spendTx}, coinbaseKey);
+    std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
+
+    PerfWithholdGuard guard(block.GetHash());
+    BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblock, /*fForceProcessing=*/true, nullptr));
+    CBlockIndex *pindex = LookupBlockIndex(block.GetHash());
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(pindex->nStatus & BLOCK_HAVE_BODY_RECORD);
+    BOOST_REQUIRE(!HaveBodies(pindex));
+
+    BOOST_CHECK(VerifyBodyRecordAtRest(pindex, chainparams.GetConsensus()) == BodyRecordVerification::NOT_HELD);
+}
+
+// A stored record whose bytes were swapped for a DIFFERENT, equally-valid
+// pair of transactions (same total serialized size, so the file's own
+// framing is untouched) -- the shape a real corruption caused by a bit-flip
+// deep inside a transaction's own fields would also take: readable,
+// self-consistent, but wrong. WriteBodyRecord at the SAME position is used
+// instead of raw byte surgery specifically so this is deterministic (no risk
+// of the garbage bytes accidentally still deserializing as something that
+// happens to hash-match, or of breaking the record's own self-delimiting
+// framing and landing in BODY_UNREADABLE instead of HASH_MISMATCH).
+BOOST_AUTO_TEST_CASE(body_record_at_rest_detects_a_hash_mismatch_from_swapped_bodies) {
+    const CChainParams &chainparams = Params();
+    CMutableTransaction spendTx1 = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CMutableTransaction spendTx2 = MakeSpendOfCoinbase(m_coinbase_txns[1], coinbaseKey);
+    CBlock block = CreateAndProcessBlock({spendTx1, spendTx2}, coinbaseKey);
+    CBlockIndex *pindex = LookupBlockIndex(block.GetHash());
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(HaveBodies(pindex));
+
+    FlatFilePos pos = pindex->GetBodyPos();
+    std::vector<CTransactionRef> original;
+    BOOST_REQUIRE(ReadBodyRecord(pos, original));
+    // >= 2, not == 2: CreateNewBlock may add its own system transaction(s)
+    // (F-193's own noted case -- an LLMQ quorum-commitment special tx
+    // injected directly by quorumBlockProcessor, never through the two
+    // spends requested here) alongside the two real spends. Only the first
+    // two entries are touched below; a third or later entry, if present, is
+    // left completely alone.
+    BOOST_REQUIRE_GE(original.size(), 2U);
+    BOOST_REQUIRE(original[0]->GetHash() != original[1]->GetHash());
+
+    std::vector<CTransactionRef> swapped = original;
+    std::swap(swapped[0], swapped[1]);
+    BOOST_REQUIRE_EQUAL(GetBodyRecordSerializedSize(swapped), GetBodyRecordSerializedSize(original));
+    BOOST_REQUIRE(WriteBodyRecord(pos, swapped));
+
+    BOOST_CHECK(VerifyBodyRecordAtRest(pindex, chainparams.GetConsensus()) == BodyRecordVerification::HASH_MISMATCH);
+}
+
+// A stored record with FEWER bodies than the block's own commitments name --
+// e.g. a bulk copy that was interrupted mid-write, or a body-store bug that
+// dropped a transaction. Distinct from HASH_MISMATCH: every body actually
+// present is individually correct, but the record itself is short.
+BOOST_AUTO_TEST_CASE(body_record_at_rest_detects_a_count_mismatch) {
+    const CChainParams &chainparams = Params();
+    CMutableTransaction spendTx1 = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CMutableTransaction spendTx2 = MakeSpendOfCoinbase(m_coinbase_txns[1], coinbaseKey);
+    CBlock block = CreateAndProcessBlock({spendTx1, spendTx2}, coinbaseKey);
+    CBlockIndex *pindex = LookupBlockIndex(block.GetHash());
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(HaveBodies(pindex));
+
+    FlatFilePos pos = pindex->GetBodyPos();
+    std::vector<CTransactionRef> original;
+    BOOST_REQUIRE(ReadBodyRecord(pos, original));
+    BOOST_REQUIRE_GE(original.size(), 2U);
+
+    // Drop exactly the last body -- everything else about the record (its
+    // count-vs-commitments relationship for the DROPPED entry aside) stays
+    // self-consistent, isolating this to a pure count mismatch.
+    std::vector<CTransactionRef> shortened = original;
+    shortened.pop_back();
+    BOOST_REQUIRE(WriteBodyRecord(pos, shortened));
+
+    BOOST_CHECK(VerifyBodyRecordAtRest(pindex, chainparams.GetConsensus()) == BodyRecordVerification::COUNT_MISMATCH);
+}
+
+// A record whose bytes are simply gone -- the file was truncated out from
+// under it (a bad disk, an interrupted copy that never finished writing this
+// record at all). Matches read_body_at_does_not_depend_on_earlier_bodies_
+// being_valid's own OpenBodyFile-based corruption precedent (bodystore_tests.cpp),
+// applied here via truncation rather than a garbage stamp specifically so
+// the failure is deterministic: ReadBodyRecordHeader hits EOF immediately
+// (fseek to a position past a truncated file's own end succeeds on POSIX;
+// the READ that follows is what fails) rather than depending on whatever
+// random bytes happen to be read as a CompactSize.
+BOOST_AUTO_TEST_CASE(body_record_at_rest_detects_an_unreadable_record) {
+    const CChainParams &chainparams = Params();
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock block = CreateAndProcessBlock({spendTx}, coinbaseKey);
+    CBlockIndex *pindex = LookupBlockIndex(block.GetHash());
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(HaveBodies(pindex));
+
+    FlatFilePos pos = pindex->GetBodyPos();
+    fs::path bodyFilePath = BodyFileSeq().FileName(pos);
+    BOOST_REQUIRE(fs::exists(bodyFilePath));
+    fs::resize_file(bodyFilePath, pos.nPos);
+
+    BOOST_CHECK(VerifyBodyRecordAtRest(pindex, chainparams.GetConsensus()) == BodyRecordVerification::BODY_UNREADABLE);
+}
+
+// The wiring into CVerifyDB itself, matching verifydb_stops_at_a_bodies_gap_
+// instead_of_reporting_corruption's own precedent immediately above: a
+// corrupted body-store record must fail the whole VerifyDB call (fail
+// closed -- init.cpp's own "Corrupted block database detected" -> operator
+// runs -reindex, which correctly rebuilds bdy*.dat from blk*.dat per 2.1.3's
+// own -reindex decision), proving the new check is actually wired into
+// VerifyDB's real walk, not merely correct in isolation. The corrupted block
+// is mined as the NEW tip (rather than reusing TestChain100Setup's own
+// coinbase-only ancestors, which have no non-coinbase body to corrupt in the
+// first place) specifically so truncating its own body record touches
+// nothing else -- it is the last thing written to its body file, so no
+// other block's record shares the bytes after this record's own start.
+BOOST_AUTO_TEST_CASE(verifydb_fails_closed_on_a_corrupt_body_store_record) {
+    CChainState &chainstate = ::ChainstateActive();
+    const CChainParams &chainparams = Params();
+
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock block = CreateAndProcessBlock({spendTx}, coinbaseKey);
+    CBlockIndex *pindex = LookupBlockIndex(block.GetHash());
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(HaveBodies(pindex));
+    BOOST_REQUIRE_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), block.GetHash().ToString());
+
+    FlatFilePos pos = pindex->GetBodyPos();
+    fs::path bodyFilePath = BodyFileSeq().FileName(pos);
+    BOOST_REQUIRE(fs::exists(bodyFilePath));
+    fs::resize_file(bodyFilePath, pos.nPos);
+
+    BOOST_CHECK(!CVerifyDB().VerifyDB(chainparams, &chainstate.CoinsTip(), /*nCheckLevel=*/0, /*nCheckDepth=*/1));
+}
+
+
 // The core mechanism: an accepted block's non-coinbase transactions must
 // actually be readable back from the body store, at the exact position the
 // index now records -- not just "some bit got set".

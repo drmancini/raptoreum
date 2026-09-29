@@ -7,7 +7,7 @@
 #include <rpc/server.h>
 
 #include <banman.h>
-//#include <chainparams.h>
+#include <chainparams.h>
 #include <clientversion.h>
 #include <core_io.h>
 #include <net.h>
@@ -667,6 +667,109 @@ UniValue getbodyrangecoverageheights(const JSONRPCRequest &request) {
     return ranges;
 }
 
+// 2.4b (build-plan.md's 2.4 row, F-219): an operator-invokable, read-only
+// consistency check for the body store's own bdy*.dat bytes against the
+// block's own committed identifiers -- matching this file's own established
+// getbodyrangecoverageheights precedent (F-212) for exposing an internal
+// consistency mechanism via RPC. Deliberately read-only: it never mutates
+// pindex/BLOCK_HAVE_BODIES or the body-store index -- see
+// VerifyBodyRecordAtRest's own doc (validation.h) for why repair on a
+// running node is judged unsafe and left to CVerifyDB::VerifyDB's own
+// startup-time, fail-closed wiring (-checkblocks/-checklevel, no new flag)
+// instead. Bounded by required start/end params, matching
+// getbodyrangecoverageheights's own convention of never letting a plain
+// data-read RPC do unbounded work -- a full-history scan re-hashes every
+// stored body, genuinely expensive at this project's own target scale, so an
+// operator must explicitly opt into the range they want checked.
+UniValue verifybodystore(const JSONRPCRequest &request) {
+    RPCHelpMan{"verifybodystore",
+               "\n2.4b (F-219): verify the body store's own on-disk bytes (bodystore.h's\n"
+               "bdy*.dat series) still hash-match what each block's own commitment block\n"
+               "commits to, for every height in the given range that this node currently\n"
+               "holds bodies for. Read-only -- detects, does not repair; a mismatch means\n"
+               "this node's local copy of that block's body is corrupt or was never written\n"
+               "correctly, and should not be trusted or served until the datadir is\n"
+               "rebuilt (e.g. -reindex, which re-derives the body store from blk*.dat).\n"
+               "A height this node has no bodies for at all (never synced, pruned, or a\n"
+               "block still commitment-only) is reported as \"not-held\", not an error.\n",
+               {
+                       {"start_height", RPCArg::Type::NUM, RPCArg::Optional::NO,
+                        "First height to check (inclusive)"},
+                       {"end_height", RPCArg::Type::NUM, RPCArg::Optional::NO,
+                        "Last height to check (inclusive)"},
+               },
+               RPCResult{
+                       RPCResult::Type::OBJ, "", "",
+                       {
+                               {RPCResult::Type::NUM, "checked", "Heights checked whose bodies were actually held"},
+                               {RPCResult::Type::NUM, "ok", "Heights that verified clean"},
+                               {RPCResult::Type::NUM, "not_held", "Heights this node holds no bodies for (skipped, not an error)"},
+                               {RPCResult::Type::ARR, "mismatches", "Every height that failed verification",
+                                {
+                                        {RPCResult::Type::OBJ, "", "",
+                                         {
+                                                 {RPCResult::Type::NUM, "height", "The block height"},
+                                                 {RPCResult::Type::STR_HEX, "hash", "The block hash"},
+                                                 {RPCResult::Type::STR, "reason",
+                                                  "Why verification failed -- commitments-unreadable, body-unreadable, count-mismatch, or hash-mismatch"},
+                                         }},
+                                }},
+                       }
+               },
+               RPCExamples{
+                       HelpExampleCli("verifybodystore", "100000 100999")
+                       + HelpExampleRpc("verifybodystore", "100000, 100999")
+               },
+    }.Check(request);
+
+    const int nStartHeight = request.params[0].get_int();
+    const int nEndHeightInclusive = request.params[1].get_int();
+    if (nEndHeightInclusive < nStartHeight) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "end_height must be >= start_height");
+    }
+
+    int nChecked = 0, nOk = 0, nNotHeld = 0;
+    UniValue mismatches(UniValue::VARR);
+    for (int height = nStartHeight; height <= nEndHeightInclusive; height++) {
+        CBlockIndex *pindex;
+        {
+            LOCK(cs_main);
+            pindex = ::ChainActive()[height];
+        }
+        if (pindex == nullptr) {
+            continue;
+        }
+        BodyRecordVerification result = VerifyBodyRecordAtRest(pindex, Params().GetConsensus());
+        if (result == BodyRecordVerification::NOT_HELD) {
+            nNotHeld++;
+            continue;
+        }
+        nChecked++;
+        if (result == BodyRecordVerification::OK) {
+            nOk++;
+            continue;
+        }
+        // At minimum: log it clearly (2.4's own stated requirement) -- an
+        // operator running this RPC unattended (e.g. a periodic health
+        // check) must not depend on reading the RPC's own return value to
+        // learn their local history has a real hole.
+        LogPrintf("verifybodystore: *** body-store record at rest failed verification at height %d, hash=%s (%s)\n",
+                  height, pindex->GetBlockHash().ToString(), BodyRecordVerificationToString(result));
+        UniValue m(UniValue::VOBJ);
+        m.pushKV("height", height);
+        m.pushKV("hash", pindex->GetBlockHash().GetHex());
+        m.pushKV("reason", BodyRecordVerificationToString(result));
+        mismatches.push_back(m);
+    }
+
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("checked", nChecked);
+    obj.pushKV("ok", nOk);
+    obj.pushKV("not_held", nNotHeld);
+    obj.pushKV("mismatches", mismatches);
+    return obj;
+}
+
 static UniValue GetNetworksInfo() {
     UniValue networks(UniValue::VARR);
     for (int n = 0; n < NET_MAX; ++n) {
@@ -1038,6 +1141,7 @@ static const CRPCCommand commands[] =
                 {"network", "getnettotals",       &getnettotals,       {}},
                 {"network", "getbodyrangecoverage", &getbodyrangecoverage, {}},
                 {"network", "getbodyrangecoverageheights", &getbodyrangecoverageheights, {"start_height", "end_height"}},
+                {"network", "verifybodystore",     &verifybodystore,   {"start_height", "end_height"}},
                 {"network", "getnetworkinfo",     &getnetworkinfo,     {}},
                 {"network", "setban",             &setban,             {"subnet",  "command", "bantime", "absolute"}},
                 {"network", "listbanned",         &listbanned,         {}},
