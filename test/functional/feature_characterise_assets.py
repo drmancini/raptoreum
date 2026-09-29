@@ -289,6 +289,17 @@ class CharacteriseAssetsTest(BitcoinTestFramework):
         self.check("issuance: duplicate name against a confirmed asset",
                     lambda: self.issue(name=b"REALASSET"))
 
+        # None of the issuance-row checks above broadcast or mined anything
+        # (each merely built and rejected a tx), so nothing depends on the
+        # UTXOs those rows' own fresh_tx() calls locked -- unlocking here,
+        # not just before the two block-level tests further down, keeps the
+        # remaining ~10 rows below (update/mint/transfer) from hitting the
+        # same pool exhaustion the later comment already documents (found
+        # empirically: this exact "mint: assetId does not exist" row started
+        # failing with ValueError: max() arg is an empty sequence once the
+        # issuance rows above had each locked one away first).
+        self.nodes[0].lockunspent(True)
+
         # --- update: CheckUpdateAssetTx, mempool-standalone -------------------
         self.check("update: assetId does not exist",
                     lambda: self.update(assetId=("0" * 64).encode()))
