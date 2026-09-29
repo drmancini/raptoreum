@@ -14,6 +14,9 @@
 #include <evo/deterministicmns.h>
 #include <llmq/quorums_commitment.h>
 #include <llmq/quorums_blockprocessor.h>
+#include <assets/assets.h>
+
+#include <memory>
 
 bool CheckSpecialTx(const CTransaction &tx, const CBlockIndex *pindexPrev, CValidationState &state,
                     const CCoinsViewCache &view, CAssetsCache *assetsCache, bool check_sigs) {
@@ -122,10 +125,34 @@ bool ProcessSpecialTxsInBlock(const CBlock &block, const CBlockIndex *pindex, CV
 
         int64_t nTime1 = GetTimeMicros();
 
-        for (const auto &ptr_tx: block.vtx) {
-            if (!CheckSpecialTx(*ptr_tx, pindex->pprev, state, view, assetsCache, fCheckCbTxMerleRoots)) {
+        // F-223 (3.4, bug 1 / B8): this loop validates every special tx in the
+        // block in ONE pass, before ConnectBlock's own separate per-tx loop
+        // (UpdateCoins/AddAssets, validation.cpp) ever mutates assetsCache --
+        // so two asset txs in the same block that both touch the same name or
+        // the same mint cap were each checked against the identical pre-block
+        // snapshot. A scratch copy, local to this validation pass and mutated
+        // immediately after each asset tx's own check succeeds, gives later
+        // txs in the same block visibility into earlier ones' effects,
+        // without touching assetsCache itself -- that stays exactly as
+        // before: untouched here, mutated once per tx (in tx order) by
+        // ConnectBlock's own real, undo-recording pass. Discarded at the end
+        // of this function; never flushed anywhere.
+        std::unique_ptr<CAssetsCache> scratchAssetsCache;
+        if (assetsCache) {
+            scratchAssetsCache = std::make_unique<CAssetsCache>(*assetsCache);
+        }
+
+        for (unsigned int i = 0; i < block.vtx.size(); i++) {
+            const auto &ptr_tx = block.vtx[i];
+            CAssetsCache *cacheForCheck = scratchAssetsCache ? scratchAssetsCache.get() : assetsCache;
+            if (!CheckSpecialTx(*ptr_tx, pindex->pprev, state, view, cacheForCheck, fCheckCbTxMerleRoots)) {
                 // pass the state returned by the function above
                 return false;
+            }
+            if (scratchAssetsCache && ptr_tx->nVersion == 3 &&
+                (ptr_tx->nType == TRANSACTION_NEW_ASSET || ptr_tx->nType == TRANSACTION_UPDATE_ASSET ||
+                 ptr_tx->nType == TRANSACTION_MINT_ASSET)) {
+                AddAssets(*ptr_tx, pindex->nHeight, i, scratchAssetsCache.get());
             }
             if (!ProcessSpecialTx(*ptr_tx, pindex, state)) {
                 // pass the state returned by the function above

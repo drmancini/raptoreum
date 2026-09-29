@@ -490,7 +490,8 @@ int GetUTXOConfirmations(const COutPoint &outpoint);
 void UpdateCoins(const CTransaction &tx, CCoinsViewCache &inputs, int nHeight);
 
 void UpdateCoins(const CTransaction &tx, CCoinsViewCache &inputs, CTxUndo &txundo, int nHeight,
-                 CAssetsCache *assetCache = nullptr, std::pair <std::string, CBlockAssetUndo> *undoAssetData = nullptr);
+                 uint32_t nTxIndex = 0, CAssetsCache *assetCache = nullptr,
+                 std::pair <std::string, CBlockAssetUndo> *undoAssetData = nullptr);
 
 /** Transaction validation functions */
 
