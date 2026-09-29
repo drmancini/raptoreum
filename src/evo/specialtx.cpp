@@ -125,7 +125,7 @@ bool ProcessSpecialTxsInBlock(const CBlock &block, const CBlockIndex *pindex, CV
 
         int64_t nTime1 = GetTimeMicros();
 
-        // F-222 (3.4, bug 1 / B8): this loop validates every special tx in the
+        // F-223 (3.4, bug 1 / B8): this loop validates every special tx in the
         // block in ONE pass, before ConnectBlock's own separate per-tx loop
         // (UpdateCoins/AddAssets, validation.cpp) ever mutates assetsCache --
         // so two asset txs in the same block that both touch the same name or

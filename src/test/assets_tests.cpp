@@ -658,7 +658,7 @@ BOOST_FIXTURE_TEST_CASE(assets_invalid_cases, TestChainDIP3BeforeActivationSetup
     }
 }
 
-// F-222 (3.4, bug 1 / B8): same root cause as the mint-cap case below --
+// F-223 (3.4, bug 1 / B8): same root cause as the mint-cap case below --
 // ProcessSpecialTxsInBlock validates every special tx in a block in ONE pass
 // (evo/specialtx.cpp), against a CAssetsCache that is mutated only
 // afterwards, in ConnectBlock's own separate per-tx loop (UpdateCoins/
@@ -695,7 +695,7 @@ BOOST_FIXTURE_TEST_CASE(assets_same_block_duplicate_name_rejected, TestChainDIP3
     BOOST_CHECK(block->GetHash() != ::ChainActive().Tip()->GetBlockHash());
 }
 
-// F-222 (3.4, bug 1 / B8): the mint-cap half of the same root cause.
+// F-223 (3.4, bug 1 / B8): the mint-cap half of the same root cause.
 // checkAssetMintAmount's own cap check (asset.mintCount >= asset.maxMintCount,
 // evo/providertx.cpp) reads the SAME pre-block CAssetsCache snapshot for
 // every mint tx in the block, so N independently-signed mints against a cap
@@ -735,7 +735,7 @@ BOOST_FIXTURE_TEST_CASE(assets_same_block_mint_exceeds_cap_rejected, TestChainDI
     BOOST_CHECK(block->GetHash() != ::ChainActive().Tip()->GetBlockHash());
 }
 
-// F-222 (3.4, bug 2 / B9): CAssetsCache::UndoMintAsset (assets/assets.cpp)
+// F-223 (3.4, bug 2 / B9): CAssetsCache::UndoMintAsset (assets/assets.cpp)
 // matches its undo record by assetId alone, scanning the block's ENTIRE
 // vUndoData vector with no break -- so it always ends up applying whichever
 // matching record is LAST in that vector, regardless of which tx is actually
@@ -826,7 +826,7 @@ BOOST_FIXTURE_TEST_CASE(assets_mint_undo_keyed_by_tx_index, TestChainDIP3BeforeA
     BOOST_CHECK_EQUAL(asset.circulatingSupply, 10);
 }
 
-// F-222 (3.4, bug 3): CheckNewAssetTx/CheckUpdateAssetTx's own distribution-type
+// F-223 (3.4, bug 3): CheckNewAssetTx/CheckUpdateAssetTx's own distribution-type
 // bound is `assetTx.type < 0 && assetTx.type > 3` (evo/providertx.cpp). type is
 // uint8_t, so `type < 0` is always false, and with `&&` the whole condition is
 // always false regardless -- no type value is ever rejected here. F-216 already
