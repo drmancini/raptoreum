@@ -91,38 +91,52 @@ BOOST_AUTO_TEST_CASE(commitment_mode_registered_on_devnet_and_regtest) {
     BOOST_CHECK_EQUAL(regUpdate->NodeThreshold().ThresholdStart(), 0);
 }
 
-BOOST_AUTO_TEST_CASE(commitment_mode_start_height_is_structurally_unreachable_on_devnet_and_regtest) {
-    const auto devParams = CreateChainParams(CBaseChainParams::DEVNET);
+BOOST_AUTO_TEST_CASE(commitment_mode_start_height_is_structurally_unreachable_on_regtest) {
     const auto regParams = CreateChainParams(CBaseChainParams::REGTEST);
 
-    const Update *devUpdate = devParams->Updates().GetUpdate(EUpdate::COMMITMENT_MODE);
     const Update *regUpdate = regParams->Updates().GetUpdate(EUpdate::COMMITMENT_MODE);
-    BOOST_REQUIRE(devUpdate != nullptr);
     BOOST_REQUIRE(regUpdate != nullptr);
 
-    // A height no real devnet/regtest test chain has ever reached (10,000 is
-    // already generous -- TestChain100Setup-based fixtures top out around a
-    // few hundred blocks) is still tens of millions of rounds short of
+    // A height no real regtest test chain has ever reached (10,000 is already
+    // generous -- TestChain100Setup-based fixtures top out around a few
+    // hundred blocks) is still tens of millions of rounds short of
     // startHeight. At mainnet's real 2-minute spacing (consensus.
     // nPowTargetSpacing, chainparams.cpp's own CMainParams), the remaining
     // distance is centuries, not blocks a test -- or a live network -- could
-    // ever plausibly reach by accident.
+    // ever plausibly reach by accident. Regtest keeps F-214's original
+    // unreachable placeholder; only devnet was moved to a real height
+    // (F-228), see commitment_mode_start_height_is_reachable_on_devnet below.
     const int64_t tallTestHeight = 10000;
-    const int64_t blocksRemaining = devUpdate->StartHeight() - tallTestHeight;
+    const int64_t blocksRemaining = regUpdate->StartHeight() - tallTestHeight;
     BOOST_REQUIRE_GT(blocksRemaining, 10000000); // tens of millions of blocks away
     const int64_t yearsAtMainnetSpacing = (blocksRemaining * 2) / (60 * 24 * 365); // 2 min/block
     BOOST_CHECK_GT(yearsAtMainnetSpacing, 100); // absurd on any realistic timescale
 
-    CBlockIndex devTip = MakeIndexAtHeight(tallTestHeight);
     CBlockIndex regTip = MakeIndexAtHeight(tallTestHeight);
-
-    BOOST_CHECK(!devParams->Updates().IsActive(EUpdate::COMMITMENT_MODE, &devTip));
     BOOST_CHECK(!regParams->Updates().IsActive(EUpdate::COMMITMENT_MODE, &regTip));
 
-    StateInfo devState = devParams->Updates().State(EUpdate::COMMITMENT_MODE, &devTip);
     StateInfo regState = regParams->Updates().State(EUpdate::COMMITMENT_MODE, &regTip);
-    BOOST_CHECK(devState.State == EUpdateState::Defined);
     BOOST_CHECK(regState.State == EUpdateState::Defined);
+}
+
+BOOST_AUTO_TEST_CASE(commitment_mode_start_height_is_reachable_on_devnet) {
+    // F-228: devnet's startHeight moved from F-214's unreachable placeholder
+    // to 100, mirroring ROUND_VOTING's own real, working devnet activation
+    // height directly above it in chainparams.cpp -- devnet carries no real
+    // value and needs none of F-213 point 4's mainnet coverage precondition,
+    // so a low, genuinely reachable height is a safe, deliberate choice for
+    // exercising the mechanism end to end on a live network.
+    const auto devParams = CreateChainParams(CBaseChainParams::DEVNET);
+    const Update *devUpdate = devParams->Updates().GetUpdate(EUpdate::COMMITMENT_MODE);
+    BOOST_REQUIRE(devUpdate != nullptr);
+    BOOST_CHECK_EQUAL(devUpdate->StartHeight(), 100);
+
+    // Before startHeight, still Defined/inactive -- same shape as before the
+    // height was reachable, just close instead of astronomically far.
+    CBlockIndex devTipBefore = MakeIndexAtHeight(50);
+    BOOST_CHECK(!devParams->Updates().IsActive(EUpdate::COMMITMENT_MODE, &devTipBefore));
+    StateInfo devStateBefore = devParams->Updates().State(EUpdate::COMMITMENT_MODE, &devTipBefore);
+    BOOST_CHECK(devStateBefore.State == EUpdateState::Defined);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
