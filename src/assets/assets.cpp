@@ -290,6 +290,12 @@ bool CAssetsCache::CheckIfAssetExists(std::string assetId) {
     }
 
     if (mapAsset.count(assetId) > 0) {
+        // F-224: only meaningful when `this` IS the global singleton -- see
+        // the class-body comment in assets.h. A local per-call cache (this
+        // != passetsCache.get()) never populated assetLruOrder, so this is
+        // always a no-op for it.
+        if (this == passetsCache.get())
+            TouchAsset(assetId);
         return true;
     }
 
@@ -300,6 +306,10 @@ bool CAssetsCache::CheckIfAssetExists(std::string assetId) {
     if (passetsdb->ReadAssetData(assetId, asset, nHeight, blockHash)) {
         CDatabaseAssetData newAsset(asset, nHeight, blockHash);
         mapAsset.insert(std::make_pair(assetId, newAsset));
+        if (this == passetsCache.get()) {
+            TouchAsset(assetId);
+            EvictOverflowAssets();
+        }
         return true;
     }
     return false;
@@ -310,11 +320,17 @@ bool CAssetsCache::GetAssetId(std::string name, std::string &assetId) {
     auto it = mapAssetId.find(name);
     if (it != mapAssetId.end()) {
         assetId = it->second;
+        if (this == passetsCache.get())
+            TouchAssetName(name);
         return true;
     }
     //try to get asset id from the db
     if (passetsdb->ReadAssetId(name, assetId)) {
         mapAssetId.insert(std::make_pair(name, assetId));
+        if (this == passetsCache.get()) {
+            TouchAssetName(name);
+            EvictOverflowAssetIds();
+        }
         return true;
     }
     return false;
@@ -324,6 +340,8 @@ bool CAssetsCache::GetAssetMetaData(std::string assetId, CAssetMetaData &asset) 
     auto it = mapAsset.find(assetId);
     if (it != mapAsset.end()) {
         asset = it->second.asset;
+        if (this == passetsCache.get())
+            TouchAsset(assetId);
         return true;
     }
 
@@ -331,6 +349,12 @@ bool CAssetsCache::GetAssetMetaData(std::string assetId, CAssetMetaData &asset) 
     if (it2 != passetsCache->mapAsset.end()) {
         mapAsset.insert(std::make_pair(assetId, it2->second));
         asset = it2->second.asset;
+        // Note: when `this == passetsCache.get()` this branch is dead --
+        // `it` (searched above) and `it2` search the identical map, so a
+        // miss on `it` guarantees a miss on `it2` too. Guard kept anyway
+        // for clarity and in case that invariant ever changes.
+        if (this == passetsCache.get())
+            TouchAsset(assetId);
         return true;
     }
 
@@ -339,9 +363,106 @@ bool CAssetsCache::GetAssetMetaData(std::string assetId, CAssetMetaData &asset) 
     if (passetsdb->ReadAssetData(assetId, asset, nHeight, blockHash)) {
         CDatabaseAssetData newAsset(asset, nHeight, blockHash);
         mapAsset.insert(std::make_pair(assetId, newAsset));
+        if (this == passetsCache.get()) {
+            TouchAsset(assetId);
+            EvictOverflowAssets();
+        }
         return true;
     }
     return false;
+}
+
+void CAssetsCache::TouchAsset(const std::string &assetId) {
+    auto it = assetLruIndex.find(assetId);
+    if (it != assetLruIndex.end()) {
+        assetLruOrder.erase(it->second);
+    }
+    assetLruOrder.push_front(assetId);
+    assetLruIndex[assetId] = assetLruOrder.begin();
+}
+
+void CAssetsCache::TouchAssetName(const std::string &name) {
+    auto it = assetIdLruIndex.find(name);
+    if (it != assetIdLruIndex.end()) {
+        assetIdLruOrder.erase(it->second);
+    }
+    assetIdLruOrder.push_front(name);
+    assetIdLruIndex[name] = assetIdLruOrder.begin();
+}
+
+void CAssetsCache::EvictOverflowAssets(size_t cap) {
+    while (mapAsset.size() > cap) {
+        // Walk from the least-recently-touched end. F-224: never evict an
+        // entry still in NewAssetsToAdd -- DumpCacheToDatabase (the only
+        // path that durably writes an asset to passetsdb) runs on
+        // FlushStateToDisk's own periodic/critical schedule
+        // (DATABASE_FLUSH_INTERVAL, validation.h:127 = 24h, or sooner only
+        // under coin-cache pressure), not on every block's Flush() --
+        // confirmed by reading FlushStateToDisk's fDoFullFlush conditions
+        // (validation.cpp) and DumpCacheToDatabase's own caller
+        // (validation.cpp:3155, guarded by fDoFullFlush). So a just-
+        // confirmed asset can have NO LevelDB copy at all for up to a day;
+        // evicting its only in-memory copy in that window would make it
+        // invisible to every reader (GetAssetMetaData's own DB fallback
+        // would miss too) -- a real correctness regression, not just a
+        // cache-miss slowdown. CDatabaseAssetData::operator< (assets.h)
+        // orders/compares purely on asset.assetId, so this set lookup is
+        // exactly "is *any* pending write recorded for this assetId".
+        std::string victim;
+        bool found = false;
+        for (auto rit = assetLruOrder.rbegin(); rit != assetLruOrder.rend(); ++rit) {
+            auto mapIt = mapAsset.find(*rit);
+            if (mapIt == mapAsset.end())
+                continue; // stale LRU record; skip (cleanup happens on next Touch)
+            if (NewAssetsToAdd.count(mapIt->second))
+                continue; // not yet durable -- must not evict
+            victim = *rit;
+            found = true;
+            break;
+        }
+        if (!found)
+            break; // nothing safe to evict; accept temporary overflow
+
+        auto mapIt = mapAsset.find(victim);
+        mapAssetId.erase(mapIt->second.asset.name);
+        mapAsset.erase(mapIt);
+        auto idxIt = assetLruIndex.find(victim);
+        if (idxIt != assetLruIndex.end()) {
+            assetLruOrder.erase(idxIt->second);
+            assetLruIndex.erase(idxIt);
+        }
+    }
+}
+
+void CAssetsCache::EvictOverflowAssetIds(size_t cap) {
+    while (mapAssetId.size() > cap) {
+        // Same durability guard as EvictOverflowAssets, applied via the
+        // corresponding mapAsset entry (a mapAssetId entry populated by
+        // InsertAsset always has one; one populated by GetAssetId's own DB
+        // fallback came FROM passetsdb, so it is never dirty).
+        std::string victim;
+        bool found = false;
+        for (auto rit = assetIdLruOrder.rbegin(); rit != assetIdLruOrder.rend(); ++rit) {
+            auto mapIt = mapAssetId.find(*rit);
+            if (mapIt == mapAssetId.end())
+                continue;
+            auto assetIt = mapAsset.find(mapIt->second);
+            if (assetIt != mapAsset.end() && NewAssetsToAdd.count(assetIt->second))
+                continue;
+            victim = *rit;
+            found = true;
+            break;
+        }
+        if (!found)
+            break;
+
+        mapAssetId.erase(victim);
+        auto idxIt = assetIdLruIndex.find(victim);
+        if (idxIt != assetIdLruIndex.end()) {
+            assetIdLruOrder.erase(idxIt->second);
+            assetIdLruIndex.erase(idxIt);
+        }
+    }
 }
 
 //! This will get the amount that an address for a certain asset contains from the database if they cache doesn't already have it
@@ -516,11 +637,23 @@ bool CAssetsCache::Flush() {
         for (auto &item : mapAssetAddressAmount)
             passetsCache->mapAssetAddressAmount[item.first] = item.second;
 
-        for (auto &item: mapAsset)
+        // F-224 (build-plan 3.4b item 1): this loop is the main growth site
+        // the archive doc named -- every block's local cache (empty at
+        // ConnectTip/DisconnectTip, evo/specialtx.cpp's scratch cache, or a
+        // full ReplayBlocks copy) merges its own mapAsset here with no cap,
+        // so passetsCache->mapAsset grew for the life of the process.
+        // Touch + evict on the GLOBAL object right after merging.
+        for (auto &item: mapAsset) {
             passetsCache->mapAsset[item.first] = item.second;
+            passetsCache->TouchAsset(item.first);
+        }
+        passetsCache->EvictOverflowAssets();
 
-        for (auto &item: mapAssetId)
+        for (auto &item: mapAssetId) {
             passetsCache->mapAssetId[item.first] = item.second;
+            passetsCache->TouchAssetName(item.first);
+        }
+        passetsCache->EvictOverflowAssetIds();
 
         return true;
 

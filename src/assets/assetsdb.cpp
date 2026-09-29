@@ -110,6 +110,13 @@ bool CAssetsDB::LoadAssets() {
             CDatabaseAssetData data;
             if (pcursor->GetValue(data)) {
                 passetsCache->mapAsset.insert(std::make_pair(data.asset.assetId, data));
+                // F-224: register with the eviction LRU too, or a startup-
+                // loaded asset would never be a candidate for later
+                // recency-based eviction (EvictOverflowAssets only walks
+                // assetLruOrder) and the cap would only ever bite entries
+                // touched after boot -- the ~2,500 loaded here would sit
+                // outside the bound forever.
+                passetsCache->TouchAsset(data.asset.assetId);
                 pcursor->Next();
 
                 // Loaded enough from database to have in memory.
@@ -136,6 +143,8 @@ bool CAssetsDB::LoadAssets() {
             if (pcursor2->GetValue(value)) {
                 passetsCache->mapAssetId.insert(
                         std::make_pair(key.second, value));
+                // F-224: see the mapAsset loop above -- same reasoning.
+                passetsCache->TouchAssetName(key.second);
                 if (passetsCache->mapAssetId.size() > MAX_CACHE_ASSETS_SIZE)
                     break;
                 pcursor2->Next();
