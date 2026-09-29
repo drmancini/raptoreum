@@ -205,7 +205,19 @@ namespace interfaces {
                 if (::fPruneMode) {
                     CBlockIndex *block = stop_height ? ::ChainActive()[*stop_height] : ::ChainActive().Tip();
                     while (block && block->nHeight >= start_height) {
-                        if ((block->nStatus & BLOCK_HAVE_DATA) == 0) {
+                        // 4.3.2 (build-plan.md's 4.3 row, F-225): was
+                        // (block->nStatus & BLOCK_HAVE_DATA) == 0 -- the same
+                        // F-36-class conflation already fixed at every other
+                        // site in this tree (e.g. rpc/blockchain.cpp's
+                        // GetBlockChecked, F-164). BLOCK_HAVE_DATA and
+                        // BLOCK_HAVE_BODIES are cleared together by
+                        // PruneOneBlockFile TODAY (validation.cpp), so this
+                        // was accidentally correct, not designed correct --
+                        // HaveBodies is the actual, established query for
+                        // "does this node hold this block's bodies" that
+                        // every other body-retention-aware site in this
+                        // codebase already uses.
+                        if (!HaveBodies(block)) {
                             return block->nHeight;
                         }
                         block = block->pprev;

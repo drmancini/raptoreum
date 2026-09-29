@@ -219,7 +219,11 @@ bool TxIndex::WriteBlock(const CBlock &block, const CBlockIndex *pindex) {
 
 BaseIndex::DB &TxIndex::GetDB() const { return *m_db; }
 
-bool TxIndex::FindTx(const uint256 &tx_hash, uint256 &block_hash, CTransactionRef &tx) const {
+bool TxIndex::FindTx(const uint256 &tx_hash, uint256 &block_hash, CTransactionRef &tx,
+                     bool *bodies_not_held) const {
+    if (bodies_not_held) {
+        *bodies_not_held = false;
+    }
     CDiskTxPos postx;
     if (!m_db->ReadTxPos(tx_hash, postx)) {
         return false;
@@ -250,7 +254,20 @@ bool TxIndex::FindTx(const uint256 &tx_hash, uint256 &block_hash, CTransactionRe
     {
         LOCK(cs_main);
         const CBlockIndex *pindex = LookupBlockIndex(header.GetHash());
-        if (!pindex || !HaveBodies(pindex)) {
+        if (!pindex) {
+            // The index has a tx-position record naming a block this node's
+            // own block index doesn't know at all -- a genuinely different,
+            // more surprising problem than "bodies not held" (which assumes
+            // the block is known and just not held in full), so it does NOT
+            // set bodies_not_held.
+            return error("%s: indexed block %s not found in the block index", __func__, header.GetHash().ToString());
+        }
+        if (!HaveBodies(pindex)) {
+            // 4.3.3 (F-225): the block is real and known -- this node simply
+            // doesn't hold its bodies (see the comment above this block).
+            if (bodies_not_held) {
+                *bodies_not_held = true;
+            }
             return error("%s: bodies not held for block %s", __func__, header.GetHash().ToString());
         }
     }

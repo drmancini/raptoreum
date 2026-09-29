@@ -2465,10 +2465,34 @@ bool AppInitMain(const util::Ref &context, NodeContext &node, interfaces::BlockA
                     break;
                 }
 
-                // Check for changed -assetindex state
+                // Check for changed -assetindex state. Unlike -addressindex/
+                // -timestampindex/-spentindex/-futureindex just below (each a
+                // full historical log that genuinely needs a block replay to
+                // rebuild), -assetindex's own address-balance secondary index
+                // (assets.cpp's AddAssetBlance/RemoveAddressBalance -- the
+                // ONLY thing this flag gates; asset existence/metadata is
+                // always maintained regardless, see assets/assets.cpp) is a
+                // pure aggregate over currently-unspent asset outputs, so
+                // turning it ON can be rebuilt from a coins-set scan alone
+                // (build-plan.md's 4.3.1 row, docs/findings.md's F-225) --
+                // which a windowed node always has in full, unlike block
+                // bodies -- instead of demanding -reindex, which it may not
+                // be able to do. Turning it OFF needs nothing: the data
+                // simply stops being read/maintained. Deferred until after
+                // the coins database is initialized below, since the scan
+                // needs it; skipped entirely under -reindex/
+                // -reindex-chainstate, whose own replay already rebuilds
+                // (or, for -reindex, wipes and repopulates) this data via the
+                // normal AddAssetBlance path once fAssetIndex reflects the
+                // request, set unconditionally just below.
+                bool fAssetIndexNeedsCoinsScan = false;
                 if (fAssetIndex != gArgs.GetBoolArg("-assetindex", DEFAULT_ASSETINDEX)) {
-                    strLoadError = _("You need to rebuild the database using -reindex to change -assetindex");
-                    break;
+                    bool fAssetIndexRequested = gArgs.GetBoolArg("-assetindex", DEFAULT_ASSETINDEX);
+                    if (fAssetIndexRequested && !fReset && !fReindexChainState) {
+                        fAssetIndexNeedsCoinsScan = true;
+                    }
+                    fAssetIndex = fAssetIndexRequested;
+                    pblocktree->WriteFlag("assetindex", fAssetIndex);
                 }
 
                 // Check for changed -timestampindex state
@@ -2562,6 +2586,18 @@ bool AppInitMain(const util::Ref &context, NodeContext &node, interfaces::BlockA
 
                 if (failed_chainstate_init) {
                     break; // out of the chainstate activation do-while
+                }
+
+                // 4.3.1 (F-225): the coins database is initialized now --
+                // build the asset address-balance index from it if -assetindex
+                // was just turned on outside of any reindex (see the check
+                // above for why this is safe and sufficient).
+                if (fAssetIndexNeedsCoinsScan) {
+                    uiInterface.InitMessage(_("Building asset index from the current coin set..."));
+                    if (!BuildAssetIndexFromCoins(::ChainstateActive().CoinsDB())) {
+                        strLoadError = _("Failed to build asset index from the current coin set");
+                        break;
+                    }
                 }
 
                 if (!deterministicMNManager->UpgradeDBIfNeeded() || !llmq::quorumBlockProcessor->UpgradeDB()) {

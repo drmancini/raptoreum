@@ -1320,7 +1320,19 @@ public:
 
     struct ScanResult {
         enum {
-            SUCCESS, FAILURE, USER_ABORT
+            // 4.3.2 (build-plan.md's 4.3 row, docs/findings.md's F-225):
+            // RANGE_NOT_HELD is a distinct outcome from FAILURE -- FAILURE
+            // covers a block this node expected to be able to read but
+            // couldn't (corruption, an I/O error), discovered mid-scan one
+            // block at a time; RANGE_NOT_HELD is detected UP FRONT, before
+            // scanning a single block, when the requested range structurally
+            // reaches outside what this node's own retention actually covers
+            // (chain().findPruned -- see ScanForWalletTransactions). Matches
+            // this project's own established NOT_HELD-vs-failure distinction
+            // (validation.h's BodyRecordVerification) in spirit: "nothing
+            // claimed held, nothing wrong" rather than "something that should
+            // have worked didn't".
+            SUCCESS, FAILURE, USER_ABORT, RANGE_NOT_HELD
         } status = SUCCESS;
 
         //! Hash and height of most recent block that was successfully scanned.
@@ -1333,6 +1345,10 @@ public:
         //! read errors or pruning. Will be set if status is FAILURE, unset if
         //! status is SUCCESS, and may or may not be set if status is
         //! USER_ABORT.
+        //!
+        //! For RANGE_NOT_HELD, holds the hash of the first block (from
+        //! first_block onward) this node does not hold bodies for -- the
+        //! same "first offending height" chain().findPruned itself reports.
         uint256 last_failed_block;
     };
 
