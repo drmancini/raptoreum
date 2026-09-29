@@ -106,18 +106,28 @@ static const unsigned int MAX_GETDATA_SZ = 1000;
  *  disk-I/O cost bug, fixed; F-151: even after that fix, the per-request
  *  header-read cost still scales with the RECORD's own size, not with what
  *  the request actually asks for -- also fixed, `ReadBodyRange` now reads
- *  only the one offset entry it needs) and why NEITHER a per-connection
- *  records-and-bytes budget nor `-maxuploadtarget` integration exist yet
- *  (F-143's own recorded scope boundary, still deferred to 2.2.3b). A
- *  handshaked peer can still send unlimited GETBODYRANGE requests with no
- *  rate limit anywhere in this file (F-150's own MEDIUM finding; confirmed
- *  no existing per-message-type limit protects this the way
- *  MAX_BLOCKTXN_DEPTH protects GETBLOCKTXN) -- **enforced, not just
- *  documented**: the dispatch arm below requires `-servebodyrange` (default
- *  off, matching this file's own `-perfwithhold*` precedent for a
- *  still-unfinished feature) before it does anything at all. A fixed,
- *  generous chunking default is enough to keep a single response
- *  well-behaved regardless, once that flag is set. */
+ *  only the one offset entry it needs).
+ *
+ *  F-218 (build-plan.md's 2.2 row): the per-connection records-and-bytes
+ *  budget F-143 originally deferred is now built -- see
+ *  MAX_BODYRANGE_SERVE_BYTES_TOKEN_BUCKET/MAX_BODYRANGE_SERVE_REQUESTS_TOKEN_BUCKET's
+ *  own doc comment (net.h) for the full design, and the GETBODYRANGE
+ *  dispatch arm below for the enforcement itself: a handshaked peer no
+ *  longer gets unlimited GETBODYRANGE requests serviced (F-150's own MEDIUM
+ *  finding; MAX_BLOCKTXN_DEPTH's own depth cap protects GETBLOCKTXN, but had
+ *  no analogue here until now). `-maxuploadtarget`'s own global bandwidth
+ *  accounting (net.cpp's RecordBytesSent) already counted every
+ *  GETBODYRANGE response's bytes automatically -- PushMessage's own
+ *  send-buffer path is generic across every message type -- but nothing
+ *  ever made the SERVING DECISION consult it; F-218 wires that in too
+ *  (`connman->OutboundTargetReached(false)`, matching this file's own
+ *  MEMPOOL-handler precedent for exactly that check, just below).
+ *
+ *  `-servebodyrange` (default off, matching this file's own `-perfwithhold*`
+ *  precedent for a still-unfinished feature) remains the first, all-or-
+ *  nothing gate -- the per-connection budget only matters once an operator
+ *  has opted in. A fixed, generous chunking default keeps a single response
+ *  well-behaved regardless, independent of the new budget. */
 static const uint64_t DEFAULT_MAX_BODYRANGE_BYTES = 1024 * 1024;
 // The two static_asserts below are what make BuildBodyRangeResponse's own
 // "the first body is always included, regardless of its own size" rule
@@ -207,6 +217,36 @@ CHAIN_SYNC_TIMEOUT = 20 * 60; // 20 minutes
 /** How frequently to check for stale tips, in seconds */
 static constexpr int64_t
 STALE_CHECK_INTERVAL = 2.5 * 60; // 2.5 minutes (~block interval)
+
+/** F-218 (build-plan.md's 2.2 row): the refill RATE for the serving-side
+ *  GETBODYRANGE token buckets -- see net.h's own
+ *  MAX_BODYRANGE_SERVE_BYTES_TOKEN_BUCKET/MAX_BODYRANGE_SERVE_REQUESTS_TOKEN_BUCKET
+ *  doc comment for the caps themselves and the full reasoning. Computed
+ *  here, not in net.h, because both the cap constants (net.h) and
+ *  STALE_CHECK_INTERVAL (this file) need to be in scope together, and
+ *  STALE_CHECK_INTERVAL is this file's own file-local constant -- one full
+ *  bucket refills exactly once per STALE_CHECK_INTERVAL, "matches block
+ *  interval" per that constant's own doc comment, which is the cadence
+ *  GETBODYRANGE's own legitimate (tip-path-only, F-159) demand is actually
+ *  driven by. */
+static constexpr double BODYRANGE_SERVE_REQUESTS_PER_SECOND =
+        (double) MAX_BODYRANGE_SERVE_REQUESTS_TOKEN_BUCKET / STALE_CHECK_INTERVAL;
+static constexpr double BODYRANGE_SERVE_BYTES_PER_SECOND =
+        (double) MAX_BODYRANGE_SERVE_BYTES_TOKEN_BUCKET / STALE_CHECK_INTERVAL;
+
+// Pins the relationship between the two serving-budget caps (net.h) and this
+// file's own chunk size / consensus worst-case-block-body-byte ceiling so a
+// future change to any of the three is forced to reconsider it rather than
+// silently regressing -- matching F-217's own static_assert precedent
+// (MAX_PROTOCOL_MESSAGE_LENGTH < MAX_SIZE) for exactly this class of
+// cross-constant relationship. This is the one place DEFAULT_MAX_BODYRANGE_BYTES
+// (this file) and COMMITMENT_BUDGET_BODY_BYTES/the net.h serving-budget caps
+// are all actually in scope together.
+static_assert((uint64_t) MAX_BODYRANGE_SERVE_REQUESTS_TOKEN_BUCKET * DEFAULT_MAX_BODYRANGE_BYTES >=
+              MAX_BODYRANGE_SERVE_BYTES_TOKEN_BUCKET,
+              "the per-connection GETBODYRANGE request-token-bucket cap must be enough maximally-sized "
+              "chunks to cover one full byte-token-bucket's worth of serving in the same window");
+
 /** How frequently to check for extra outbound peers and disconnect, in seconds */
 static constexpr int64_t
 EXTRA_PEER_CHECK_INTERVAL = 45;
@@ -2754,7 +2794,14 @@ SendBlockTransactions(const CBlock &block, const BlockTransactionsRequest &req, 
 // confirmed no EXCLUSIVE_LOCKS_REQUIRED annotation on either in net.h), this
 // function takes no lock at all: the whole point of 2.2.3 is a serving path
 // that never touches cs_main, not even incidentally.
-inline void static
+//
+// F-218: now returns the response's own real serialized size, so the
+// GETBODYRANGE dispatch arm below can charge the serving byte-budget by
+// ACTUAL wire cost -- matching SendBlockTransactions/F-202's own
+// GetSerializeSize precedent (measure the real cost, never assume
+// worst-case) -- rather than pre-charging a pessimistic ceiling before
+// this function even runs.
+inline uint64_t static
 SendBodyRange(const CGetBodyRange &req, GetBodyRangeValidation validation, const FlatFilePos &pos,
                CNode *pfrom, CConnman *connman) {
     CBodyRange resp;
@@ -2767,8 +2814,10 @@ SendBodyRange(const CGetBodyRange &req, GetBodyRangeValidation validation, const
         resp.hashBlock = req.hashBlock;
         resp.nStartIndex = req.nStartIndex;
     }
+    uint64_t nResponseBytes = GetSerializeSize(resp, SER_NETWORK, PROTOCOL_VERSION);
     CNetMsgMaker msgMaker(pfrom->GetSendVersion());
     connman->PushMessage(pfrom, msgMaker.Make(NetMsgType::BODYRANGE, resp));
+    return nResponseBytes;
 }
 
 /** 2.2.3b (F-143's accepted spec, round-4 finding): UpdateBlockAvailability
@@ -3940,17 +3989,84 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
     }
 
     if (strCommand == NetMsgType::GETBODYRANGE) {
-        // F-150/F-151: this handler has no per-connection rate limit yet
-        // (2.2.3b's still-unbuilt budget layer) -- off by default, matching
-        // this file's own -perfwithhold*/-perfskipsigs precedent for a
-        // still-unfinished feature, until an operator explicitly opts in.
-        // Silently declining, like an unrecognised command (net_processing.cpp
+        // F-218 (build-plan.md's 2.2 row): refill both serving-side budgets
+        // unconditionally, even while -servebodyrange is off below -- matching
+        // CNode::addrTokenBucket's own unconditional-refill shape (this
+        // file's ADDR handler): refilling is pure arithmetic, no I/O, and a
+        // peer's budget must not read as artificially full the instant an
+        // operator flips -servebodyrange on mid-session.
+        const auto current_time = GetTime<std::chrono::microseconds>();
+        const auto time_diff = std::max(current_time - pfrom->nBodyRangeServeTokenTimestamp, 0us);
+        const double elapsed_seconds = Ticks<SecondsDouble>(time_diff);
+        pfrom->nBodyRangeServeRequestTokens = RefillServeBudgetTokens(
+                pfrom->nBodyRangeServeRequestTokens, elapsed_seconds,
+                BODYRANGE_SERVE_REQUESTS_PER_SECOND, (double) MAX_BODYRANGE_SERVE_REQUESTS_TOKEN_BUCKET);
+        pfrom->nBodyRangeServeByteTokens = RefillServeBudgetTokens(
+                pfrom->nBodyRangeServeByteTokens, elapsed_seconds,
+                BODYRANGE_SERVE_BYTES_PER_SECOND, (double) MAX_BODYRANGE_SERVE_BYTES_TOKEN_BUCKET);
+        pfrom->nBodyRangeServeTokenTimestamp = current_time;
+
+        // F-150/F-151 (corrected by F-218 -- see docs/findings.md's F-218
+        // entry for the "2.2.3b" naming-drift this comment used to cite:
+        // that sub-step turned out to mean the announcer ring, F-152, not
+        // this budget): off by default, matching this file's own
+        // -perfwithhold*/-perfskipsigs precedent for a still-unfinished
+        // feature, until an operator explicitly opts in. Silently
+        // declining, like an unrecognised command (net_processing.cpp
         // already treats those as safe to ignore, no Misbehaving), rather
         // than banning a peer for sending a real, spec-valid message this
         // node has simply chosen not to serve yet.
         if (!gArgs.GetBoolArg("-servebodyrange", false)) {
             return true;
         }
+
+        // F-218: the request-count budget gates BEFORE validation -- even a
+        // request that will turn out BAN/MISS-classified costs something to
+        // process (the nStartIndex-out-of-range BAN tier does a real
+        // ReadBodyRecordCount disk read, bodyrange.cpp's own
+        // ValidateGetBodyRange), so the cost is incurred by merely being
+        // asked, not only by a successful serve. Declining, not
+        // disconnecting -- matching SendBlockTransactions/F-202's own
+        // decline-and-recover shape rather than a hard disconnect: this is a
+        // per-CONNECTION budget that refills itself within one
+        // STALE_CHECK_INTERVAL on its own, so the peer's own existing
+        // retry/backoff machinery (bodyrange.h's NextBodyRetryBackoffMicros
+        // on the FETCHING side, when this peer is also a client of ours)
+        // recovers exactly as it already does for a declined oversized
+        // BLOCKTXN -- and budget exhaustion alone is not evidence of
+        // malice: an honest peer genuinely fast-catching-up could
+        // legitimately hit this, unlike the BAN path just below, which is
+        // reserved for a request an honest peer could never construct.
+        // Whitelisted peers bypass the budget entirely, matching this same
+        // handler's own upload-target exemption just below.
+        if (!pfrom->fWhitelisted && !BodyRangeServeBudgetAvailable(pfrom->nBodyRangeServeRequestTokens)) {
+            LogPrint(BCLog::NET, "GETBODYRANGE serving request-budget exhausted for peer=%d, declining\n",
+                     pfrom->GetId());
+            return true;
+        }
+
+        // F-218: -maxuploadtarget's own global bandwidth accounting
+        // (net.cpp's RecordBytesSent) already counts every GETBODYRANGE
+        // response's bytes automatically -- PushMessage's send-buffer path
+        // is generic across every message type -- but nothing ever made the
+        // SERVING DECISION for this handler consult it. Wired in now,
+        // matching this file's own MEMPOOL-handler precedent for the
+        // IDENTICAL condition (`OutboundTargetReached(false) &&
+        // !pfrom->fWhitelisted`) -- including that precedent's own
+        // disconnect action, deliberately NOT the decline-only shape just
+        // above: this checks a different, pre-existing, operator-configured
+        // GLOBAL resource that this file already treats as disconnect-worthy
+        // everywhere else it's checked, so reusing that established
+        // behaviour here is more consistent than inventing a second
+        // treatment for the same global check.
+        if (connman->OutboundTargetReached(false) && !pfrom->fWhitelisted) {
+            LogPrint(BCLog::NET, "getbodyrange request with bandwidth limit reached, disconnect peer=%d\n",
+                     pfrom->GetId());
+            pfrom->fDisconnect = true;
+            return true;
+        }
+
+        pfrom->nBodyRangeServeRequestTokens -= 1.0;
 
         // 2.2.3 (F-143's accepted spec, docs/build-plan.md's 2.2 row): off
         // cs_main entirely, except the brief, purely in-memory Misbehaving()
@@ -3977,7 +4093,25 @@ bool static ProcessMessage(CNode *pfrom, const std::string &strCommand, CDataStr
             return true;
         }
 
-        SendBodyRange(req, validation, pos, pfrom, connman);
+        // F-218: the byte budget only matters for an OK-classified request
+        // -- a MISS costs no real response bytes (an empty vBodies) and is
+        // already covered by the request-count budget above; gating it
+        // here too would double-penalize the same cheap event twice.
+        // Checked BEFORE building the response (BuildBodyRangeResponse
+        // still does real file I/O for an OK request) -- see
+        // BodyRangeServeBudgetAvailable's own doc comment (bodyrange.h) for
+        // why this is a "still has at least one token" pre-check against a
+        // bucket charged by ACTUAL bytes sent afterwards, not a pessimistic
+        // worst-case pre-charge.
+        if (validation == GetBodyRangeValidation::OK && !pfrom->fWhitelisted &&
+            !BodyRangeServeBudgetAvailable(pfrom->nBodyRangeServeByteTokens)) {
+            LogPrint(BCLog::NET, "GETBODYRANGE serving byte-budget exhausted for peer=%d, declining\n",
+                     pfrom->GetId());
+            return true;
+        }
+
+        uint64_t nResponseBytes = SendBodyRange(req, validation, pos, pfrom, connman);
+        pfrom->nBodyRangeServeByteTokens -= (double) nResponseBytes;
         return true;
     }
 

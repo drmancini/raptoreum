@@ -24,7 +24,7 @@
 #include <util/system.h>
 #include <threadinterrupt.h>
 #include <consensus/params.h>
-
+#include <consensus/consensus.h>
 #include <atomic>
 #include <deque>
 #include <stdint.h>
@@ -77,6 +77,79 @@ static constexpr double MAX_ADDR_RATE_PER_SECOND = 0.1;
  *  is exempt from this limit). */
 static constexpr size_t
 MAX_ADDR_PROCESSING_TOKEN_BUCKET = MAX_ADDR_TO_SEND;
+
+/** F-218 (build-plan.md's 2.2 row, docs/findings.md): caps for the
+ *  serving-side, per-connection GETBODYRANGE rate limiter
+ *  (CNode::nBodyRangeServeRequestTokens/nBodyRangeServeByteTokens below,
+ *  net_processing.cpp's GETBODYRANGE dispatch arm) -- closes the gap
+ *  net_processing.cpp's own DEFAULT_MAX_BODYRANGE_BYTES doc comment names: a
+ *  handshaked peer could send unlimited GETBODYRANGE requests, with no
+ *  per-message-type limit anywhere in that file protecting this the way
+ *  MAX_BLOCKTXN_DEPTH protects GETBLOCKTXN (F-150's own MEDIUM finding).
+ *
+ *  A token bucket, matching MAX_ADDR_RATE_PER_SECOND/
+ *  MAX_ADDR_PROCESSING_TOKEN_BUCKET's own shape immediately above
+ *  (CNode::addrTokenBucket) rather than a new mechanism, and for the same
+ *  reason these two constants live here rather than in net_processing.cpp:
+ *  CNode's own field initializers need them in scope. A token bucket
+ *  (continuous refill by elapsed real time) is used rather than CConnman's
+ *  own fixed-window nMaxOutboundTotalBytesSentInCycle shape (net.cpp) to
+ *  avoid that shape's reset-boundary edge case (a peer timing two bursts
+ *  around a window's reset instant to get roughly twice the intended rate)
+ *  -- ADDR's own bucket in this exact codebase already made this choice for
+ *  the identical class of problem, so this reuses it rather than
+ *  reintroducing the fixed-window shape's known weakness a second time.
+ *
+ *  Two independent buckets, not one, because they bound two independently
+ *  exploitable costs: MAX_BODYRANGE_SERVE_REQUESTS_TOKEN_BUCKET bounds how
+ *  many requests this connection may have serviced regardless of outcome
+ *  (protects against a flood of cheap BAN/MISS-classified requests -- the
+ *  nStartIndex-out-of-range BAN tier still costs a real ReadBodyRecordCount
+ *  disk read, bodyrange.cpp's ValidateGetBodyRange, even though it sends no
+ *  response bytes); MAX_BODYRANGE_SERVE_BYTES_TOKEN_BUCKET bounds actual
+ *  response bytes sent (protects against a flood of large, genuinely
+ *  OK-classified requests).
+ *
+ *  MAX_BODYRANGE_SERVE_BYTES_TOKEN_BUCKET is COMMITMENT_BUDGET_BODY_BYTES
+ *  (consensus/consensus.h) directly, not a re-typed literal -- F-202's own
+ *  lesson (net_processing.cpp: deriving MAX_BLOCKTXN_RESPONSE_BYTES from
+ *  MAX_PROTOCOL_MESSAGE_LENGTH rather than a hardcoded copy means "no second
+ *  constant to remember to update in step") applies just as much here: this
+ *  is the real, live consensus-level worst-case block-body-byte ceiling, and
+ *  hardcoding a duplicate would silently drift from it if that budget is
+ *  ever re-tuned. One full bucket therefore covers exactly one entire
+ *  worst-case-sized block body -- the largest a single legitimate tip-path
+ *  fetch should ever need in one go (F-159: GETBODYRANGE serving is
+ *  tip-path-only, not an IBD/long-catchup recovery mechanism, so sustained
+ *  deep-history serving to one peer was never the design target this needs
+ *  to accommodate).
+ *
+ *  MAX_BODYRANGE_SERVE_REQUESTS_TOKEN_BUCKET cannot be derived the same
+ *  live way from this header (net_processing.cpp's own
+ *  DEFAULT_MAX_BODYRANGE_BYTES chunk size is a file-local constant there,
+ *  not reachable from net.h without a much heavier include) -- chosen
+ *  instead as a plain value: ceil(110,000,000 / 1,048,576) = 105, the
+ *  number of maximally-sized chunks needed to cover one entire worst-case
+ *  block body, rounded up to 128 for headroom, matching this project's own
+ *  "fixed, generous default" judgment-call style (net_processing.cpp's
+ *  DEFAULT_MAX_BODYRANGE_BYTES doc, MAX_BODYRANGE_INFLIGHT_PER_PEER's own
+ *  /4 choice). The relationship between the two constants is pinned by a
+ *  static_assert in net_processing.cpp instead of here, where both
+ *  DEFAULT_MAX_BODYRANGE_BYTES and COMMITMENT_BUDGET_BODY_BYTES are
+ *  actually in scope together, so it can't silently regress.
+ *
+ *  Both buckets refill fully once every STALE_CHECK_INTERVAL
+ *  (net_processing.cpp, "matches block interval") -- see
+ *  BODYRANGE_SERVE_REQUESTS_PER_SECOND/BODYRANGE_SERVE_BYTES_PER_SECOND
+ *  there for the refill-rate arithmetic itself. GETBODYRANGE's own
+ *  legitimate demand is driven by new-block cadence, not a continuous
+ *  stream, so tying the refill period to that same existing assumption
+ *  lets one full worst-case block through per interval without penalizing
+ *  a single honest tip-path fetch, while still bounding a flood to a small,
+ *  fixed multiple of real usage. */
+static const uint64_t MAX_BODYRANGE_SERVE_BYTES_TOKEN_BUCKET = COMMITMENT_BUDGET_BODY_BYTES;
+static const unsigned int MAX_BODYRANGE_SERVE_REQUESTS_TOKEN_BUCKET = 128;
+
 /** Maximum length of incoming protocol messages.
  *
  *  1.4 (K-7, F-217): raised from upstream's 3 MiB. F-213 already found this
@@ -1033,6 +1106,29 @@ public:
     std::atomic <uint64_t> nAddrRateLimited{0};
     /** Total number of addresses that were processed (excludes rate-limited ones). */
     std::atomic <uint64_t> nAddrProcessed{0};
+
+    /** F-218: the serving-side, per-connection GETBODYRANGE token buckets --
+     *  see MAX_BODYRANGE_SERVE_BYTES_TOKEN_BUCKET's own doc comment above
+     *  for the full design reasoning. Both start FULL, matching
+     *  addrTokenBucket's own {1.0} starting-full convention just above -- a
+     *  freshly-connected peer is never penalized for anything, since there
+     *  is no predecessor to have spent tokens: this budget is per
+     *  CONNECTION, not per address/identity.
+     *
+     *  Live on CNode itself, NOT CNodeState (net_processing.cpp) --
+     *  CNodeState/mapNodeState there is EXCLUSIVE_LOCKS_REQUIRED(cs_main),
+     *  and the entire point of the GETBODYRANGE serving path (F-149,
+     *  closing B4) is that it never touches cs_main; putting this budget in
+     *  CNodeState would reopen exactly that problem on every single
+     *  request. CNode's own per-connection fields (addrTokenBucket,
+     *  nLastBlockTime, etc.) need no lock here for the same reason those
+     *  don't: ProcessMessage only ever runs one peer's own message stream
+     *  on one thread at a time, so nothing else can race a read/write of
+     *  another peer's fields, and this peer's own GETBODYRANGE handling is
+     *  never itself concurrent with itself. */
+    double nBodyRangeServeRequestTokens{(double) MAX_BODYRANGE_SERVE_REQUESTS_TOKEN_BUCKET};
+    double nBodyRangeServeByteTokens{(double) MAX_BODYRANGE_SERVE_BYTES_TOKEN_BUCKET};
+    std::chrono::microseconds nBodyRangeServeTokenTimestamp{GetTime<std::chrono::microseconds>()};
 
     std::atomic<int> nNumWarningsSkipped;
     std::atomic<int> nVersion;

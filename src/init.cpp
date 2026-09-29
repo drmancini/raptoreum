@@ -829,9 +829,9 @@ void SetupServerArgs() {
                  ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     gArgs.AddArg("-servebodyrange",
                  "Test-only: serve GETBODYRANGE requests (2.2.3a's fetch-protocol handler, "
-                 "F-149/F-150/F-151). Off by default -- this handler has no per-connection rate "
-                 "limit yet (F-150's own MEDIUM finding, still open pending 2.2.3b's budget "
-                 "layer), so it must not run on a live/exposed network unopted-in. (default: 0)",
+                 "F-149/F-150/F-151/F-218). Off by default. A per-connection request-count and "
+                 "byte budget (F-218) rate-limits an opted-in handler; still test-only pending "
+                 "wider review before any live/exposed deployment. (default: 0)",
                  ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     gArgs.AddArg("-maxbodyrangeinflight=<n>",
                  strprintf("Test-only: the aggregate cap on in-flight GETBODYRANGE requests across "
