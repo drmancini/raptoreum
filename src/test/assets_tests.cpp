@@ -21,6 +21,7 @@
 #include <validation.h>
 
 #include <assets/assets.h>
+#include <assets/assetsdb.h>
 #include <assets/assetstype.h>
 #include <core_io.h>
 #include <evo/providertx.h>
@@ -1322,6 +1323,168 @@ BOOST_FIXTURE_TEST_CASE(block_reconnect_after_flush_does_not_see_stale_dup_name,
     BOOST_CHECK_MESSAGE(state2.IsValid(), "ActivateBestChain: " << state2.GetRejectReason());
     BOOST_CHECK_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), pindexBlock->GetBlockHash().ToString());
     BOOST_CHECK(passetsCache->CheckIfAssetExists(tx1.GetHash().ToString()));
+}
+
+// 4.3.1 (build-plan.md's 4.3 row, docs/findings.md's F-225): BuildAssetIndexFromCoins
+// must reconstruct the address-balance secondary index purely from the CURRENT coin
+// set, with no reliance on having ever run with -assetindex enabled. fAssetIndex
+// defaults to DEFAULT_ASSETINDEX (false, validation.h) and nothing in this test suite
+// ever flips it, so every block mined below genuinely never populates
+// mapAssetAddressAmount/passetsdb's balance rows via the normal AddAssetBlance/
+// RemoveAddressBalance path -- this is a real "-assetindex was never on" starting
+// condition, not a simulated one.
+BOOST_FIXTURE_TEST_CASE(build_asset_index_from_coins_reconstructs_current_balances, TestChainDIP3BeforeActivationSetup)
+{
+    BOOST_REQUIRE(!fAssetIndex);
+
+    auto utxos = BuildSimpleUtxoMap(m_coinbase_txns);
+
+    auto tx = CreateNewAssetTx(*m_node.mempool, utxos, coinbaseKey, "COINSCAN_ASSET", true, false, 0, 8, 1000);
+    std::string assetId = tx.GetHash().ToString();
+    {
+        auto block = std::make_shared<CBlock>(CreateBlock({tx}, coinbaseKey));
+        EnsureChainman(m_node).ProcessNewBlock(Params(), block, true, nullptr);
+        BOOST_REQUIRE(block->GetHash() == ::ChainActive().Tip()->GetBlockHash());
+    }
+
+    tx = CreateMintAssetTx(*m_node.mempool, utxos, coinbaseKey, assetId);
+    {
+        auto block = std::make_shared<CBlock>(CreateBlock({tx}, coinbaseKey));
+        EnsureChainman(m_node).ProcessNewBlock(Params(), block, true, nullptr);
+        BOOST_REQUIRE(block->GetHash() == ::ChainActive().Tip()->GetBlockHash());
+    }
+    // Matching assets_mint's own established pattern (above): the mint tx is
+    // no longer in the mempool once mined, so SignTransaction's own
+    // GetTransaction lookup for the transfer's input needs the txindex to
+    // have caught up first -- without this, isolated single-test runs happen
+    // to be fast enough to race past it, but the full suite's cumulative
+    // load does not, and the lookup fails intermittently.
+    g_txindex->BlockUntilSyncedToCurrentChain();
+
+    // Split the full 1000-unit minted supply across two distinct addresses in
+    // one transfer, neither of which is coinbaseKey's own address.
+    CKey keyB, keyC;
+    keyB.MakeNewKey(false);
+    keyC.MakeNewKey(false);
+    CScript scriptB = GetScriptForDestination(keyB.GetPubKey().GetID());
+    CScript scriptC = GetScriptForDestination(keyC.GetPubKey().GetID());
+
+    CMutableTransaction transferTx;
+    CAssetTransfer transferB(assetId, 400 * COIN);
+    transferB.BuildAssetTransaction(scriptB);
+    transferTx.vout.push_back(CTxOut(0, scriptB));
+    CAssetTransfer transferC(assetId, 600 * COIN);
+    transferC.BuildAssetTransaction(scriptC);
+    transferTx.vout.push_back(CTxOut(0, scriptC));
+    transferTx.vin.push_back(CTxIn(COutPoint(tx.GetHash(), 0)));
+    FundTransaction(transferTx, utxos, GetScriptForDestination(coinbaseKey.GetPubKey().GetID()), 1 * COIN, coinbaseKey);
+    BOOST_REQUIRE(SignTransaction(*m_node.mempool, transferTx, coinbaseKey));
+    {
+        auto block = std::make_shared<CBlock>(CreateBlock({transferTx}, coinbaseKey));
+        EnsureChainman(m_node).ProcessNewBlock(Params(), block, true, nullptr);
+        BOOST_REQUIRE(block->GetHash() == ::ChainActive().Tip()->GetBlockHash());
+    }
+
+    std::string addressB = EncodeDestination(keyB.GetPubKey().GetID());
+    std::string addressC = EncodeDestination(keyC.GetPubKey().GetID());
+
+    // Confirm the "index never built" starting condition for real, not assumed.
+    CAmount128 preAmount;
+    BOOST_CHECK(!passetsdb->ReadAssetAddressAmount(assetId, addressB, preAmount));
+    BOOST_CHECK(!passetsdb->ReadAssetAddressAmount(assetId, addressC, preAmount));
+    BOOST_CHECK(passetsCache->mapAssetAddressAmount.find(std::make_pair(assetId, addressB)) ==
+                passetsCache->mapAssetAddressAmount.end());
+
+    // Asset EXISTENCE/metadata, by contrast, is already there unconditionally
+    // (never gated on fAssetIndex) -- confirming this rebuild has no reason to
+    // touch it.
+    CAssetMetaData meta;
+    BOOST_REQUIRE(passetsCache->GetAssetMetaData(assetId, meta));
+
+    BOOST_REQUIRE(BuildAssetIndexFromCoins(::ChainstateActive().CoinsDB()));
+
+    CAmount128 amountB, amountC;
+    BOOST_REQUIRE(passetsdb->ReadAssetAddressAmount(assetId, addressB, amountB));
+    BOOST_REQUIRE(passetsdb->ReadAssetAddressAmount(assetId, addressC, amountC));
+    BOOST_CHECK_EQUAL(amountB.str(), CAmount128(400 * COIN).str());
+    BOOST_CHECK_EQUAL(amountC.str(), CAmount128(600 * COIN).str());
+
+    CAmount128 addrAmountB, addrAmountC;
+    BOOST_REQUIRE(passetsdb->ReadAssetAddressAssetAmount(addressB, assetId, addrAmountB));
+    BOOST_REQUIRE(passetsdb->ReadAssetAddressAssetAmount(addressC, assetId, addrAmountC));
+    BOOST_CHECK_EQUAL(addrAmountB.str(), CAmount128(400 * COIN).str());
+    BOOST_CHECK_EQUAL(addrAmountC.str(), CAmount128(600 * COIN).str());
+
+    BOOST_CHECK_EQUAL(passetsCache->mapAssetAddressAmount.at(std::make_pair(assetId, addressB)).str(),
+                       CAmount128(400 * COIN).str());
+    BOOST_CHECK_EQUAL(passetsCache->mapAssetAddressAmount.at(std::make_pair(assetId, addressC)).str(),
+                       CAmount128(600 * COIN).str());
+
+    // Asset existence/metadata is unchanged by the rebuild.
+    CAssetMetaData metaAfter;
+    BOOST_REQUIRE(passetsCache->GetAssetMetaData(assetId, metaAfter));
+    BOOST_CHECK_EQUAL(metaAfter.name, meta.name);
+    BOOST_CHECK_EQUAL(metaAfter.circulatingSupply, meta.circulatingSupply);
+
+    // Rerunning the scan with no coin-set change is idempotent -- writing the
+    // same balances twice must not double them (a plain LevelDB Put overwrites
+    // regardless, so this alone would not catch a missing
+    // EraseAssetAddressAmounts -- see the moved-away case just below for that).
+    BOOST_REQUIRE(BuildAssetIndexFromCoins(::ChainstateActive().CoinsDB()));
+    CAmount128 amountBAgain;
+    BOOST_REQUIRE(passetsdb->ReadAssetAddressAmount(assetId, addressB, amountBAgain));
+    BOOST_CHECK_EQUAL(amountBAgain.str(), CAmount128(400 * COIN).str());
+
+    // Now move addressB's entire holding away to a fresh address D. A rebuild
+    // must leave addressB with NO stale entry -- this is what actually
+    // exercises EraseAssetAddressAmounts: a plain overwrite of the still-live
+    // (assetId, addressD) key would never touch the old, now-stale
+    // (assetId, addressB) key on its own.
+    g_txindex->BlockUntilSyncedToCurrentChain();
+    CKey keyD;
+    keyD.MakeNewKey(false);
+    CScript scriptD = GetScriptForDestination(keyD.GetPubKey().GetID());
+    std::string addressD = EncodeDestination(keyD.GetPubKey().GetID());
+
+    CMutableTransaction moveAwayTx;
+    CAssetTransfer transferD(assetId, 400 * COIN);
+    transferD.BuildAssetTransaction(scriptD);
+    moveAwayTx.vout.push_back(CTxOut(0, scriptD));
+    moveAwayTx.vin.push_back(CTxIn(COutPoint(transferTx.GetHash(), 0)));
+    FundTransaction(moveAwayTx, utxos, GetScriptForDestination(coinbaseKey.GetPubKey().GetID()), 1 * COIN, coinbaseKey);
+    // moveAwayTx spends from two different owners (transferTx's output 0,
+    // owned by keyB, plus a fee input funded from coinbaseKey's own coins),
+    // so SignTransaction's own single-key keystore can't cover it -- sign
+    // with a keystore holding both.
+    {
+        CBasicKeyStore tempKeystore;
+        tempKeystore.AddKeyPubKey(coinbaseKey, coinbaseKey.GetPubKey());
+        tempKeystore.AddKeyPubKey(keyB, keyB.GetPubKey());
+        for (size_t i = 0; i < moveAwayTx.vin.size(); i++) {
+            uint256 hashBlock;
+            CTransactionRef txFrom = GetTransaction(/* block_index */ nullptr, m_node.mempool,
+                moveAwayTx.vin[i].prevout.hash, Params().GetConsensus(), hashBlock);
+            BOOST_REQUIRE(txFrom);
+            BOOST_REQUIRE(SignSignature(tempKeystore, *txFrom, moveAwayTx, i, SIGHASH_ALL));
+        }
+    }
+    {
+        auto block = std::make_shared<CBlock>(CreateBlock({moveAwayTx}, coinbaseKey));
+        EnsureChainman(m_node).ProcessNewBlock(Params(), block, true, nullptr);
+        BOOST_REQUIRE(block->GetHash() == ::ChainActive().Tip()->GetBlockHash());
+    }
+
+    BOOST_REQUIRE(BuildAssetIndexFromCoins(::ChainstateActive().CoinsDB()));
+
+    CAmount128 amountD;
+    BOOST_REQUIRE(passetsdb->ReadAssetAddressAmount(assetId, addressD, amountD));
+    BOOST_CHECK_EQUAL(amountD.str(), CAmount128(400 * COIN).str());
+
+    CAmount128 staleAmountB;
+    BOOST_CHECK(!passetsdb->ReadAssetAddressAmount(assetId, addressB, staleAmountB));
+    BOOST_CHECK(!passetsdb->ReadAssetAddressAssetAmount(addressB, assetId, staleAmountB));
+    BOOST_CHECK(passetsCache->mapAssetAddressAmount.find(std::make_pair(assetId, addressB)) ==
+                passetsCache->mapAssetAddressAmount.end());
 }
 
 BOOST_AUTO_TEST_CASE(validate_amount_decimal_point) {

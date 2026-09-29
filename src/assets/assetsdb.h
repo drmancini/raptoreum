@@ -93,10 +93,19 @@ public:
     bool EraseAssetData(const std::string &assetName);
 
     bool EraseAssetId(const std::string &assetName);
-    
+
     bool EraseAssetAddressAmount(const std::string &assetId, const std::string &address);
 
     bool EraseAddressAssetAmount(const std::string &address, const std::string &assetId);
+
+    // 4.3.1 (build-plan.md's 4.3 row, F-225): clears every ASSET_ADDRESS_AMOUNT/
+    // ADDRESS_ASSET_AMOUNT row so BuildAssetIndexFromCoins (assets.cpp) can
+    // rewrite the whole balance index from a fresh coins-set scan without
+    // leaving stale entries behind from before the index was last enabled.
+    // Does not touch ASSET_FLAG/ASSET_NAME_TXID_FLAG (asset existence/
+    // metadata) -- that half is unconditionally maintained already and is
+    // never rebuilt by this pass.
+    bool EraseAssetAddressAmounts();
 
     // Helper functions
     bool LoadAssets();
