@@ -189,68 +189,95 @@ bool CAssetsCache::RemoveAsset(std::string assetId) {
     return false;
 }
 
-bool CAssetsCache::UndoUpdateAsset(const CUpdateAssetTx upAsset,
+bool CAssetsCache::UndoUpdateAsset(const CUpdateAssetTx upAsset, uint32_t txIndex,
                                    const std::vector <std::pair<std::string, CBlockAssetUndo>> &vUndoData) {
-    if (mapAsset.count(upAsset.assetId) > 0) {
-        CAssetMetaData assetData;
-        if (!GetAssetMetaData(upAsset.assetId, assetData)) {
-            return false;
-        }
-
-        if (NewAssetsToAdd.count(mapAsset[upAsset.assetId]))
-            NewAssetsToAdd.erase(mapAsset[upAsset.assetId]);
-
-        NewAssetsToRemove.insert(mapAsset[upAsset.assetId]);
-
-        for (auto item: vUndoData) {
-            if (item.first == upAsset.assetId) {
-                assetData.updatable = item.second.updatable;
-                assetData.referenceHash = item.second.referenceHash;
-                assetData.type = item.second.type;
-                assetData.targetAddress = item.second.targetAddress;
-                assetData.issueFrequency = item.second.issueFrequency;
-                assetData.amount = item.second.amount;
-                assetData.ownerAddress = item.second.ownerAddress;
-                assetData.collateralAddress = item.second.collateralAddress;
-            }
-        }
-
-        //update cache
-        mapAsset[upAsset.assetId].asset = assetData;
-        //update db
-        NewAssetsToAdd.insert(mapAsset[upAsset.assetId]);
-        return true;
+    // F-222: this function's own outer `mapAsset.count(upAsset.assetId) > 0`
+    // guard checked only THIS CAssetsCache instance's own local map.
+    // DisconnectTip/ConnectTip (validation.cpp) each construct a fresh,
+    // empty CAssetsCache per call, so that guard was false for every asset
+    // created in an earlier block -- this function returned false
+    // unconditionally on the first update-asset undo it was ever asked to
+    // perform. DisconnectBlock treats a false return as DISCONNECT_FAILED,
+    // and ActivateBestChainStep answers a failed disconnect with AbortNode
+    // (F-29) -- so a real reorg disconnecting a block with an UPDATE_ASSET
+    // tx would abort the node. GetAssetMetaData already has the correct
+    // fallback (this cache's own map, then the global passetsCache, then
+    // passetsdb) and already returns false only when the asset truly cannot
+    // be found anywhere, so it replaces the guard rather than gating it.
+    CAssetMetaData assetData;
+    if (!GetAssetMetaData(upAsset.assetId, assetData)) {
+        return false;
     }
-    return false;
+
+    if (NewAssetsToAdd.count(mapAsset[upAsset.assetId]))
+        NewAssetsToAdd.erase(mapAsset[upAsset.assetId]);
+
+    NewAssetsToRemove.insert(mapAsset[upAsset.assetId]);
+
+    // F-222/B9: keyed by (assetId, tx index), not assetId alone -- a block
+    // with two updates on the same asset writes one undo record per tx, and
+    // without the index every disconnect of that block picked whichever
+    // record happened to iterate last in vUndoData, regardless of which tx
+    // was actually being undone.
+    bool found = false;
+    for (const auto &item: vUndoData) {
+        if (item.first == upAsset.assetId && item.second.txIndex == txIndex) {
+            assetData.updatable = item.second.updatable;
+            assetData.referenceHash = item.second.referenceHash;
+            assetData.type = item.second.type;
+            assetData.targetAddress = item.second.targetAddress;
+            assetData.issueFrequency = item.second.issueFrequency;
+            assetData.amount = item.second.amount;
+            assetData.ownerAddress = item.second.ownerAddress;
+            assetData.collateralAddress = item.second.collateralAddress;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        return error("%s: no undo record for asset %s at tx index %u", __func__, upAsset.assetId, txIndex);
+    }
+
+    //update cache
+    mapAsset[upAsset.assetId].asset = assetData;
+    //update db
+    NewAssetsToAdd.insert(mapAsset[upAsset.assetId]);
+    return true;
 }
 
-bool CAssetsCache::UndoMintAsset(const CMintAssetTx assetTx,
+bool CAssetsCache::UndoMintAsset(const CMintAssetTx assetTx, uint32_t txIndex,
                                  const std::vector <std::pair<std::string, CBlockAssetUndo>> &vUndoData) {
-    if (mapAsset.count(assetTx.assetId) > 0) {
-        CAssetMetaData assetData;
-        if (!GetAssetMetaData(assetTx.assetId, assetData)) {
-            return false;
-        }
-
-        if (NewAssetsToAdd.count(mapAsset[assetTx.assetId]))
-            NewAssetsToAdd.erase(mapAsset[assetTx.assetId]);
-
-        NewAssetsToRemove.insert(mapAsset[assetTx.assetId]);
-
-        for (auto item: vUndoData) {
-            if (item.first == assetTx.assetId) {
-                assetData.circulatingSupply = item.second.circulatingSupply;
-                assetData.mintCount = item.second.mintCount;
-            }
-        }
-
-        //update cache
-        mapAsset[assetTx.assetId].asset = assetData;
-        //update db
-        NewAssetsToAdd.insert(mapAsset[assetTx.assetId]);
-        return true;
+    // F-222: see UndoUpdateAsset's own comment above -- the same broken,
+    // local-only existence guard existed here.
+    CAssetMetaData assetData;
+    if (!GetAssetMetaData(assetTx.assetId, assetData)) {
+        return false;
     }
-    return false;
+
+    if (NewAssetsToAdd.count(mapAsset[assetTx.assetId]))
+        NewAssetsToAdd.erase(mapAsset[assetTx.assetId]);
+
+    NewAssetsToRemove.insert(mapAsset[assetTx.assetId]);
+
+    // F-222/B9: keyed by (assetId, tx index) -- see UndoUpdateAsset above.
+    bool found = false;
+    for (const auto &item: vUndoData) {
+        if (item.first == assetTx.assetId && item.second.txIndex == txIndex) {
+            assetData.circulatingSupply = item.second.circulatingSupply;
+            assetData.mintCount = item.second.mintCount;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        return error("%s: no undo record for asset %s at tx index %u", __func__, assetTx.assetId, txIndex);
+    }
+
+    //update cache
+    mapAsset[assetTx.assetId].asset = assetData;
+    //update db
+    NewAssetsToAdd.insert(mapAsset[assetTx.assetId]);
+    return true;
 }
 
 bool CAssetsCache::CheckIfAssetExists(std::string assetId) {
@@ -502,7 +529,7 @@ bool CAssetsCache::Flush() {
     }
 }
 
-void AddAssets(const CTransaction &tx, int nHeight, CAssetsCache *assetCache,
+void AddAssets(const CTransaction &tx, int nHeight, uint32_t nTxIndex, CAssetsCache *assetCache,
                std::pair <std::string, CBlockAssetUndo> *undoAssetData) {
     if (Updates().IsAssetsActive(::ChainActive().Tip()) && assetCache) {
         if (tx.nType == TRANSACTION_NEW_ASSET) {
@@ -531,7 +558,8 @@ void AddAssets(const CTransaction &tx, int nHeight, CAssetsCache *assetCache,
                                                             asset.issueFrequency,
                                                             asset.amount,
                                                             asset.ownerAddress,
-                                                            asset.collateralAddress};
+                                                            asset.collateralAddress,
+                                                            nTxIndex};
                 }
             }
         } else if (tx.nType == TRANSACTION_MINT_ASSET) {
@@ -561,7 +589,8 @@ void AddAssets(const CTransaction &tx, int nHeight, CAssetsCache *assetCache,
                                                             asset.issueFrequency,
                                                             asset.amount,
                                                             asset.ownerAddress,
-                                                            asset.collateralAddress};
+                                                            asset.collateralAddress,
+                                                            nTxIndex};
                 }
             }
         } 

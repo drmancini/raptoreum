@@ -1639,8 +1639,8 @@ void CChainState::InvalidBlockFound(CBlockIndex *pindex, const CValidationState 
 }
 
 void
-UpdateCoins(const CTransaction &tx, CCoinsViewCache &inputs, CTxUndo &txundo, int nHeight, CAssetsCache *assetCache,
-            std::pair <std::string, CBlockAssetUndo> *undoAssetData) {
+UpdateCoins(const CTransaction &tx, CCoinsViewCache &inputs, CTxUndo &txundo, int nHeight, uint32_t nTxIndex,
+            CAssetsCache *assetCache, std::pair <std::string, CBlockAssetUndo> *undoAssetData) {
     // mark inputs spent
     if (!tx.IsCoinBase()) {
         txundo.vprevout.reserve(tx.vin.size());
@@ -1658,7 +1658,7 @@ UpdateCoins(const CTransaction &tx, CCoinsViewCache &inputs, CTxUndo &txundo, in
     }
 
     // add outputs
-    AddAssets(tx, nHeight, assetCache, undoAssetData);
+    AddAssets(tx, nHeight, nTxIndex, assetCache, undoAssetData);
     AddCoins(inputs, tx, nHeight);
 }
 
@@ -1966,7 +1966,6 @@ DisconnectResult CChainState::DisconnectBlock(const CBlock &block, const CBlockI
     }
 
     // undo transactions in reverse order
-    CAssetsCache tempCache(*assetsCache);
     for (int i = block.vtx.size() - 1; i >= 0; i--) {
         const CTransaction &tx = *(block.vtx[i]);
         uint256 hash = tx.GetHash();
@@ -2060,7 +2059,7 @@ DisconnectResult CChainState::DisconnectBlock(const CBlock &block, const CBlockI
             } else if (tx.nType == TRANSACTION_UPDATE_ASSET) {
                 CUpdateAssetTx assetTx;
                 if (GetTxPayload(tx, assetTx)) {
-                    if (!assetsCache->UndoUpdateAsset(assetTx, vUndoData)) {
+                    if (!assetsCache->UndoUpdateAsset(assetTx, (uint32_t)i, vUndoData)) {
                         error("DisconnectBlock(): failed to und update asset: %s", assetTx.assetId);
                         return DISCONNECT_FAILED;
                     }
@@ -2068,7 +2067,7 @@ DisconnectResult CChainState::DisconnectBlock(const CBlock &block, const CBlockI
             } else if (tx.nType == TRANSACTION_MINT_ASSET) {
                 CMintAssetTx assetTx;
                 if (GetTxPayload(tx, assetTx)) {
-                    if (!assetsCache->UndoMintAsset(assetTx, vUndoData)) {
+                    if (!assetsCache->UndoMintAsset(assetTx, (uint32_t)i, vUndoData)) {
                         error("DisconnectBlock(): failed to rundo mint asset: %s", assetTx.assetId);
                         return DISCONNECT_FAILED;
                     }
@@ -2823,7 +2822,7 @@ bool CChainState::ConnectBlock(const CBlock &block, CValidationState &state, CBl
         std::pair <std::string, CBlockAssetUndo> undoPair = std::make_pair("", CBlockAssetUndo());
         std::pair <std::string, CBlockAssetUndo> *undoAssetData = &undoPair;
 
-        UpdateCoins(tx, view, i == 0 ? undoDummy : blockundo.vtxundo.back(), pindex->nHeight, assetsCache,
+        UpdateCoins(tx, view, i == 0 ? undoDummy : blockundo.vtxundo.back(), pindex->nHeight, i, assetsCache,
                     undoAssetData);
 
         if (!undoAssetData->first.empty()) {
@@ -6144,7 +6143,8 @@ bool CChainState::RollforwardBlock(const CBlockIndex *pindex, CCoinsViewCache &i
             }
         }
         // Pass check = true as every addition may be an overwrite.
-        AddAssets(*tx, pindex->nHeight, assetsCache);
+        // Replay path: no undo sink, so the tx index is never read -- 0 is fine.
+        AddAssets(*tx, pindex->nHeight, 0, assetsCache);
         AddCoins(inputs, *tx, pindex->nHeight, true);
     }
 

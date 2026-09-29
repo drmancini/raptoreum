@@ -36,7 +36,14 @@ struct CBlockAssetUndo {
     CAmount amount;
     CKeyID ownerAddress;
     CKeyID collateralAddress;
-
+    // F-222/B9: the index of the tx that produced this record within its own
+    // block (block.vtx). A block can touch the same asset from more than one
+    // tx (two mints, or two updates); undo must be able to tell those
+    // records apart, not just match by assetId, or disconnecting one tx
+    // silently applies another tx's own undo data instead of its own. Not
+    // consensus data -- this is local, regenerable-by-reindex undo state, so
+    // widening it here needs no activation/migration gate.
+    uint32_t txIndex = 0;
 
     SERIALIZE_METHODS(CBlockAssetUndo, obj)
     {
@@ -45,6 +52,7 @@ struct CBlockAssetUndo {
             READWRITE(obj.updatable, obj.referenceHash, obj.type, obj.targetAddress, obj.issueFrequency,
                       obj.amount, obj.ownerAddress, obj.collateralAddress);
         }
+        READWRITE(obj.txIndex);
     }
 };
 
