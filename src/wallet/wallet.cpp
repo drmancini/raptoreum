@@ -2380,7 +2380,15 @@ int64_t CWallet::RescanFromTime(int64_t startTime, const WalletRescanReserver &r
     if (!start_block.IsNull()) {
         // TODO: this should take into account failure by ScanResult::USER_ABORT
         ScanResult result = ScanForWalletTransactions(start_block, {} /* stop_block */, reserver, update);
-        if (result.status == ScanResult::FAILURE) {
+        // 4.3.2 (F-225): RANGE_NOT_HELD takes the same path as FAILURE here --
+        // findBlock's time/time_max outputs come from the CBlockIndex header
+        // (GetBlockTime/GetBlockTimeMax), never from the body, so this call
+        // succeeds for a not-held block exactly as it does for any other;
+        // RescanFromTime's own int64-timestamp return type has no room to
+        // carry the FAILURE-vs-RANGE_NOT_HELD distinction further up (unlike
+        // rescanblockchain, which gets the real ScanResult and reports the
+        // two differently -- see rpcwallet.cpp).
+        if (result.status == ScanResult::FAILURE || result.status == ScanResult::RANGE_NOT_HELD) {
             int64_t time_max;
             if (!chain().findBlock(result.last_failed_block, nullptr /* block */, nullptr /* time */, &time_max)) {
                 throw std::logic_error("ScanForWalletTransactions returned invalid block hash");
@@ -2439,6 +2447,33 @@ CWallet::ScanResult CWallet::ScanForWalletTransactions(const uint256 &start_bloc
             progress_begin = chain().guessVerificationProgress(block_hash);
             progress_end = chain().guessVerificationProgress(stop_block.IsNull() ? tip_hash : stop_block);
         }
+
+        // 4.3.2 (build-plan.md's 4.3 row, docs/findings.md's F-225): know the
+        // node's own actual retained range BEFORE scanning a single block,
+        // rather than discovering it one block at a time. Without this, a
+        // request reaching outside a windowed node's retention (e.g. an
+        // import RPC's own RescanFromTime(TIMESTAMP_MIN, ...), which has no
+        // upfront check of its own -- unlike rescanblockchain's separate
+        // findPruned call below RPC-side) would walk every single height in
+        // the unretained range one at a time, each one an unreadable block
+        // (chain().findBlock already declines gracefully -- see F-174/F-179
+        // -- so this was never a crash, just needless work), before ever
+        // reaching data it can use. Checked here, once, centrally, so every
+        // caller of ScanForWalletTransactions/RescanFromTime benefits, not
+        // just rescanblockchain's own explicit start/stop-height path.
+        if (block_height) {
+            Optional<int> stop_height = stop_block.IsNull() ? nullopt : chain().getBlockHeight(stop_block);
+            if (Optional<int> not_held_height = chain().findPruned(*block_height, stop_height)) {
+                result.status = ScanResult::RANGE_NOT_HELD;
+                result.last_failed_block = chain().getBlockHash(*not_held_height);
+                WalletLogPrintf("%s: requested range starting at block %d reaches height %d, which this "
+                                "node does not hold bodies for (outside its retained range)\n",
+                                __func__, *block_height, *not_held_height);
+                ShowProgress(strprintf("%s " + _("Rescanning..."), GetDisplayName()), 100);
+                return result;
+            }
+        }
+
         double progress_current = progress_begin;
         while (block_height && !fAbortRescan && !chain().shutdownRequested()) {
             m_scanning_progress = (progress_current - progress_begin) / (progress_end - progress_begin);

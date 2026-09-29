@@ -357,6 +357,101 @@ RemoveWallet(wallet);
 }
 }
 
+namespace {
+// 4.3.2 (build-plan.md's 4.3 row, docs/findings.md's F-225): a scoped guard
+// for the global fPruneMode flag, matching acceptancebit_tests.cpp's own
+// PerfWithholdGuard precedent for a test that must leave shared global state
+// exactly as it found it even if a BOOST_REQUIRE throws partway through.
+struct PruneModeGuard {
+    bool previous;
+    PruneModeGuard() : previous(fPruneMode) { fPruneMode = true; }
+    ~PruneModeGuard() { fPruneMode = previous; }
+};
+} // namespace
+
+// 4.3.2 (build-plan.md's 4.3 row, docs/findings.md's F-225): a windowed
+// node's own retention is driven by -prune (fPruneMode)/PruneOneBlockFile
+// clearing BLOCK_HAVE_BODIES alongside BLOCK_HAVE_DATA (validation.cpp) --
+// the `rescan` test just above exercises the SAME PruneOneBlockFile call but
+// never sets fPruneMode, so it only ever sees the old, generic FAILURE path
+// (chain().findPruned is itself gated on fPruneMode and stays dormant
+// otherwise -- confirmed by grep, nothing in this file touches fPruneMode
+// before this test). This test sets fPruneMode for real, matching what an
+// actual -prune node looks like, and confirms the NEW upfront, explicit
+// RANGE_NOT_HELD path fires instead -- detected BEFORE
+// ScanForWalletTransactions ever walks a single block, not discovered one
+// failed read at a time the way FAILURE is.
+BOOST_FIXTURE_TEST_CASE(rescan_range_not_held_on_a_pruned_windowed_node, TestChain100Setup
+)
+{
+    CBlockIndex *oldTip = ::ChainActive().Tip();
+    GetBlockFileInfo(oldTip->GetBlockPos().nFile)->nSize = MAX_BLOCKFILE_SIZE;
+    CreateAndProcessBlock({}, GetScriptForRawPubKey(coinbaseKey.GetPubKey()));
+
+    NodeContext node;
+    auto chain = interfaces::MakeChain(node);
+
+    PruneModeGuard pruneModeGuard;
+    {
+        LOCK(cs_main);
+        EnsureChainman(m_node).PruneOneBlockFile(oldTip->GetBlockPos().nFile);
+    }
+    UnlinkPrunedFiles({oldTip->GetBlockPos().nFile});
+
+    CWallet wallet(chain.get(), WalletLocation(), CreateDummyWalletDatabase());
+    {
+        LOCK(wallet.cs_wallet);
+        wallet.SetLastBlockProcessed(::ChainActive().Height(), ::ChainActive().Tip()->GetBlockHash());
+    }
+    AddKey(wallet, coinbaseKey);
+    WalletRescanReserver reserver(&wallet);
+    reserver.reserve();
+
+    CWallet::ScanResult result = wallet.ScanForWalletTransactions(oldTip->GetBlockHash(), {} /* stop_block */,
+                                                                   reserver, false /* update */);
+
+    BOOST_CHECK_EQUAL(result.status, CWallet::ScanResult::RANGE_NOT_HELD);
+    BOOST_CHECK_EQUAL(result.last_failed_block, oldTip->GetBlockHash());
+    // Nothing was scanned at all -- the check runs before the loop, not
+    // after failing to read the first block the way FAILURE's own
+    // last_scanned_block (see the `rescan` test above) can be non-null.
+    BOOST_CHECK(result.last_scanned_block.IsNull());
+    BOOST_CHECK(!result.last_scanned_height);
+    BOOST_CHECK_EQUAL(wallet.GetBalance().m_mine_immature, 0);
+}
+
+// 4.3.2 (F-225): findPruned itself, directly -- confirms the fixed bit check
+// (HaveBodies, not the raw BLOCK_HAVE_DATA status bit) actually drives the
+// result, and that a fully-retained range reports nothing pruned.
+BOOST_FIXTURE_TEST_CASE(find_pruned_reports_the_first_not_held_height, TestChain100Setup
+)
+{
+    CBlockIndex *oldTip = ::ChainActive().Tip();
+    GetBlockFileInfo(oldTip->GetBlockPos().nFile)->nSize = MAX_BLOCKFILE_SIZE;
+    CreateAndProcessBlock({}, GetScriptForRawPubKey(coinbaseKey.GetPubKey()));
+    CBlockIndex *newTip = ::ChainActive().Tip();
+
+    NodeContext node;
+    auto chain = interfaces::MakeChain(node);
+
+    PruneModeGuard pruneModeGuard;
+
+    // Nothing pruned yet: no gap anywhere in [genesis, tip].
+    BOOST_CHECK(!chain->findPruned(0, nullopt));
+
+    {
+        LOCK(cs_main);
+        EnsureChainman(m_node).PruneOneBlockFile(oldTip->GetBlockPos().nFile);
+    }
+    UnlinkPrunedFiles({oldTip->GetBlockPos().nFile});
+
+    // oldTip's own file is gone; newTip's own file is untouched.
+    BOOST_CHECK_EQUAL(*chain->findPruned(0, nullopt), oldTip->nHeight);
+    BOOST_CHECK_EQUAL(*chain->findPruned(0, newTip->nHeight), oldTip->nHeight);
+    // A range that never reaches the pruned file reports nothing missing.
+    BOOST_CHECK(!chain->findPruned(newTip->nHeight, newTip->nHeight));
+}
+
 // Verify importwallet RPC starts rescan at earliest block with timestamp
 // greater or equal than key birthday. Previously there was a bug where
 // importwallet RPC would start the scan at the latest block with timestamp less
