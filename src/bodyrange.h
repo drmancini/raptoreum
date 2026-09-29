@@ -371,4 +371,51 @@ bool IsBodyRangeChunkAligned(size_t nAccumulatedSoFar, uint32_t nResponseStartIn
  *  own backoff shape saturates, not an arbitrary number). */
 bool ShouldDisconnectForBodyRangeAttempts(unsigned int nAttempts, unsigned int nDisconnectThreshold);
 
+/** F-218 (build-plan.md's 2.2 row, docs/findings.md): the pure arithmetic
+ *  behind the serving-side, per-connection GETBODYRANGE token buckets
+ *  (net.h's MAX_BODYRANGE_SERVE_BYTES_TOKEN_BUCKET/
+ *  MAX_BODYRANGE_SERVE_REQUESTS_TOKEN_BUCKET, CNode's own
+ *  nBodyRangeServeRequestTokens/nBodyRangeServeByteTokens fields) -- the
+ *  generic step CNode::addrTokenBucket's own inline ADDR-handling code
+ *  already performs (net_processing.cpp's ADDR handler), factored out here,
+ *  pure (this project's own established split, matching
+ *  ShouldRequestBodyRange/IsBodyRangeRequestStale above) so it is testable
+ *  and mutation-provable without any CNode/net_processing.cpp scaffolding,
+ *  and so GETBODYRANGE's two new buckets (request-count and bytes) share
+ *  one implementation rather than two more inline copies of the same
+ *  formula.
+ *
+ *  `nCurrentTokens` may be negative (an intentional "debt" -- see
+ *  BodyRangeServeBudgetAvailable's own doc comment below) and is clamped
+ *  only at the CAP, never at zero: a negative balance must be allowed to
+ *  climb back up through ordinary refill, exactly like a real balance
+ *  recovering from an overdraft. `nElapsedSeconds` must be >= 0 -- the
+ *  caller clamps a possibly-backwards clock read to 0 before calling
+ *  (matching the ADDR handler's own `std::max(current_time - ..., 0us)`
+ *  clamp, net_processing.cpp), so a clock adjustment can never DRAIN a
+ *  bucket, only fail to refill it for one call. */
+double RefillServeBudgetTokens(double nCurrentTokens, double nElapsedSeconds,
+                                 double nTokensPerSecond, double nCap);
+
+/** F-218: true if a whole token is available to spend right now, matching
+ *  the ADDR handler's own "< 1.0" gate (net_processing.cpp) rather than a
+ *  fractional-spend model -- one GETBODYRANGE request either gets serviced
+ *  in full (up to its own byte ceiling, DEFAULT_MAX_BODYRANGE_BYTES) or is
+ *  declined outright, never partially.
+ *
+ *  The byte bucket is deliberately allowed to go negative when spent (the
+ *  caller subtracts the response's REAL serialized size after building it,
+ *  matching SendBlockTransactions/F-202's own "measure the actual wire
+ *  cost, don't assume worst-case" precedent, GetSerializeSize) rather than
+ *  being pre-checked against a worst-case chunk size before every request:
+ *  a bucket that reads, say, 700 KB of remaining room must still refuse a
+ *  new request that could be up to a full 1 MiB chunk, or it would let a
+ *  peer's TRUE spend exceed the cap it exists to enforce; going negative
+ *  and self-correcting via ordinary refill is the standard token-bucket
+ *  "credit" pattern for exactly this problem, and is simpler and more
+ *  accurate than a pessimistic pre-charge that would also unfairly refuse
+ *  a small request merely because the bucket briefly reads slightly under
+ *  a full chunk's worth. */
+bool BodyRangeServeBudgetAvailable(double nCurrentTokens);
+
 #endif // BITCOIN_BODYRANGE_H

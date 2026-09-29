@@ -11,6 +11,8 @@
 #include <bodystore.h>
 #include <chain.h>
 #include <clientversion.h>
+#include <consensus/consensus.h>
+#include <net.h>
 #include <primitives/transaction.h>
 #include <script/script.h>
 #include <streams.h>
@@ -932,6 +934,101 @@ BOOST_AUTO_TEST_CASE(disconnects_past_the_threshold) {
 BOOST_AUTO_TEST_CASE(does_not_disconnect_a_fresh_or_low_attempt_count) {
     BOOST_CHECK(!ShouldDisconnectForBodyRangeAttempts(/*nAttempts=*/0, /*nDisconnectThreshold=*/18));
     BOOST_CHECK(!ShouldDisconnectForBodyRangeAttempts(/*nAttempts=*/1, /*nDisconnectThreshold=*/18));
+}
+
+// F-218 (build-plan.md's 2.2 row): RefillServeBudgetTokens/
+// BodyRangeServeBudgetAvailable -- the serving-side, per-connection
+// GETBODYRANGE token-bucket arithmetic (net.h's own
+// MAX_BODYRANGE_SERVE_BYTES_TOKEN_BUCKET/MAX_BODYRANGE_SERVE_REQUESTS_TOKEN_BUCKET
+// doc comment has the full design). Isolated from CNode/net_processing.cpp's
+// own untested scaffolding, matching this file's own established split.
+BOOST_AUTO_TEST_CASE(refill_adds_elapsed_time_times_rate) {
+    // 10 tokens/sec for 2.5 seconds = 25 tokens added.
+    BOOST_CHECK_EQUAL(RefillServeBudgetTokens(/*nCurrentTokens=*/0.0, /*nElapsedSeconds=*/2.5,
+                                                /*nTokensPerSecond=*/10.0, /*nCap=*/1000.0),
+                       25.0);
+}
+
+BOOST_AUTO_TEST_CASE(refill_is_capped_at_the_bucket_ceiling) {
+    BOOST_CHECK_EQUAL(RefillServeBudgetTokens(/*nCurrentTokens=*/95.0, /*nElapsedSeconds=*/10.0,
+                                                /*nTokensPerSecond=*/10.0, /*nCap=*/100.0),
+                       100.0);
+}
+
+BOOST_AUTO_TEST_CASE(refill_never_exceeds_cap_even_from_a_full_bucket) {
+    // Already-full bucket, more time passes: must stay pinned at the cap,
+    // never accumulate unbounded "saved up" tokens above it.
+    BOOST_CHECK_EQUAL(RefillServeBudgetTokens(/*nCurrentTokens=*/100.0, /*nElapsedSeconds=*/1000.0,
+                                                /*nTokensPerSecond=*/10.0, /*nCap=*/100.0),
+                       100.0);
+}
+
+BOOST_AUTO_TEST_CASE(refill_with_zero_elapsed_time_is_a_no_op) {
+    BOOST_CHECK_EQUAL(RefillServeBudgetTokens(/*nCurrentTokens=*/42.0, /*nElapsedSeconds=*/0.0,
+                                                /*nTokensPerSecond=*/10.0, /*nCap=*/100.0),
+                       42.0);
+}
+
+BOOST_AUTO_TEST_CASE(refill_clamps_a_negative_elapsed_time_to_a_no_op) {
+    // A backwards clock read (matching the caller's own std::max(..., 0us)
+    // clamp before ever calling this) must never DRAIN the bucket further.
+    BOOST_CHECK_EQUAL(RefillServeBudgetTokens(/*nCurrentTokens=*/42.0, /*nElapsedSeconds=*/-5.0,
+                                                /*nTokensPerSecond=*/10.0, /*nCap=*/100.0),
+                       42.0);
+}
+
+BOOST_AUTO_TEST_CASE(refill_still_clamps_a_pre_existing_over_cap_balance) {
+    // If nCurrentTokens somehow already exceeds nCap (should not happen in
+    // practice, but the function must not amplify it), a zero-elapsed call
+    // must still clamp down to the cap rather than passing an over-cap
+    // value through untouched.
+    BOOST_CHECK_EQUAL(RefillServeBudgetTokens(/*nCurrentTokens=*/150.0, /*nElapsedSeconds=*/0.0,
+                                                /*nTokensPerSecond=*/10.0, /*nCap=*/100.0),
+                       100.0);
+}
+
+BOOST_AUTO_TEST_CASE(refill_lets_a_negative_debt_balance_climb_back_up) {
+    // The byte bucket's own documented "credit" pattern: a balance driven
+    // negative by a real spend must still refill normally rather than being
+    // floored at zero.
+    BOOST_CHECK_EQUAL(RefillServeBudgetTokens(/*nCurrentTokens=*/-50.0, /*nElapsedSeconds=*/3.0,
+                                                /*nTokensPerSecond=*/10.0, /*nCap=*/100.0),
+                       -20.0);
+}
+
+BOOST_AUTO_TEST_CASE(budget_available_at_exactly_one_token) {
+    BOOST_CHECK(BodyRangeServeBudgetAvailable(/*nCurrentTokens=*/1.0));
+}
+
+BOOST_AUTO_TEST_CASE(budget_available_above_one_token) {
+    BOOST_CHECK(BodyRangeServeBudgetAvailable(/*nCurrentTokens=*/1.5));
+}
+
+BOOST_AUTO_TEST_CASE(budget_not_available_just_below_one_token) {
+    BOOST_CHECK(!BodyRangeServeBudgetAvailable(/*nCurrentTokens=*/0.999999));
+}
+
+BOOST_AUTO_TEST_CASE(budget_not_available_at_zero) {
+    BOOST_CHECK(!BodyRangeServeBudgetAvailable(/*nCurrentTokens=*/0.0));
+}
+
+BOOST_AUTO_TEST_CASE(budget_not_available_when_negative_in_debt) {
+    BOOST_CHECK(!BodyRangeServeBudgetAvailable(/*nCurrentTokens=*/-1000.0));
+}
+
+// The two real constants (net.h) actually cover one worst-case block body
+// per refill interval -- pinned here so a future change to either constant
+// (or to consensus/consensus.h's own COMMITMENT_BUDGET_BODY_BYTES) is
+// forced to re-examine this relationship rather than silently drifting.
+// Matches this project's own static_assert precedent for exactly this class
+// of cross-constant relationship (net_processing.cpp's
+// MAX_PROTOCOL_MESSAGE_LENGTH < MAX_SIZE check, F-217), expressed as a
+// runtime check here since one side (COMMITMENT_BUDGET_BODY_BYTES) is only
+// reachable from net.h, not from net_processing.cpp's own file-local
+// DEFAULT_MAX_BODYRANGE_BYTES, and vice versa -- this test is the one place
+// both are actually in scope together.
+BOOST_AUTO_TEST_CASE(serve_byte_bucket_matches_the_real_consensus_budget) {
+    BOOST_CHECK_EQUAL(MAX_BODYRANGE_SERVE_BYTES_TOKEN_BUCKET, COMMITMENT_BUDGET_BODY_BYTES);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
