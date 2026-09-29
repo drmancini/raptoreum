@@ -38,7 +38,7 @@ namespace NetMsgType {
     const char *FILTERCLEAR = "filterclear";
     const char *REJECT = "reject";
     const char *SENDHEADERS = "sendheaders";
-    const char *SENDCOMMITMENTS = "sendcommitments";
+    const char *SENDCOMMITMENTS = "sendcommit";
     const char *SENDCMPCT = "sendcmpct";
     const char *CMPCTBLOCK = "cmpctblock";
     const char *GETBLOCKTXN = "getblocktxn";
