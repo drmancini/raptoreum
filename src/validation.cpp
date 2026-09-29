@@ -17,6 +17,7 @@
 #include <consensus/tx_check.h>
 #include <consensus/tx_verify.h>
 #include <consensus/validation.h>
+#include <bodyrange.h>
 #include <cuckoocache.h>
 #include <flatfile.h>
 #include <hash.h>
@@ -1291,6 +1292,63 @@ bool ReadCommitmentBlockFromDisk(CCommitmentBlock &cblock, const CBlockIndex *pi
 
     cblock = CommitmentsFromBlock(stored);
     return true;
+}
+
+BodyRecordVerification VerifyBodyRecordAtRest(const CBlockIndex *pindex, const Consensus::Params &consensusParams) {
+    assert(pindex != nullptr);
+
+    FlatFilePos bodyPos;
+    {
+        LOCK(cs_main);
+        if (!(pindex->nStatus & BLOCK_HAVE_BODIES)) {
+            return BodyRecordVerification::NOT_HELD;
+        }
+        bodyPos = pindex->GetBodyPos();
+    }
+
+    CCommitmentBlock commitments;
+    if (!ReadCommitmentBlockFromDisk(commitments, pindex, consensusParams)) {
+        return BodyRecordVerification::COMMITMENTS_UNREADABLE;
+    }
+
+    std::vector<CTransactionRef> bodies;
+    if (!ReadBodyRecord(bodyPos, bodies)) {
+        return BodyRecordVerification::BODY_UNREADABLE;
+    }
+
+    if (bodies.size() != commitments.vCommitments.size()) {
+        return BodyRecordVerification::COUNT_MISMATCH;
+    }
+
+    // ValidateBodyRangeChunkHashes (bodyrange.h) is the SAME per-tx hash
+    // check 2.2.4's own fetch client already applies to a chunk arriving
+    // over the wire (F-158) -- applied here to the whole record at once
+    // (nStartIndex=0), reused rather than re-derived. The count check just
+    // above already makes its own internal bounds check redundant, kept
+    // anyway since it costs nothing extra.
+    if (!ValidateBodyRangeChunkHashes(commitments, /*nStartIndex=*/0, bodies)) {
+        return BodyRecordVerification::HASH_MISMATCH;
+    }
+
+    return BodyRecordVerification::OK;
+}
+
+std::string BodyRecordVerificationToString(BodyRecordVerification result) {
+    switch (result) {
+        case BodyRecordVerification::OK:
+            return "ok";
+        case BodyRecordVerification::NOT_HELD:
+            return "not-held";
+        case BodyRecordVerification::COMMITMENTS_UNREADABLE:
+            return "commitments-unreadable";
+        case BodyRecordVerification::BODY_UNREADABLE:
+            return "body-unreadable";
+        case BodyRecordVerification::COUNT_MISMATCH:
+            return "count-mismatch";
+        case BodyRecordVerification::HASH_MISMATCH:
+            return "hash-mismatch";
+    }
+    return "unknown";
 }
 
 double ConvertBitsToDouble(unsigned int nBits) {
@@ -5939,6 +5997,51 @@ bool CVerifyDB::VerifyDB(const CChainParams &chainparams, CCoinsView *coinsview,
             LogPrintf("VerifyDB(): block verification stopping at height %d (bodies not held)\n",
                       pindex->nHeight);
             break;
+        }
+        // 2.4b (build-plan.md's 2.4 row, F-219): the body-store's own
+        // separate bdy*.dat copy (bodystore.h) is never touched by
+        // ReadBlockFromDisk below -- under F-110's still-current storage
+        // format every block is ALSO stored whole in blk*.dat, so the
+        // read-from-disk check just below (and every level above it) says
+        // nothing about whether the REDUNDANT body-store copy 2.2's own
+        // fetch/serve path actually relies on still agrees with it. HaveBodies
+        // is already confirmed true for this pindex by the guard immediately
+        // above, so there is something real to check here (see
+        // VerifyBodyRecordAtRest's own NOT_HELD case for why a withheld
+        // block is skipped rather than reported). Unconditional at every
+        // check level, not gated behind nCheckLevel: this is a plain
+        // redundant-copy consistency check, the same category as "read from
+        // disk" (level 0) rather than a more expensive validity/undo/
+        // reconnect check, and this codebase's own -checkblocks/-checklevel
+        // pair is exactly the existing, already-configurable trigger the
+        // 2.4 row's own "new-smartnode onboarding" framing calls for --
+        // -checkblocks=0 already means "all", so an operator who just
+        // finished a bulk datadir copy gets full-history body-store
+        // verification for free by passing that, no new flag needed.
+        //
+        // Fails CLOSED, matching every other corruption VerifyDB already
+        // detects (a hard error, "Corrupted block database detected" at
+        // startup per init.cpp) rather than attempting any live repair --
+        // deliberately decided this way, not merely the simplest option:
+        // clearing BLOCK_HAVE_BODIES / re-marking the body-store index
+        // unserveable on a RUNNING node would touch cs_main-guarded state
+        // that ConnectTip, both net_processing.cpp serving sites and several
+        // other HaveBodies() readers (validation.cpp, rest.cpp -- grepped
+        // before deciding) all assume, once true for a connected block,
+        // stays true -- there is no existing precedent anywhere in this
+        // tree for un-asserting a "have" bit on a block already part of the
+        // active chain (PruneOneBlockFile deliberately doesn't either yet,
+        // F-135). VerifyDB itself only ever runs here, at startup, before
+        // ActivateBestChain or any network thread exists (init.cpp), so
+        // failing the whole load and directing the operator to -reindex
+        // (which already correctly rebuilds bdy*.dat from blk*.dat by
+        // reprocessing, per 2.1.3's own -reindex decision) is both simpler
+        // and strictly safer than any live-mutation alternative.
+        BodyRecordVerification bodyCheck = VerifyBodyRecordAtRest(pindex, chainparams.GetConsensus());
+        if (bodyCheck != BodyRecordVerification::OK && bodyCheck != BodyRecordVerification::NOT_HELD) {
+            return error("VerifyDB(): *** body-store record at rest failed verification at %d, hash=%s (%s)",
+                         pindex->nHeight, pindex->GetBlockHash().ToString(),
+                         BodyRecordVerificationToString(bodyCheck));
         }
         CBlock block;
         // check level 0: read from disk
