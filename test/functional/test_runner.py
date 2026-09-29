@@ -245,6 +245,14 @@ BASE_SCRIPTS = [
     # is exactly how that regression shipped past a green C++ suite) makes
     # this registration itself part of closing the gap, not optional.
     'feature_bodyrange_e2e.py',
+    # 2.4a (build-plan.md's 2.4 row, F-219): a real 3-node failover proof --
+    # a source that never answers (disconnected, simulating a "deliberately
+    # erasing source" per this row's own goal statement) does not
+    # permanently deny the fetcher its own history; a second, independently
+    # known source completes it. F-158's own registration lesson applies
+    # here too -- this is a functional test proving a fault-tolerance
+    # property real production code paths depend on, not a unit test.
+    'feature_bodyrange_multisource_failover.py',
     # Don't append tests at the end to avoid merge conflicts
     # Put them in a random line within the section that fits their approximate run-time
 ]
