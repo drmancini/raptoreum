@@ -807,16 +807,31 @@ static bool AcceptToMemoryPoolWorker(const CChainParams &chainparams, CTxMemPool
         view.SetBackend(viewMemPool);
 
         // The asset cache is consulted only by CheckSpecialTx, and only for the
-        // three asset transaction types. Copying the whole cache -- O(confirmed
-        // assets), a few ms at mainnet's asset count -- for every other
-        // transaction is pure overhead on the payment path, so pay it only when
-        // the transaction is actually an asset op. For all other transactions
+        // three asset transaction types. For all other transactions
         // CheckSpecialTx returns before it would dereference the (null) pointer.
+        //
+        // F-224 (build-plan 3.4b item 2): this used to be
+        // `std::make_unique<CAssetsCache>(*passetsCache.get())` -- an
+        // O(confirmed assets) deep copy, a few ms at mainnet's asset count,
+        // paid by every asset-typed transaction even after the guard above
+        // removed it from the payment path. CheckNewAssetTx/
+        // CheckUpdateAssetTx/CheckMintAssetTx (evo/providertx.cpp) and
+        // MakeSignString only ever call GetAssetMetaData/CheckIfAssetExists/
+        // GetAssetId on this pointer -- never a mutating method (confirmed
+        // by reading all three checkers and all three MakeSignString
+        // overloads in full) -- and, as of this same finding, all three of
+        // those methods now correctly fall through local(empty) -> the
+        // GLOBAL passetsCache (including its own not-yet-flushed dirty
+        // state, both additions AND removals) -> passetsdb, matching what a
+        // full copy would have seen at snapshot time. A default-constructed
+        // (empty) cache is therefore behaviourally equivalent for every
+        // caller reachable from CheckSpecialTx, at O(1) instead of
+        // O(confirmed assets).
         std::unique_ptr<CAssetsCache> assetsCache;
         if (tx.nVersion == 3 && (tx.nType == TRANSACTION_NEW_ASSET ||
                                  tx.nType == TRANSACTION_UPDATE_ASSET ||
                                  tx.nType == TRANSACTION_MINT_ASSET)) {
-            assetsCache = std::make_unique<CAssetsCache>(*passetsCache.get());
+            assetsCache = std::make_unique<CAssetsCache>();
         }
 
         // do all inputs exist?
