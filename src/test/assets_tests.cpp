@@ -7,6 +7,7 @@
 
 #include <base58.h>
 #include <chainparams.h>
+#include <consensus/validation.h>
 #include <index/txindex.h>
 #include <keystore.h>
 #include <messagesigner.h>
@@ -104,7 +105,7 @@ static bool SignTransaction(const CTxMemPool& mempool, CMutableTransaction& tx, 
 }
 
 static CMutableTransaction
-CreateNewAssetTx(const CTxMemPool& mempool, SimpleUTXOMap& utxos, const CKey& coinbaseKey, std::string name, bool updatable, bool is_unique, uint8_t type, uint8_t decimalPoint, CAmount amount)
+CreateNewAssetTx(const CTxMemPool& mempool, SimpleUTXOMap& utxos, const CKey& coinbaseKey, std::string name, bool updatable, bool is_unique, uint8_t type, uint8_t decimalPoint, CAmount amount, uint16_t maxMintCount = 10)
 {
     CKeyID ownerKey = coinbaseKey.GetPubKey().GetID();
     CNewAssetTx newAsset;
@@ -116,7 +117,7 @@ CreateNewAssetTx(const CTxMemPool& mempool, SimpleUTXOMap& utxos, const CKey& co
     newAsset.decimalPoint = decimalPoint;
     newAsset.referenceHash = "";
     newAsset.type = type;
-    newAsset.maxMintCount = 10;
+    newAsset.maxMintCount = maxMintCount;
     newAsset.fee = getAssetsFees();
     newAsset.targetAddress = ownerKey;
     newAsset.ownerAddress = ownerKey;
@@ -655,6 +656,214 @@ BOOST_FIXTURE_TEST_CASE(assets_invalid_cases, TestChainDIP3BeforeActivationSetup
         BOOST_ASSERT(::ChainActive().Height() == nHeight + 2);
         BOOST_ASSERT(block->GetHash() != ::ChainActive().Tip()->GetBlockHash());
     }
+}
+
+// F-222 (3.4, bug 1 / B8): same root cause as the mint-cap case below --
+// ProcessSpecialTxsInBlock validates every special tx in a block in ONE pass
+// (evo/specialtx.cpp), against a CAssetsCache that is mutated only
+// afterwards, in ConnectBlock's own separate per-tx loop (UpdateCoins/
+// AddAssets, validation.cpp). So two NEW_ASSET txs for the SAME name in ONE
+// block both individually pass CheckNewAssetTx's own bad-assets-dup-name
+// check against the identical pre-block snapshot. F-216 found this exactly
+// (docs/findings.md, "same-block dup-name") via
+// feature_characterise_assets.py's characterise_double_issuance_in_block;
+// this pins the same scenario as a real regression test, in C++, against
+// this worktree's own build.
+BOOST_FIXTURE_TEST_CASE(assets_same_block_duplicate_name_rejected, TestChainDIP3BeforeActivationSetup)
+{
+    CKey sporkKey;
+    sporkKey.MakeNewKey(false);
+    sporkManager.SetSporkAddress(EncodeDestination(sporkKey.GetPubKey().GetID()));
+    sporkManager.SetPrivKey(EncodeSecret(sporkKey));
+    sporkManager.UpdateSpork(SPORK_22_SPECIAL_TX_FEE, 2560, *m_node.connman);
+
+    auto utxos = BuildSimpleUtxoMap(m_coinbase_txns);
+
+    auto tx1 = CreateNewAssetTx(*m_node.mempool, utxos, coinbaseKey, "DUPEINBLOCK", true, false, 0, 8, 1000);
+    auto tx2 = CreateNewAssetTx(*m_node.mempool, utxos, coinbaseKey, "DUPEINBLOCK", true, false, 0, 8, 1000);
+
+    int nHeight = ::ChainActive().Height();
+    auto block = std::make_shared<CBlock>(CreateBlock({tx1, tx2}, coinbaseKey));
+    EnsureChainman(m_node).ProcessNewBlock(Params(), block, true, nullptr);
+
+    // Before the fix: both individually pass, the block connects, and the
+    // second registration is silently dropped (InsertAsset's own duplicate
+    // guard returns false, unchecked by its caller). After the fix: the
+    // second tx sees the first tx's own just-registered name and the block
+    // is rejected outright.
+    BOOST_CHECK_EQUAL(::ChainActive().Height(), nHeight);
+    BOOST_CHECK(block->GetHash() != ::ChainActive().Tip()->GetBlockHash());
+}
+
+// F-222 (3.4, bug 1 / B8): the mint-cap half of the same root cause.
+// checkAssetMintAmount's own cap check (asset.mintCount >= asset.maxMintCount,
+// evo/providertx.cpp) reads the SAME pre-block CAssetsCache snapshot for
+// every mint tx in the block, so N independently-signed mints against a cap
+// of N-1 all individually pass. F-216 found this exactly (docs/findings.md,
+// "mint: cap can be exceeded within one block") via
+// feature_characterise_assets.py's characterise_double_mint_exceeds_cap_in_block.
+BOOST_FIXTURE_TEST_CASE(assets_same_block_mint_exceeds_cap_rejected, TestChainDIP3BeforeActivationSetup)
+{
+    CKey sporkKey;
+    sporkKey.MakeNewKey(false);
+    sporkManager.SetSporkAddress(EncodeDestination(sporkKey.GetPubKey().GetID()));
+    sporkManager.SetPrivKey(EncodeSecret(sporkKey));
+    sporkManager.UpdateSpork(SPORK_22_SPECIAL_TX_FEE, 2560, *m_node.connman);
+
+    auto utxos = BuildSimpleUtxoMap(m_coinbase_txns);
+
+    // maxMintCount = 1: a single mint is allowed, a second must not be.
+    auto tx = CreateNewAssetTx(*m_node.mempool, utxos, coinbaseKey, "CAPPEDINBLOCK", true, false, 0, 0, 10, 1);
+    std::string assetId = tx.GetHash().ToString();
+    {
+        auto block = std::make_shared<CBlock>(CreateBlock({tx}, coinbaseKey));
+        EnsureChainman(m_node).ProcessNewBlock(Params(), block, true, nullptr);
+    }
+
+    auto mintA = CreateMintAssetTx(*m_node.mempool, utxos, coinbaseKey, assetId);
+    auto mintB = CreateMintAssetTx(*m_node.mempool, utxos, coinbaseKey, assetId);
+
+    int nHeight = ::ChainActive().Height();
+    auto block = std::make_shared<CBlock>(CreateBlock({mintA, mintB}, coinbaseKey));
+    EnsureChainman(m_node).ProcessNewBlock(Params(), block, true, nullptr);
+
+    // Before the fix: both mints individually pass (mintCount=0 for both
+    // checks), the block connects, and mintCount ends up at 2, one past the
+    // cap of 1. After the fix: the second mint sees the first mint's own
+    // effect and the block is rejected outright.
+    BOOST_CHECK_EQUAL(::ChainActive().Height(), nHeight);
+    BOOST_CHECK(block->GetHash() != ::ChainActive().Tip()->GetBlockHash());
+}
+
+// F-222 (3.4, bug 2 / B9): CAssetsCache::UndoMintAsset (assets/assets.cpp)
+// matches its undo record by assetId alone, scanning the block's ENTIRE
+// vUndoData vector with no break -- so it always ends up applying whichever
+// matching record is LAST in that vector, regardless of which tx is actually
+// being undone. A block with two mints on the same asset: disconnecting the
+// EARLIER one re-applies the LATER one's own undo record instead of its own,
+// leaving the earlier mint's effect still applied after "undoing" it.
+BOOST_FIXTURE_TEST_CASE(assets_mint_undo_keyed_by_tx_index, TestChainDIP3BeforeActivationSetup)
+{
+    CKey sporkKey;
+    sporkKey.MakeNewKey(false);
+    sporkManager.SetSporkAddress(EncodeDestination(sporkKey.GetPubKey().GetID()));
+    sporkManager.SetPrivKey(EncodeSecret(sporkKey));
+    sporkManager.UpdateSpork(SPORK_22_SPECIAL_TX_FEE, 2560, *m_node.connman);
+
+    auto utxos = BuildSimpleUtxoMap(m_coinbase_txns);
+
+    // maxMintCount=10 (the default): three total mints stay well clear of
+    // the cap, isolating this test from bug 1/B8 above.
+    auto tx = CreateNewAssetTx(*m_node.mempool, utxos, coinbaseKey, "UNDOTEST", true, false, 0, 0, 10);
+    std::string assetId = tx.GetHash().ToString();
+    {
+        auto block = std::make_shared<CBlock>(CreateBlock({tx}, coinbaseKey));
+        EnsureChainman(m_node).ProcessNewBlock(Params(), block, true, nullptr);
+    }
+
+    // Block 1: a single mint. mintCount 0 -> 1, circulatingSupply 0 -> 10.
+    tx = CreateMintAssetTx(*m_node.mempool, utxos, coinbaseKey, assetId);
+    {
+        auto block = std::make_shared<CBlock>(CreateBlock({tx}, coinbaseKey));
+        EnsureChainman(m_node).ProcessNewBlock(Params(), block, true, nullptr);
+    }
+
+    CAssetMetaData asset;
+    BOOST_REQUIRE(passetsCache->GetAssetMetaData(assetId, asset));
+    BOOST_REQUIRE_EQUAL(asset.mintCount, 1);
+    BOOST_REQUIRE_EQUAL(asset.circulatingSupply, 10);
+
+    // Block 2: TWO independent mints on the SAME asset, in ONE block.
+    // mintCount 1 -> 3, circulatingSupply 10 -> 30.
+    auto mint2 = CreateMintAssetTx(*m_node.mempool, utxos, coinbaseKey, assetId);
+    auto mint3 = CreateMintAssetTx(*m_node.mempool, utxos, coinbaseKey, assetId);
+    CBlockIndex *pindexBlock2;
+    {
+        auto block = std::make_shared<CBlock>(CreateBlock({mint2, mint3}, coinbaseKey));
+        EnsureChainman(m_node).ProcessNewBlock(Params(), block, true, nullptr);
+        pindexBlock2 = ::ChainActive().Tip();
+        BOOST_REQUIRE_EQUAL(pindexBlock2->GetBlockHash().ToString(), block->GetHash().ToString());
+    }
+
+    BOOST_REQUIRE(passetsCache->GetAssetMetaData(assetId, asset));
+    BOOST_REQUIRE_EQUAL(asset.mintCount, 3);
+    BOOST_REQUIRE_EQUAL(asset.circulatingSupply, 30);
+
+    // Disconnect block 2 (invalidate the tip). A correct undo restores
+    // EXACTLY block 1's post-state: mintCount=1, circulatingSupply=10.
+    {
+        LOCK(cs_main);
+        CValidationState state;
+        BOOST_REQUIRE(InvalidateBlock(state, Params(), pindexBlock2));
+    }
+
+    BOOST_REQUIRE(passetsCache->GetAssetMetaData(assetId, asset));
+    BOOST_CHECK_EQUAL(asset.mintCount, 1);
+    BOOST_CHECK_EQUAL(asset.circulatingSupply, 10);
+}
+
+// F-222 (3.4, bug 3): CheckNewAssetTx/CheckUpdateAssetTx's own distribution-type
+// bound is `assetTx.type < 0 && assetTx.type > 3` (evo/providertx.cpp). type is
+// uint8_t, so `type < 0` is always false, and with `&&` the whole condition is
+// always false regardless -- no type value is ever rejected here. F-216 already
+// found this dead code (docs/findings.md); this pins it directly rather than via
+// the collateralAddress check that happens to mask it whenever collateralAddress
+// is left null (assets_creation's own "invalid distribution type" case above
+// passes today for that reason, not because this bound fires -- confirmed by
+// giving collateralAddress a real, non-null value below so that mask cannot
+// fire, isolating the bound this test actually means to pin).
+BOOST_FIXTURE_TEST_CASE(assets_distribution_type_out_of_range_rejected, TestChainDIP3BeforeActivationSetup)
+{
+    CKey sporkKey;
+    sporkKey.MakeNewKey(false);
+    sporkManager.SetSporkAddress(EncodeDestination(sporkKey.GetPubKey().GetID()));
+    sporkManager.SetPrivKey(EncodeSecret(sporkKey));
+    sporkManager.UpdateSpork(SPORK_22_SPECIAL_TX_FEE, 2560, *m_node.connman);
+
+    auto utxos = BuildSimpleUtxoMap(m_coinbase_txns);
+
+    CKey collateralKey;
+    collateralKey.MakeNewKey(false);
+
+    CKeyID ownerKey = coinbaseKey.GetPubKey().GetID();
+    CNewAssetTx newAsset;
+    newAsset.name = "OUTOFRANGETYPE";
+    newAsset.isRoot = true;
+    newAsset.updatable = true;
+    newAsset.isUnique = false;
+    newAsset.decimalPoint = 8;
+    newAsset.referenceHash = "";
+    newAsset.type = 99; // out of range: only 0-3 (manual/coinbase/address/schedule) are defined
+    newAsset.maxMintCount = 10;
+    newAsset.fee = getAssetsFees();
+    newAsset.targetAddress = ownerKey;
+    newAsset.ownerAddress = ownerKey;
+    newAsset.amount = 1000 * COIN;
+    // Real, non-null collateralAddress: with type != 0, a null collateralAddress
+    // is independently rejected (bad-assets-collateralAddress) -- exactly the
+    // masking F-216 found. Setting a real one isolates the distribution-type
+    // bound itself.
+    newAsset.collateralAddress = collateralKey.GetPubKey().GetID();
+
+    CMutableTransaction tx;
+    tx.nVersion = 3;
+    tx.nType = TRANSACTION_NEW_ASSET;
+    FundTransaction(tx, utxos, GetScriptForDestination(coinbaseKey.GetPubKey().GetID()), newAsset.fee * COIN + 1 * COIN,
+        coinbaseKey);
+    newAsset.inputsHash = CalcTxInputsHash(tx);
+    SetTxPayload(tx, newAsset);
+    BOOST_ASSERT(SignTransaction(*m_node.mempool, tx, coinbaseKey));
+
+    int nHeight = ::ChainActive().Height();
+    std::vector<CMutableTransaction> txns = {tx};
+    auto block = std::make_shared<CBlock>(CreateBlock(txns, coinbaseKey));
+    EnsureChainman(m_node).ProcessNewBlock(Params(), block, true, nullptr);
+
+    // Before the fix: type=99 with a real collateralAddress sails through every
+    // check (the bound is dead code) and the block connects. After the fix:
+    // rejected bad-assets-distibution-type, height unchanged.
+    BOOST_CHECK_EQUAL(::ChainActive().Height(), nHeight);
+    BOOST_CHECK(block->GetHash() != ::ChainActive().Tip()->GetBlockHash());
 }
 
 BOOST_AUTO_TEST_CASE(validate_amount_decimal_point) {
