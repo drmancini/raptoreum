@@ -773,10 +773,34 @@ BOOST_FIXTURE_TEST_CASE(assets_mint_undo_keyed_by_tx_index, TestChainDIP3BeforeA
     BOOST_REQUIRE_EQUAL(asset.mintCount, 1);
     BOOST_REQUIRE_EQUAL(asset.circulatingSupply, 10);
 
-    // Block 2: TWO independent mints on the SAME asset, in ONE block.
-    // mintCount 1 -> 3, circulatingSupply 10 -> 30.
+    // Block 2: TWO mints on the SAME asset, in ONE block. mintCount 1 -> 3,
+    // circulatingSupply 10 -> 30.
+    //
+    // CMintAssetTx::MakeSignString (evo/providertx.cpp) bakes the asset's
+    // CURRENT circulatingSupply into the signed message -- a deliberate
+    // anti-conflict mechanism (matching mintasset's own RPC-level
+    // existsAssetTxConflict guard, which refuses a second concurrent mint on
+    // the same asset). With bug 1/B8 fixed above, the second mint in a block
+    // is now correctly checked against the first mint's own in-block effect,
+    // so it must be signed against that SAME expected post-first-mint state
+    // to pass -- exactly what a wallet correctly coordinating two sequential
+    // mints into one block would need to do. Simulate that here: build mint2
+    // normally (against the real, current passetsCache), then temporarily
+    // apply its known effect to passetsCache before building+signing mint3,
+    // reverting before mining -- so mint3 is signed the same way a genuinely
+    // sequential wallet flow would sign it, and this test is exercising the
+    // undo/tx-index bug, not the (separate, already-fixed) intra-block
+    // visibility one.
     auto mint2 = CreateMintAssetTx(*m_node.mempool, utxos, coinbaseKey, assetId);
-    auto mint3 = CreateMintAssetTx(*m_node.mempool, utxos, coinbaseKey, assetId);
+    CMutableTransaction mint3;
+    {
+        CDatabaseAssetData &entry = passetsCache->mapAsset[assetId];
+        CAssetMetaData saved = entry.asset;
+        entry.asset.circulatingSupply += 10; // mint2's own effect (UpdateAsset's own amount/COIN math)
+        entry.asset.mintCount += 1;
+        mint3 = CreateMintAssetTx(*m_node.mempool, utxos, coinbaseKey, assetId);
+        entry.asset = saved;
+    }
     CBlockIndex *pindexBlock2;
     {
         auto block = std::make_shared<CBlock>(CreateBlock({mint2, mint3}, coinbaseKey));
@@ -794,7 +818,10 @@ BOOST_FIXTURE_TEST_CASE(assets_mint_undo_keyed_by_tx_index, TestChainDIP3BeforeA
     {
         LOCK(cs_main);
         CValidationState state;
-        BOOST_REQUIRE(InvalidateBlock(state, Params(), pindexBlock2));
+        bool ok = InvalidateBlock(state, Params(), pindexBlock2);
+        BOOST_TEST_MESSAGE("InvalidateBlock ok=" << ok << " reason=" << state.GetRejectReason()
+                                                  << " debug=" << state.GetDebugMessage());
+        BOOST_REQUIRE(ok);
     }
 
     BOOST_REQUIRE(passetsCache->GetAssetMetaData(assetId, asset));

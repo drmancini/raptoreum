@@ -207,11 +207,11 @@ public:
 
     void RemoveAddressBalance(const CScript &script, const COutPoint &out);
 
-    bool UndoUpdateAsset(const CUpdateAssetTx upAsset,
+    bool UndoUpdateAsset(const CUpdateAssetTx upAsset, uint32_t txIndex,
                          const std::vector <std::pair<std::string, CBlockAssetUndo>> &vUndoData);
 
     bool
-    UndoMintAsset(const CMintAssetTx assetTx, const std::vector <std::pair<std::string, CBlockAssetUndo>> &vUndoData);
+    UndoMintAsset(const CMintAssetTx assetTx, uint32_t txIndex, const std::vector <std::pair<std::string, CBlockAssetUndo>> &vUndoData);
 
     bool CheckIfAssetExists(std::string assetId);
 
@@ -232,7 +232,7 @@ public:
     }
 };
 
-void AddAssets(const CTransaction &tx, int nHeight, CAssetsCache *assetCache = nullptr,
+void AddAssets(const CTransaction &tx, int nHeight, uint32_t nTxIndex = 0, CAssetsCache *assetCache = nullptr,
                std::pair <std::string, CBlockAssetUndo> *undoAssetData = nullptr);
 
 bool GetAssetData(const CScript &script, CAssetOutputEntry &data);
