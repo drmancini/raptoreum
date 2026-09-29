@@ -213,13 +213,28 @@ public:
             Update(EUpdate::ROUND_VOTING, std::string("Round Voting"), 1, 720, 905760, 7, 365, 7, false,
                 VoteThreshold(85, 85, 1), VoteThreshold(0, 0, 1), false, 915840));
 
+        // 3.6 (F-222): both constants below were stale (block 421457, Oct 2022) and
+        // defaultAssumeValid additionally had a letter-`o` typo in its "0x" prefix
+        // that silently parsed to the zero hash (uint256::SetHex only strips a
+        // literal '0'+'x'; verified directly -- see uint256_tests.cpp
+        // setHex_letter_o_prefix_silently_parses_to_zero). Both moved forward
+        // together to block 1,340,136 (tip-100,000 at audit time, 2026-09-29;
+        // real mainnet tip was 1,440,136) -- 1,000x COINBASE_MATURITY of margin
+        // and ~4.6 months old, matching this same anchor's own original
+        // age-at-ship gap (block 421457 was ~4 months old when bcc6c2730 shipped
+        // it, 2023-02-17). Hash and chainwork below are copied verbatim from
+        // `raptoreum-cli getblock`/`getblockheader` on a real, fully-synced
+        // mainnet node, cross-checked both ways. See F-222 for the full gap
+        // measurement (old anchor was 1,018,679 blocks / ~73% chainwork behind
+        // the real tip; this one is 100,000 blocks / ~1.0% behind).
+
         // The best chain should have at least this much work.
         consensus.nMinimumChainWork = uint256S(
-                "000000000000000000000000000000000000000000000000000eead474ccbc59"); // block 421457 chainwork
+                "00000000000000000000000000000000000000000000000000198d0e6ffa12df"); // block 1340136 chainwork
 
         // By default assume that the signatures in ancestors of this block are valid.
         consensus.defaultAssumeValid = uint256S(
-                "ox6fb0b649723f51b67484019409fef94d077f17c8d88645e08c000b2e4fd3e28a"); // block hash for 421457
+                "0x8ef694133cd8981a14f4042d256cdce823cb5686dadfcda5ad843b97090cfccf"); // block hash for 1340136
 
         /**
          * The message start string is designed to be unlikely to occur in normal data.
@@ -307,6 +322,31 @@ public:
         nMinSporkKeys = 1;
         fBIP9CheckSmartnodesUpgraded = true;
 
+        // 3.6 (F-222): the 394273 entry LOOKS like it shares defaultAssumeValid's
+        // "0x" typo (it's missing the prefix the other three entries have) but it
+        // is NOT a bug -- confirmed by reading uint256::SetHex (uint256.cpp) and by
+        // a direct unit-test construction (uint256_tests.cpp,
+        // checkpoint_394273_hash_without_0x_prefix_parses_correctly): SetHex only
+        // skips a leading "0x" pair, it never requires one, and this string starts
+        // with a valid hex digit ('0'), so it parses identically either way. Value
+        // verified against the real mainnet node (`raptoreum-cli getblockhash
+        // 394273`) and matches exactly -- left untouched.
+        //
+        // Staleness (flagged, not fixed here): this is still the newest of 4
+        // checkpoints, last touched 2023-06-24 (a pure reformat; the value itself
+        // predates that). Real mainnet tip was 1,440,136 at audit time (2026-09-29)
+        // -- 1,045,863 blocks with zero checkpoint coverage, versus 100,000 for the
+        // nMinimumChainWork/defaultAssumeValid floor above. checkpoints.h's own doc
+        // ("updated every release or three") ties this to a project release
+        // cadence this research branch doesn't have, and a wrong checkpoint is a
+        // permanent hard-fork-away-from-reality risk in a way a wrong
+        // assumevalid/minimumchainwork value structurally is not (the latter two
+        // just fail open). Deliberately left open rather than picked here. A real,
+        // live-verified, appropriately-deep candidate for the owner to review:
+        // height 1,340,136, hash
+        // 8ef694133cd8981a14f4042d256cdce823cb5686dadfcda5ad843b97090cfccf (the
+        // same block chosen for the anchor above, verified live, 100,000 blocks
+        // buried) -- not added as a fifth entry pending an explicit go-ahead.
         checkpointData = {
                 {{5145, uint256S("0x64c9cc82f05f4326e49fd4b21a48494b02b12a707de67a47c7e8e1102b0f1d9b")},
                  {35000, uint256S("0xb4fb191f3ef4141557aef8aafa700d312e5499cbde4a3079faa78cf58c0c414f")},
