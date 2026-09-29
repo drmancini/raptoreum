@@ -299,6 +299,43 @@ bool CAssetsCache::CheckIfAssetExists(std::string assetId) {
         return true;
     }
 
+    // F-224 (found investigating 3.4b item 2's correctness trap): consult
+    // the GLOBAL cache directly before falling to LevelDB, mirroring
+    // GetAssetMetaData's own existing fallback chain below. Without this, a
+    // fresh per-call cache (DisconnectTip/ConnectTip's own
+    // `CAssetsCache assetCache;`, validation.cpp) cannot see an asset that
+    // exists only in passetsCache's own dirty/unflushed state -- reachable
+    // TODAY, independent of any ATMP change, via DisconnectBlock's
+    // NEW_ASSET-undo branch (validation.cpp:2052), which already runs
+    // CheckIfAssetExists against exactly such an empty cache (regression
+    // test: assets_new_asset_undo_visible_before_flush). Check the GLOBAL
+    // removal marker first, for the same reason the local check above does:
+    // a full-copy `this` (today's ATMP pattern, validation.cpp:819) already
+    // carries passetsCache's own NewAssetsToRemove via the copy
+    // constructor, so this must replicate that, not just the positive
+    // existence check, to stay behaviourally equivalent to a full copy.
+    if (passetsCache->NewAssetsToRemove.count(cachedAsset)) {
+        return false;
+    }
+    auto globalIt = passetsCache->mapAsset.find(assetId);
+    if (globalIt != passetsCache->mapAsset.end()) {
+        // Insert into the LOCAL map too (matching GetAssetMetaData's own
+        // it2 branch immediately below in that function) -- a caller that
+        // gets `true` from this method routinely turns around and reads or
+        // mutates `mapAsset[assetId]` directly on this SAME instance right
+        // afterward (RemoveAsset, InsertAsset's own dup guard, UpdateAsset).
+        // Confirmed the hard way: without this insert, DisconnectBlock's
+        // NEW_ASSET-undo branch (validation.cpp:2052) got CheckIfAssetExists
+        // == true from the global fallback above, then called RemoveAsset
+        // on the SAME (still only-locally-empty) cache, which checks ONLY
+        // the local mapAsset and returned false -- DisconnectBlock then
+        // reported DISCONNECT_FAILED and InvalidateBlock failed outright
+        // (regression test caught this as a hard test failure, not a wrong
+        // assertion, the first time this fix was built).
+        mapAsset.insert(std::make_pair(assetId, globalIt->second));
+        return true;
+    }
+
     //check if the asset exist on the db
     int nHeight;
     uint256 blockHash;
@@ -324,6 +361,24 @@ bool CAssetsCache::GetAssetId(std::string name, std::string &assetId) {
             TouchAssetName(name);
         return true;
     }
+
+    // F-224: same missing-middle-tier gap as CheckIfAssetExists above --
+    // consult the GLOBAL mapAssetId before falling to LevelDB. Insert into
+    // the LOCAL map too, matching GetAssetMetaData's own it2 branch and
+    // CheckIfAssetExists's now-fixed equivalent above -- no current caller
+    // depends on this (GetAssetId's callers all use the returned string,
+    // not a subsequent local mapAssetId lookup), but CheckIfAssetExists's
+    // own bug (found the hard way, see above) is reason enough to not
+    // repeat the same shape of gap here.
+    auto it2 = passetsCache->mapAssetId.find(name);
+    if (it2 != passetsCache->mapAssetId.end()) {
+        assetId = it2->second;
+        mapAssetId.insert(std::make_pair(name, assetId));
+        if (this == passetsCache.get())
+            TouchAssetName(name);
+        return true;
+    }
+
     //try to get asset id from the db
     if (passetsdb->ReadAssetId(name, assetId)) {
         mapAssetId.insert(std::make_pair(name, assetId));
@@ -555,6 +610,45 @@ bool CAssetsCache::DumpCacheToDatabase() {
             }
             if (!passetsdb->EraseAssetId(newAsset.asset.name)) {
                 return error("%s : %s", __func__, "_Failed Erasing Asset Data from database");
+            }
+            // F-224 (found running feature_assets_rules.py's own test_reorg
+            // against this row's build): this method is called ONLY as
+            // `passetsCache->DumpCacheToDatabase()` (validation.cpp), so
+            // `this` IS the global singleton here -- but until now, erasing
+            // the passetsdb row left mapAsset/mapAssetId themselves
+            // untouched, forever. A block containing a NEW_ASSET creation
+            // that is later disconnected (RemoveAsset, now correctly
+            // reachable -- see CheckIfAssetExists's own fix above) marks the
+            // removal only in NewAssetsToRemove/NewAssetsToAdd; this method
+            // is the ONE place the removal actually becomes durable, and
+            // ClearDirtyCache() below clears NewAssetsToRemove itself right
+            // after -- so once THIS call returns, the masking check
+            // CheckIfAssetExists's own global middle tier relies on
+            // (passetsCache->NewAssetsToRemove) no longer protects anything,
+            // and a stale mapAsset/mapAssetId entry becomes visible again as
+            // a false "still exists". Reproduced live: reconnecting a block
+            // via `reconsiderblock` after `listassets` (which forces exactly
+            // this flush, assetsdb.cpp's own GetListAssets ->
+            // ForceFlushStateToDisk) failed ConnectBlock with
+            // bad-assets-dup-name -- ProcessSpecialTxsInBlock's own scratch
+            // cache (F-223, evo/specialtx.cpp) hit the same stale entry.
+            // Erase here too, so the in-memory cache and passetsdb go stale
+            // together rather than the cache lagging forever.
+            mapAsset.erase(newAsset.asset.assetId);
+            mapAssetId.erase(newAsset.asset.name);
+            {
+                auto lruIt = assetLruIndex.find(newAsset.asset.assetId);
+                if (lruIt != assetLruIndex.end()) {
+                    assetLruOrder.erase(lruIt->second);
+                    assetLruIndex.erase(lruIt);
+                }
+            }
+            {
+                auto lruIt = assetIdLruIndex.find(newAsset.asset.name);
+                if (lruIt != assetIdLruIndex.end()) {
+                    assetIdLruOrder.erase(lruIt->second);
+                    assetIdLruIndex.erase(lruIt);
+                }
             }
         }
         //add assets to db
