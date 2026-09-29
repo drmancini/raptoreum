@@ -890,6 +890,198 @@ BOOST_FIXTURE_TEST_CASE(assets_distribution_type_out_of_range_rejected, TestChai
     BOOST_CHECK(block->GetHash() != ::ChainActive().Tip()->GetBlockHash());
 }
 
+BOOST_FIXTURE_TEST_CASE(asset_cache_flush_bounds_global_cache_size, RegTestingSetup)
+{
+    // F-224 (build-plan 3.4b item 1). Before the fix, LoadAssets (assetsdb.cpp)
+    // capped passetsCache->mapAsset/mapAssetId at MAX_CACHE_ASSETS_SIZE only at
+    // startup; CAssetsCache::Flush() (assets.cpp) then merged every
+    // subsequently-touched asset into the global map with no eviction, ever.
+    // Drive the cache well past the cap directly through InsertAsset+Flush
+    // (real block mining would make testing thousands of distinct assets
+    // impractically slow) and confirm LoadAssets' own startup invariant --
+    // size <= cap -- continues to hold after runtime growth too.
+    const size_t cap = MAX_CACHE_ASSETS_SIZE;
+    const size_t total = cap + 500;
+
+    for (size_t i = 0; i < total; i++) {
+        // Default-constructed (empty), not copy-constructed from
+        // passetsCache -- matches ConnectTip/DisconnectTip's own real
+        // per-block pattern (`CAssetsCache assetCache;`, validation.cpp). A
+        // copy-constructed local would re-touch EVERY entry it started with
+        // on every Flush() call (Flush() iterates the whole local mapAsset,
+        // not just the delta), swamping any real recency signal.
+        CAssetsCache local;
+        CNewAssetTx newAssetTx;
+        newAssetTx.name = "ASSET" + std::to_string(i);
+        newAssetTx.isRoot = true;
+        newAssetTx.decimalPoint = 0;
+        std::string assetId = "assetid" + std::to_string(i);
+        BOOST_REQUIRE(local.InsertAsset(newAssetTx, assetId, 1));
+        BOOST_REQUIRE(local.Flush());
+
+        // Simulate FlushStateToDisk's own periodic full flush (validation.cpp,
+        // fDoFullFlush), which is what actually writes dirty entries to
+        // passetsdb -- without this every entry stays "dirty" and
+        // EvictOverflowAssets correctly refuses to touch any of them (see the
+        // dedicated dirty-protection test below), so the bound would never
+        // engage and this test would not distinguish the fix from the bug.
+        if (i % 100 == 99) {
+            BOOST_REQUIRE(passetsCache->DumpCacheToDatabase());
+        }
+    }
+    BOOST_REQUIRE(passetsCache->DumpCacheToDatabase());
+
+    BOOST_CHECK_EQUAL(passetsCache->mapAsset.size(), cap);
+    BOOST_CHECK_EQUAL(passetsCache->mapAssetId.size(), cap);
+
+    // Safety-by-construction: an evicted asset must still be found via
+    // GetAssetMetaData's own LevelDB fallback (assets.cpp) -- eviction from
+    // the in-memory map must never mean the data is gone, only that it has to
+    // be refetched.
+    CAssetMetaData evictedAsset;
+    BOOST_CHECK(passetsCache->GetAssetMetaData("assetid0", evictedAsset));
+    BOOST_CHECK_EQUAL(evictedAsset.name, "ASSET0");
+}
+
+BOOST_FIXTURE_TEST_CASE(asset_cache_eviction_never_drops_unflushed_assets, RegTestingSetup)
+{
+    // F-224 correctness gate -- the archive doc's own "correctness trap"
+    // (docs/archive/asset-cache-drag.md) named this for item 2, but it binds
+    // item 1's eviction just as hard: an asset confirmed on-chain but not yet
+    // durably written to passetsdb (DumpCacheToDatabase runs on
+    // FlushStateToDisk's own periodic/critical schedule -- up to
+    // DATABASE_FLUSH_INTERVAL = 24h, validation.h:127 -- not on every block,
+    // confirmed by reading FlushStateToDisk's fDoFullFlush conditions) must
+    // never be evicted: doing so would make it invisible to every reader
+    // (GetAssetMetaData's own DB fallback would miss it too) until the next
+    // flush -- a real duplicate-name/duplicate-mint hole, not a slowdown. Use
+    // a small explicit cap so "dirty count exceeds the cap" is reachable
+    // without thousands of insertions.
+    const size_t smallCap = 5;
+
+    // Durable pool: insert, flush, and dump to DB so these become eviction-
+    // eligible.
+    for (size_t i = 0; i < smallCap; i++) {
+        // Default-constructed (empty), not copy-constructed from
+        // passetsCache -- matches ConnectTip/DisconnectTip's own real
+        // per-block pattern (`CAssetsCache assetCache;`, validation.cpp). A
+        // copy-constructed local would re-touch EVERY entry it started with
+        // on every Flush() call (Flush() iterates the whole local mapAsset,
+        // not just the delta), swamping any real recency signal.
+        CAssetsCache local;
+        CNewAssetTx newAssetTx;
+        newAssetTx.name = "DURABLE" + std::to_string(i);
+        newAssetTx.isRoot = true;
+        std::string assetId = "durableid" + std::to_string(i);
+        BOOST_REQUIRE(local.InsertAsset(newAssetTx, assetId, 1));
+        BOOST_REQUIRE(local.Flush());
+    }
+    BOOST_REQUIRE(passetsCache->DumpCacheToDatabase());
+    BOOST_CHECK_EQUAL(passetsCache->mapAsset.size(), smallCap);
+
+    // Dirty batch: more than smallCap new assets, inserted+flushed but NEVER
+    // dumped to passetsdb -- exactly the "recently confirmed, not yet
+    // flushed" state the correctness trap describes.
+    const size_t dirtyCount = smallCap * 3;
+    std::vector<std::string> dirtyIds;
+    for (size_t i = 0; i < dirtyCount; i++) {
+        // Default-constructed (empty), not copy-constructed from
+        // passetsCache -- matches ConnectTip/DisconnectTip's own real
+        // per-block pattern (`CAssetsCache assetCache;`, validation.cpp). A
+        // copy-constructed local would re-touch EVERY entry it started with
+        // on every Flush() call (Flush() iterates the whole local mapAsset,
+        // not just the delta), swamping any real recency signal.
+        CAssetsCache local;
+        CNewAssetTx newAssetTx;
+        newAssetTx.name = "DIRTY" + std::to_string(i);
+        newAssetTx.isRoot = true;
+        std::string assetId = "dirtyid" + std::to_string(i);
+        BOOST_REQUIRE(local.InsertAsset(newAssetTx, assetId, 1));
+        BOOST_REQUIRE(local.Flush());
+        // Flush() always evicts at the production default (2500); exercise
+        // the mechanism at this test's smaller cap directly instead of
+        // waiting for 2500+ real insertions.
+        passetsCache->EvictOverflowAssets(smallCap);
+        passetsCache->EvictOverflowAssetIds(smallCap);
+        dirtyIds.push_back(assetId);
+    }
+
+    // Every dirty asset must still be directly resident -- there is nowhere
+    // else for it to live, since it was never durably written. Both maps:
+    // EvictOverflowAssetIds has its own, separate dirty check (via the
+    // corresponding mapAsset entry) from EvictOverflowAssets.
+    for (const auto &id : dirtyIds) {
+        BOOST_CHECK_MESSAGE(passetsCache->mapAsset.count(id) == 1,
+                             "dirty asset " << id << " was evicted with no durable copy");
+    }
+    for (size_t i = 0; i < dirtyCount; i++) {
+        std::string name = "DIRTY" + std::to_string(i);
+        BOOST_CHECK_MESSAGE(passetsCache->mapAssetId.count(name) == 1,
+                             "dirty asset name " << name << " was evicted from mapAssetId with no durable copy");
+    }
+    // The cap is exceeded here -- correctly: temporary overflow is the honest
+    // outcome when nothing safe remains to evict, not silent data loss.
+    BOOST_CHECK_EQUAL(passetsCache->mapAsset.size(), dirtyCount);
+    BOOST_CHECK_EQUAL(passetsCache->mapAssetId.size(), dirtyCount);
+
+    // The durable pool, having nothing protecting it, was fully evicted to
+    // make room first.
+    for (size_t i = 0; i < smallCap; i++) {
+        BOOST_CHECK_EQUAL(passetsCache->mapAsset.count("durableid" + std::to_string(i)), 0u);
+        BOOST_CHECK_EQUAL(passetsCache->mapAssetId.count("DURABLE" + std::to_string(i)), 0u);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(asset_cache_eviction_is_recency_ordered, RegTestingSetup)
+{
+    // Distinguishes real LRU eviction from a weaker policy (e.g. evicting
+    // whatever iterates first in mapAsset -- for a std::map keyed by a string
+    // ID that's sorted-key order, unrelated to actual use) -- touch an
+    // early-inserted asset again right before the cache overflows and confirm
+    // eviction picks a genuinely untouched one instead.
+    const size_t smallCap = 5;
+    std::vector<std::string> ids;
+    for (size_t i = 0; i < smallCap; i++) {
+        // Default-constructed (empty), not copy-constructed from
+        // passetsCache -- matches ConnectTip/DisconnectTip's own real
+        // per-block pattern (`CAssetsCache assetCache;`, validation.cpp). A
+        // copy-constructed local would re-touch EVERY entry it started with
+        // on every Flush() call (Flush() iterates the whole local mapAsset,
+        // not just the delta), swamping any real recency signal.
+        CAssetsCache local;
+        CNewAssetTx newAssetTx;
+        newAssetTx.name = "A" + std::to_string(i);
+        newAssetTx.isRoot = true;
+        std::string assetId = "id" + std::to_string(i);
+        BOOST_REQUIRE(local.InsertAsset(newAssetTx, assetId, 1));
+        BOOST_REQUIRE(local.Flush());
+        ids.push_back(assetId);
+    }
+    BOOST_REQUIRE(passetsCache->DumpCacheToDatabase()); // make all smallCap evictable
+    BOOST_CHECK_EQUAL(passetsCache->mapAsset.size(), smallCap);
+
+    // Re-touch the OLDEST entry (ids[0]) via the real read path, making it
+    // most-recently-used just before overflow.
+    CAssetMetaData tmp;
+    BOOST_REQUIRE(passetsCache->GetAssetMetaData(ids.front(), tmp));
+
+    // One more asset overflows the cache by exactly one. A naive "evict the
+    // oldest inserted" policy would pick ids[0]; since it was just touched,
+    // ids[1] (the next-oldest, untouched since its own insertion) must be
+    // the one evicted instead.
+    CAssetsCache local; // see the comment on the loop's own local cache above
+    CNewAssetTx newAssetTx;
+    newAssetTx.name = "NEW";
+    newAssetTx.isRoot = true;
+    BOOST_REQUIRE(local.InsertAsset(newAssetTx, "newid", 1));
+    BOOST_REQUIRE(local.Flush());
+    passetsCache->EvictOverflowAssets(smallCap);
+
+    BOOST_CHECK_EQUAL(passetsCache->mapAsset.count(ids[0]), 1u); // touched -- survives
+    BOOST_CHECK_EQUAL(passetsCache->mapAsset.count(ids[1]), 0u); // untouched, oldest remaining -- evicted
+    BOOST_CHECK_EQUAL(passetsCache->mapAsset.count("newid"), 1u); // just inserted -- survives
+}
+
 BOOST_AUTO_TEST_CASE(validate_amount_decimal_point) {
     // Normal range (decimalPoint 0..8): the divisor is 10^(8 - decimalPoint) and an
     // amount is valid iff it is a whole multiple of that divisor.

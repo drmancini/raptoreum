@@ -10,6 +10,8 @@
 #include <key_io.h>
 #include <pubkey.h>
 #include <assets/assetstype.h>
+#include <list>
+#include <unordered_map>
 
 class CNewAssetTx;
 
@@ -230,6 +232,31 @@ public:
         NewAssetsTransferToAdd.clear();
         NewAssetsTranferToRemove.clear();
     }
+
+    // F-224 (build-plan 3.4b item 1): bound the GLOBAL cache's own two
+    // LoadAssets-capped maps (mapAsset, mapAssetId) so they stay bounded
+    // over process uptime too -- LoadAssets (assetsdb.cpp) caps them only
+    // at startup; nothing capped them again afterwards (assets.cpp's own
+    // Flush(), and every direct passetsCache->Get*() call on a miss, only
+    // ever grew them). These touch/evict pairs are meaningful ONLY on the
+    // global `passetsCache` instance -- callers guard with
+    // `this == passetsCache.get()` before calling Touch*, and Flush()
+    // always calls them on `passetsCache->`, never on `this`. A local
+    // per-call CAssetsCache (the ATMP guard's copy, a block's scratch
+    // cache) never populates assetLruOrder/assetIdLruOrder and pays
+    // nothing for them -- they stay empty, and Evict*'s `while` loops are
+    // no-ops against an already-under-cap local cache.
+    void TouchAsset(const std::string &assetId);
+    void TouchAssetName(const std::string &name);
+    void EvictOverflowAssets(size_t cap = MAX_CACHE_ASSETS_SIZE);
+    void EvictOverflowAssetIds(size_t cap = MAX_CACHE_ASSETS_SIZE);
+
+private:
+    std::list<std::string> assetLruOrder;
+    std::unordered_map<std::string, std::list<std::string>::iterator> assetLruIndex;
+
+    std::list<std::string> assetIdLruOrder;
+    std::unordered_map<std::string, std::list<std::string>::iterator> assetIdLruIndex;
 };
 
 void AddAssets(const CTransaction &tx, int nHeight, uint32_t nTxIndex = 0, CAssetsCache *assetCache = nullptr,
