@@ -890,6 +890,440 @@ BOOST_FIXTURE_TEST_CASE(assets_distribution_type_out_of_range_rejected, TestChai
     BOOST_CHECK(block->GetHash() != ::ChainActive().Tip()->GetBlockHash());
 }
 
+BOOST_FIXTURE_TEST_CASE(assets_new_asset_undo_visible_before_flush, TestChainDIP3BeforeActivationSetup)
+{
+    // F-224 (found while investigating 3.4b item 2's correctness trap):
+    // CheckIfAssetExists (assets.cpp) checks only the LOCAL cache's own
+    // mapAsset, then falls straight to passetsdb -- unlike GetAssetMetaData,
+    // it never consults the GLOBAL passetsCache->mapAsset in between.
+    // DisconnectTip constructs a FRESH, EMPTY CAssetsCache per call
+    // (validation.cpp: `CAssetsCache assetCache;`), and DisconnectBlock's
+    // own NEW_ASSET-undo branch (validation.cpp:2052) calls
+    // CheckIfAssetExists on exactly that empty cache before calling
+    // RemoveAsset -- so disconnecting a block whose asset creation has not
+    // yet been durably written to passetsdb (DumpCacheToDatabase runs on
+    // FlushStateToDisk's own periodic/critical schedule, not on every
+    // block -- and does not run here, since this test's tiny coin cache
+    // never reaches CRITICAL) silently no-ops the undo: RemoveAsset is
+    // never called, and the asset stays resident (and reported as
+    // existing) in passetsCache after its own creating block was
+    // disconnected.
+    CKey sporkKey;
+    sporkKey.MakeNewKey(false);
+    sporkManager.SetSporkAddress(EncodeDestination(sporkKey.GetPubKey().GetID()));
+    sporkManager.SetPrivKey(EncodeSecret(sporkKey));
+    sporkManager.UpdateSpork(SPORK_22_SPECIAL_TX_FEE, 2560, *m_node.connman);
+
+    auto utxos = BuildSimpleUtxoMap(m_coinbase_txns);
+    auto tx = CreateNewAssetTx(*m_node.mempool, utxos, coinbaseKey, "UNDOASSETTEST", true, false, 0, 8, 1000);
+    std::string assetId = tx.GetHash().ToString();
+
+    CBlockIndex *pindexBlock;
+    {
+        auto block = std::make_shared<CBlock>(CreateBlock({tx}, coinbaseKey));
+        EnsureChainman(m_node).ProcessNewBlock(Params(), block, true, nullptr);
+        pindexBlock = ::ChainActive().Tip();
+        BOOST_REQUIRE_EQUAL(pindexBlock->GetBlockHash().ToString(), block->GetHash().ToString());
+    }
+
+    BOOST_REQUIRE(passetsCache->CheckIfAssetExists(assetId));
+
+    // Disconnect the block that created it -- the asset must cease to exist.
+    {
+        LOCK(cs_main);
+        CValidationState state;
+        BOOST_REQUIRE(InvalidateBlock(state, Params(), pindexBlock));
+    }
+
+    BOOST_CHECK_MESSAGE(!passetsCache->CheckIfAssetExists(assetId),
+                         "asset " << assetId << " still reported as existing after its creating block was disconnected");
+}
+
+BOOST_FIXTURE_TEST_CASE(asset_cache_flush_bounds_global_cache_size, RegTestingSetup)
+{
+    // F-224 (build-plan 3.4b item 1). Before the fix, LoadAssets (assetsdb.cpp)
+    // capped passetsCache->mapAsset/mapAssetId at MAX_CACHE_ASSETS_SIZE only at
+    // startup; CAssetsCache::Flush() (assets.cpp) then merged every
+    // subsequently-touched asset into the global map with no eviction, ever.
+    // Drive the cache well past the cap directly through InsertAsset+Flush
+    // (real block mining would make testing thousands of distinct assets
+    // impractically slow) and confirm LoadAssets' own startup invariant --
+    // size <= cap -- continues to hold after runtime growth too.
+    const size_t cap = MAX_CACHE_ASSETS_SIZE;
+    const size_t total = cap + 500;
+
+    for (size_t i = 0; i < total; i++) {
+        // Default-constructed (empty), not copy-constructed from
+        // passetsCache -- matches ConnectTip/DisconnectTip's own real
+        // per-block pattern (`CAssetsCache assetCache;`, validation.cpp). A
+        // copy-constructed local would re-touch EVERY entry it started with
+        // on every Flush() call (Flush() iterates the whole local mapAsset,
+        // not just the delta), swamping any real recency signal.
+        CAssetsCache local;
+        CNewAssetTx newAssetTx;
+        newAssetTx.name = "ASSET" + std::to_string(i);
+        newAssetTx.isRoot = true;
+        newAssetTx.decimalPoint = 0;
+        std::string assetId = "assetid" + std::to_string(i);
+        BOOST_REQUIRE(local.InsertAsset(newAssetTx, assetId, 1));
+        BOOST_REQUIRE(local.Flush());
+
+        // Simulate FlushStateToDisk's own periodic full flush (validation.cpp,
+        // fDoFullFlush), which is what actually writes dirty entries to
+        // passetsdb -- without this every entry stays "dirty" and
+        // EvictOverflowAssets correctly refuses to touch any of them (see the
+        // dedicated dirty-protection test below), so the bound would never
+        // engage and this test would not distinguish the fix from the bug.
+        if (i % 100 == 99) {
+            BOOST_REQUIRE(passetsCache->DumpCacheToDatabase());
+        }
+    }
+    BOOST_REQUIRE(passetsCache->DumpCacheToDatabase());
+
+    BOOST_CHECK_EQUAL(passetsCache->mapAsset.size(), cap);
+    BOOST_CHECK_EQUAL(passetsCache->mapAssetId.size(), cap);
+
+    // Safety-by-construction: an evicted asset must still be found via
+    // GetAssetMetaData's own LevelDB fallback (assets.cpp) -- eviction from
+    // the in-memory map must never mean the data is gone, only that it has to
+    // be refetched.
+    CAssetMetaData evictedAsset;
+    BOOST_CHECK(passetsCache->GetAssetMetaData("assetid0", evictedAsset));
+    BOOST_CHECK_EQUAL(evictedAsset.name, "ASSET0");
+}
+
+BOOST_FIXTURE_TEST_CASE(asset_cache_eviction_never_drops_unflushed_assets, RegTestingSetup)
+{
+    // F-224 correctness gate -- the archive doc's own "correctness trap"
+    // (docs/archive/asset-cache-drag.md) named this for item 2, but it binds
+    // item 1's eviction just as hard: an asset confirmed on-chain but not yet
+    // durably written to passetsdb (DumpCacheToDatabase runs on
+    // FlushStateToDisk's own periodic/critical schedule -- up to
+    // DATABASE_FLUSH_INTERVAL = 24h, validation.h:127 -- not on every block,
+    // confirmed by reading FlushStateToDisk's fDoFullFlush conditions) must
+    // never be evicted: doing so would make it invisible to every reader
+    // (GetAssetMetaData's own DB fallback would miss it too) until the next
+    // flush -- a real duplicate-name/duplicate-mint hole, not a slowdown. Use
+    // a small explicit cap so "dirty count exceeds the cap" is reachable
+    // without thousands of insertions.
+    const size_t smallCap = 5;
+
+    // Durable pool: insert, flush, and dump to DB so these become eviction-
+    // eligible.
+    for (size_t i = 0; i < smallCap; i++) {
+        // Default-constructed (empty), not copy-constructed from
+        // passetsCache -- matches ConnectTip/DisconnectTip's own real
+        // per-block pattern (`CAssetsCache assetCache;`, validation.cpp). A
+        // copy-constructed local would re-touch EVERY entry it started with
+        // on every Flush() call (Flush() iterates the whole local mapAsset,
+        // not just the delta), swamping any real recency signal.
+        CAssetsCache local;
+        CNewAssetTx newAssetTx;
+        newAssetTx.name = "DURABLE" + std::to_string(i);
+        newAssetTx.isRoot = true;
+        std::string assetId = "durableid" + std::to_string(i);
+        BOOST_REQUIRE(local.InsertAsset(newAssetTx, assetId, 1));
+        BOOST_REQUIRE(local.Flush());
+    }
+    BOOST_REQUIRE(passetsCache->DumpCacheToDatabase());
+    BOOST_CHECK_EQUAL(passetsCache->mapAsset.size(), smallCap);
+
+    // Dirty batch: more than smallCap new assets, inserted+flushed but NEVER
+    // dumped to passetsdb -- exactly the "recently confirmed, not yet
+    // flushed" state the correctness trap describes.
+    const size_t dirtyCount = smallCap * 3;
+    std::vector<std::string> dirtyIds;
+    for (size_t i = 0; i < dirtyCount; i++) {
+        // Default-constructed (empty), not copy-constructed from
+        // passetsCache -- matches ConnectTip/DisconnectTip's own real
+        // per-block pattern (`CAssetsCache assetCache;`, validation.cpp). A
+        // copy-constructed local would re-touch EVERY entry it started with
+        // on every Flush() call (Flush() iterates the whole local mapAsset,
+        // not just the delta), swamping any real recency signal.
+        CAssetsCache local;
+        CNewAssetTx newAssetTx;
+        newAssetTx.name = "DIRTY" + std::to_string(i);
+        newAssetTx.isRoot = true;
+        std::string assetId = "dirtyid" + std::to_string(i);
+        BOOST_REQUIRE(local.InsertAsset(newAssetTx, assetId, 1));
+        BOOST_REQUIRE(local.Flush());
+        // Flush() always evicts at the production default (2500); exercise
+        // the mechanism at this test's smaller cap directly instead of
+        // waiting for 2500+ real insertions.
+        passetsCache->EvictOverflowAssets(smallCap);
+        passetsCache->EvictOverflowAssetIds(smallCap);
+        dirtyIds.push_back(assetId);
+    }
+
+    // Every dirty asset must still be directly resident -- there is nowhere
+    // else for it to live, since it was never durably written. Both maps:
+    // EvictOverflowAssetIds has its own, separate dirty check (via the
+    // corresponding mapAsset entry) from EvictOverflowAssets.
+    for (const auto &id : dirtyIds) {
+        BOOST_CHECK_MESSAGE(passetsCache->mapAsset.count(id) == 1,
+                             "dirty asset " << id << " was evicted with no durable copy");
+    }
+    for (size_t i = 0; i < dirtyCount; i++) {
+        std::string name = "DIRTY" + std::to_string(i);
+        BOOST_CHECK_MESSAGE(passetsCache->mapAssetId.count(name) == 1,
+                             "dirty asset name " << name << " was evicted from mapAssetId with no durable copy");
+    }
+    // The cap is exceeded here -- correctly: temporary overflow is the honest
+    // outcome when nothing safe remains to evict, not silent data loss.
+    BOOST_CHECK_EQUAL(passetsCache->mapAsset.size(), dirtyCount);
+    BOOST_CHECK_EQUAL(passetsCache->mapAssetId.size(), dirtyCount);
+
+    // The durable pool, having nothing protecting it, was fully evicted to
+    // make room first.
+    for (size_t i = 0; i < smallCap; i++) {
+        BOOST_CHECK_EQUAL(passetsCache->mapAsset.count("durableid" + std::to_string(i)), 0u);
+        BOOST_CHECK_EQUAL(passetsCache->mapAssetId.count("DURABLE" + std::to_string(i)), 0u);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(asset_cache_eviction_is_recency_ordered, RegTestingSetup)
+{
+    // Distinguishes real LRU eviction from a weaker policy (e.g. evicting
+    // whatever iterates first in mapAsset -- for a std::map keyed by a string
+    // ID that's sorted-key order, unrelated to actual use) -- touch an
+    // early-inserted asset again right before the cache overflows and confirm
+    // eviction picks a genuinely untouched one instead.
+    const size_t smallCap = 5;
+    std::vector<std::string> ids;
+    for (size_t i = 0; i < smallCap; i++) {
+        // Default-constructed (empty), not copy-constructed from
+        // passetsCache -- matches ConnectTip/DisconnectTip's own real
+        // per-block pattern (`CAssetsCache assetCache;`, validation.cpp). A
+        // copy-constructed local would re-touch EVERY entry it started with
+        // on every Flush() call (Flush() iterates the whole local mapAsset,
+        // not just the delta), swamping any real recency signal.
+        CAssetsCache local;
+        CNewAssetTx newAssetTx;
+        newAssetTx.name = "A" + std::to_string(i);
+        newAssetTx.isRoot = true;
+        std::string assetId = "id" + std::to_string(i);
+        BOOST_REQUIRE(local.InsertAsset(newAssetTx, assetId, 1));
+        BOOST_REQUIRE(local.Flush());
+        ids.push_back(assetId);
+    }
+    BOOST_REQUIRE(passetsCache->DumpCacheToDatabase()); // make all smallCap evictable
+    BOOST_CHECK_EQUAL(passetsCache->mapAsset.size(), smallCap);
+
+    // Re-touch the OLDEST entry (ids[0]) via the real read path, making it
+    // most-recently-used just before overflow.
+    CAssetMetaData tmp;
+    BOOST_REQUIRE(passetsCache->GetAssetMetaData(ids.front(), tmp));
+
+    // One more asset overflows the cache by exactly one. A naive "evict the
+    // oldest inserted" policy would pick ids[0]; since it was just touched,
+    // ids[1] (the next-oldest, untouched since its own insertion) must be
+    // the one evicted instead.
+    CAssetsCache local; // see the comment on the loop's own local cache above
+    CNewAssetTx newAssetTx;
+    newAssetTx.name = "NEW";
+    newAssetTx.isRoot = true;
+    BOOST_REQUIRE(local.InsertAsset(newAssetTx, "newid", 1));
+    BOOST_REQUIRE(local.Flush());
+    passetsCache->EvictOverflowAssets(smallCap);
+
+    BOOST_CHECK_EQUAL(passetsCache->mapAsset.count(ids[0]), 1u); // touched -- survives
+    BOOST_CHECK_EQUAL(passetsCache->mapAsset.count(ids[1]), 0u); // untouched, oldest remaining -- evicted
+    BOOST_CHECK_EQUAL(passetsCache->mapAsset.count("newid"), 1u); // just inserted -- survives
+}
+
+BOOST_FIXTURE_TEST_CASE(atmp_rejects_dup_name_against_unflushed_asset, TestChainDIP3BeforeActivationSetup)
+{
+    // F-224 (build-plan 3.4b item 2): the archive doc's own named
+    // correctness trap (docs/archive/asset-cache-drag.md), reproduced
+    // directly. validation.cpp's ATMP guard now constructs an EMPTY
+    // CAssetsCache for asset-typed transactions instead of a full copy of
+    // passetsCache. A first NEW_ASSET tx is mined into a block (confirmed,
+    // resident only in passetsCache's own in-memory state -- this test's
+    // tiny coin cache never reaches CRITICAL, so DumpCacheToDatabase never
+    // runs and the asset is never durably written to passetsdb). A second,
+    // same-name NEW_ASSET tx is then submitted directly to ATMP, never
+    // mined. If the empty ATMP cache could only see passetsdb (missing the
+    // global-cache middle tier this row's own investigation added to
+    // CheckIfAssetExists/GetAssetId), the duplicate would sail through ATMP
+    // -- exactly the "let a duplicate-name asset through" regression the
+    // archive doc warned a naive fix could cause.
+    CKey sporkKey;
+    sporkKey.MakeNewKey(false);
+    sporkManager.SetSporkAddress(EncodeDestination(sporkKey.GetPubKey().GetID()));
+    sporkManager.SetPrivKey(EncodeSecret(sporkKey));
+    sporkManager.UpdateSpork(SPORK_22_SPECIAL_TX_FEE, 2560, *m_node.connman);
+
+    auto utxos = BuildSimpleUtxoMap(m_coinbase_txns);
+
+    auto tx1 = CreateNewAssetTx(*m_node.mempool, utxos, coinbaseKey, "ATMPDUPTEST", true, false, 0, 8, 1000);
+    {
+        auto block = std::make_shared<CBlock>(CreateBlock({tx1}, coinbaseKey));
+        EnsureChainman(m_node).ProcessNewBlock(Params(), block, true, nullptr);
+        BOOST_REQUIRE_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), block->GetHash().ToString());
+    }
+    // Confirmed but never durably written -- exactly the window the
+    // archive doc's trap describes.
+    BOOST_REQUIRE(passetsCache->CheckIfAssetExists(tx1.GetHash().ToString()));
+
+    // Same name, a fresh tx (different txid/assetId) -- never mined, only
+    // offered to ATMP directly.
+    auto tx2 = CreateNewAssetTx(*m_node.mempool, utxos, coinbaseKey, "ATMPDUPTEST", true, false, 0, 8, 1000);
+
+    CValidationState state;
+    {
+        LOCK(cs_main);
+        BOOST_CHECK(!AcceptToMemoryPool(*m_node.mempool, state, MakeTransactionRef(tx2),
+                                         nullptr /* pfMissingInputs */, true /* bypass_limits */,
+                                         0 /* nAbsurdFee */));
+    }
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-assets-dup-name");
+    BOOST_CHECK(!m_node.mempool->exists(tx2.GetHash()));
+}
+
+BOOST_FIXTURE_TEST_CASE(atmp_allows_reregistration_after_reorg_undoes_creation, TestChainDIP3BeforeActivationSetup)
+{
+    // F-224: the OTHER half of CheckIfAssetExists's new global middle tier
+    // -- the GLOBAL NewAssetsToRemove check, not just the GLOBAL mapAsset
+    // check. RemoveAsset (assets.cpp) marks an asset removed only in the
+    // dirty NewAssetsToRemove set; it never erases the entry from mapAsset
+    // itself (confirmed by reading RemoveAsset and DumpCacheToDatabase in
+    // full -- DumpCacheToDatabase erases the passetsdb row but likewise
+    // never touches mapAsset). So after a reorg properly undoes a NEW_ASSET
+    // creation (assets_new_asset_undo_visible_before_flush above), a STALE
+    // "exists" entry for that assetId still sits in passetsCache->mapAsset
+    // forever. Without also checking passetsCache->NewAssetsToRemove here,
+    // an empty ATMP cache's new global middle tier would find that stale
+    // entry and wrongly reject a legitimate re-registration of the same
+    // name as a duplicate -- a real behaviour regression relative to
+    // today's full-copy ATMP cache, which already carries
+    // passetsCache->NewAssetsToRemove via its copy constructor and so
+    // already masks this correctly.
+    CKey sporkKey;
+    sporkKey.MakeNewKey(false);
+    sporkManager.SetSporkAddress(EncodeDestination(sporkKey.GetPubKey().GetID()));
+    sporkManager.SetPrivKey(EncodeSecret(sporkKey));
+    sporkManager.UpdateSpork(SPORK_22_SPECIAL_TX_FEE, 2560, *m_node.connman);
+
+    auto utxos = BuildSimpleUtxoMap(m_coinbase_txns);
+
+    auto tx1 = CreateNewAssetTx(*m_node.mempool, utxos, coinbaseKey, "REORGREUSETEST", true, false, 0, 8, 1000);
+    CBlockIndex *pindexBlock;
+    {
+        auto block = std::make_shared<CBlock>(CreateBlock({tx1}, coinbaseKey));
+        EnsureChainman(m_node).ProcessNewBlock(Params(), block, true, nullptr);
+        pindexBlock = ::ChainActive().Tip();
+        BOOST_REQUIRE_EQUAL(pindexBlock->GetBlockHash().ToString(), block->GetHash().ToString());
+    }
+    BOOST_REQUIRE(passetsCache->CheckIfAssetExists(tx1.GetHash().ToString()));
+
+    // Undo the creation via a reorg -- properly, now that the fix makes the
+    // undo itself reachable (assets_new_asset_undo_visible_before_flush).
+    {
+        LOCK(cs_main);
+        CValidationState state;
+        BOOST_REQUIRE(InvalidateBlock(state, Params(), pindexBlock));
+    }
+    // InvalidateBlock's own disconnectpool re-admits tx1 itself back into
+    // the mempool (standard reorg handling) -- still claiming the name via
+    // CTxMemPool's OWN separate mapAssetsToHash index (txmempool.cpp), which
+    // is a real and correct reason for a second same-name tx to conflict,
+    // but a DIFFERENT mechanism than the one this test means to isolate
+    // (confirmed empirically: tx2 below was rejected "asset-dup" via
+    // existsAssetTxConflict, never reaching CheckNewAssetTx/
+    // CheckIfAssetExists at all -- and CTxMemPool::clear()/_clear() turned
+    // out not to clear mapAssetsToHash/mapAssetsIdToHash either, a separate,
+    // pre-existing mempool-index bug out of this row's scope, noted but not
+    // fixed here). removeRecursive is the normal per-tx removal path and
+    // does erase the index (txmempool.cpp), so use that instead of clear().
+    BOOST_REQUIRE(m_node.mempool->exists(tx1.GetHash()));
+    m_node.mempool->removeRecursive(tx1, MemPoolRemovalReason::MANUAL);
+    BOOST_REQUIRE(!m_node.mempool->exists(tx1.GetHash()));
+    BOOST_REQUIRE(!passetsCache->CheckIfAssetExists(tx1.GetHash().ToString()));
+    // The stale entry is still directly resident -- RemoveAsset/
+    // DumpCacheToDatabase never erase mapAsset itself, only the dirty
+    // marker and the DB row. This is what the masking check above must see
+    // past.
+    BOOST_REQUIRE_EQUAL(passetsCache->mapAsset.count(tx1.GetHash().ToString()), 1u);
+
+    // A fresh NEW_ASSET tx reusing the SAME name must be accepted by ATMP --
+    // the original was genuinely undone.
+    auto tx2 = CreateNewAssetTx(*m_node.mempool, utxos, coinbaseKey, "REORGREUSETEST", true, false, 0, 8, 1000);
+    CValidationState state2;
+    {
+        LOCK(cs_main);
+        BOOST_CHECK(AcceptToMemoryPool(*m_node.mempool, state2, MakeTransactionRef(tx2),
+                                        nullptr /* pfMissingInputs */, true /* bypass_limits */,
+                                        0 /* nAbsurdFee */));
+    }
+    BOOST_CHECK(m_node.mempool->exists(tx2.GetHash()));
+}
+
+BOOST_FIXTURE_TEST_CASE(block_reconnect_after_flush_does_not_see_stale_dup_name, TestChainDIP3BeforeActivationSetup)
+{
+    // F-224: found running feature_assets_rules.py's own test_reorg against
+    // this row's build, not from source reading alone. RemoveAsset (via
+    // CheckIfAssetExists's own fix above, this same row) only marks a
+    // removal in NewAssetsToRemove/NewAssetsToAdd; DumpCacheToDatabase is
+    // the ONE place that removal becomes durable, and its own
+    // ClearDirtyCache() (assets.cpp) wipes NewAssetsToRemove immediately
+    // after -- so once a full flush has happened, the masking check
+    // CheckIfAssetExists's global middle tier relies on no longer protects
+    // anything, and a stale mapAsset/mapAssetId entry (left behind because
+    // DumpCacheToDatabase used to erase only the passetsdb row, never the
+    // in-memory maps) becomes visible again as a false "still exists".
+    // Reproduced live: invalidateblock, then a `listassets` RPC call (whose
+    // own GetListAssets forces exactly this flush, assetsdb.cpp
+    // ForceFlushStateToDisk), then reconsiderblock -- ConnectBlock failed
+    // with bad-assets-dup-name, rejecting a legitimate reconnect of a block
+    // that had already been fully valid. This test drives the same
+    // sequence directly. Fixed by having DumpCacheToDatabase erase the
+    // in-memory mapAsset/mapAssetId entries (and their LRU records) in the
+    // same pass it erases the passetsdb row, so the cache and the DB go
+    // stale together instead of the cache lagging forever.
+    CKey sporkKey;
+    sporkKey.MakeNewKey(false);
+    sporkManager.SetSporkAddress(EncodeDestination(sporkKey.GetPubKey().GetID()));
+    sporkManager.SetPrivKey(EncodeSecret(sporkKey));
+    sporkManager.UpdateSpork(SPORK_22_SPECIAL_TX_FEE, 2560, *m_node.connman);
+
+    auto utxos = BuildSimpleUtxoMap(m_coinbase_txns);
+
+    auto tx1 = CreateNewAssetTx(*m_node.mempool, utxos, coinbaseKey, "RECONNECTTEST", true, false, 0, 8, 1000);
+    CBlockIndex *pindexBlock;
+    {
+        auto block = std::make_shared<CBlock>(CreateBlock({tx1}, coinbaseKey));
+        EnsureChainman(m_node).ProcessNewBlock(Params(), block, true, nullptr);
+        pindexBlock = ::ChainActive().Tip();
+        BOOST_REQUIRE_EQUAL(pindexBlock->GetBlockHash().ToString(), block->GetHash().ToString());
+    }
+    BOOST_REQUIRE(passetsCache->CheckIfAssetExists(tx1.GetHash().ToString()));
+
+    {
+        LOCK(cs_main);
+        CValidationState state;
+        BOOST_REQUIRE(InvalidateBlock(state, Params(), pindexBlock));
+    }
+    BOOST_REQUIRE(!passetsCache->CheckIfAssetExists(tx1.GetHash().ToString()));
+
+    // The trigger: a full flush, exactly like listassets's own
+    // ForceFlushStateToDisk (assetsdb.cpp:GetListAssets). Durably erases the
+    // DB row AND clears NewAssetsToRemove's masking protection in the same
+    // call.
+    BOOST_REQUIRE(passetsCache->DumpCacheToDatabase());
+
+    // Reconnect the SAME block -- ResetBlockFailureFlags + ActivateBestChain
+    // is exactly what the reconsiderblock RPC does (rpc/blockchain.cpp).
+    {
+        LOCK(cs_main);
+        ResetBlockFailureFlags(pindexBlock);
+    }
+    CValidationState state2;
+    BOOST_REQUIRE(ActivateBestChain(state2, Params()));
+    BOOST_CHECK_MESSAGE(state2.IsValid(), "ActivateBestChain: " << state2.GetRejectReason());
+    BOOST_CHECK_EQUAL(::ChainActive().Tip()->GetBlockHash().ToString(), pindexBlock->GetBlockHash().ToString());
+    BOOST_CHECK(passetsCache->CheckIfAssetExists(tx1.GetHash().ToString()));
+}
+
 BOOST_AUTO_TEST_CASE(validate_amount_decimal_point) {
     // Normal range (decimalPoint 0..8): the divisor is 10^(8 - decimalPoint) and an
     // amount is valid iff it is a whole multiple of that divisor.
