@@ -43,8 +43,16 @@ public:
     /// @param[in]   tx_hash  The hash of the transaction to be returned.
     /// @param[out]  block_hash  The hash of the block the transaction is found in.
     /// @param[out]  tx  The transaction itself.
+    /// @param[out]  bodies_not_held  4.3.3 (build-plan.md's 4.3 row,
+    ///              docs/findings.md's F-225): set true, when provided, if
+    ///              this call failed specifically because the containing
+    ///              block's bodies are not held by this node (see the
+    ///              existing HaveBodies check below) rather than any other
+    ///              reason (no index entry, I/O error). Left untouched
+    ///              (false) on every other path.
     /// @return  true if transaction is found, false otherwise
-    bool FindTx(const uint256 &tx_hash, uint256 &block_hash, CTransactionRef &tx) const;
+    bool FindTx(const uint256 &tx_hash, uint256 &block_hash, CTransactionRef &tx,
+               bool *bodies_not_held = nullptr) const;
 
     bool HasTx(const uint256 &tx_hash) const;
 };

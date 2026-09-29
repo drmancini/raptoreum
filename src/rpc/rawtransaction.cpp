@@ -428,13 +428,24 @@ static UniValue getrawtransaction(const JSONRPCRequest &request) {
     }
 
     uint256 hash_block;
-    const CTransactionRef tx = GetTransaction(blockindex, node.mempool, hash, Params().GetConsensus(), hash_block);
+    // 4.3.3 (build-plan.md's 4.3 row, docs/findings.md's F-225): bodies_not_held
+    // covers BOTH the blockindex-provided path below (GetTransaction's own
+    // HaveBodies check, F-163) AND the mempool/txindex fallback (F-171's
+    // HaveBodies check inside TxIndex::FindTx) -- previously only the first
+    // was even approximately distinguished (via the wrong BLOCK_HAVE_DATA bit,
+    // removed below), and the second wasn't distinguished at all: a txid-only
+    // lookup into a not-held block fell all the way through to "No such
+    // mempool or blockchain transaction", indistinguishable from a
+    // genuinely nonexistent transaction.
+    bool bodies_not_held = false;
+    const CTransactionRef tx = GetTransaction(blockindex, node.mempool, hash, Params().GetConsensus(), hash_block,
+                                              &bodies_not_held);
     if (!tx) {
+        if (bodies_not_held) {
+            throw JSONRPCError(RPC_MISC_ERROR, "Block not available (bodies not held)");
+        }
         std::string errmsg;
         if (blockindex) {
-            if (!(blockindex->nStatus & BLOCK_HAVE_DATA)) {
-                throw JSONRPCError(RPC_MISC_ERROR, "Block not available");
-            }
             errmsg = "No such transaction found in the provided block";
         } else if (!g_txindex) {
             errmsg = "No such mempool transaction. Use -txindex to enable blockchain transaction queries";

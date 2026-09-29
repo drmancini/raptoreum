@@ -1111,6 +1111,111 @@ BOOST_AUTO_TEST_CASE(body_record_at_rest_reports_not_held_for_a_withheld_block) 
     BOOST_CHECK(VerifyBodyRecordAtRest(pindex, chainparams.GetConsensus()) == BodyRecordVerification::NOT_HELD);
 }
 
+// 4.3.3 (build-plan.md's 4.3 row, docs/findings.md's F-225): GetTransaction's
+// new bodies_not_held out-param, direct block_index path. A withheld block's
+// index entry is real (the caller already resolved it, e.g. via a blockhash
+// parameter), so a null return here must say "not held", not "doesn't
+// exist" -- matches BodyRecordVerification::NOT_HELD's own shape just above.
+BOOST_AUTO_TEST_CASE(gettransaction_distinguishes_not_held_from_not_found_via_block_index) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    const CChainParams &chainparams = Params();
+
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock block = CreateBlock({spendTx}, coinbaseKey);
+    std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
+
+    PerfWithholdGuard guard(block.GetHash());
+    BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblock, /*fForceProcessing=*/true, nullptr));
+    CBlockIndex *pindex = LookupBlockIndex(block.GetHash());
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(!HaveBodies(pindex));
+
+    uint256 hashBlock;
+    bool bodies_not_held = false;
+    CTransactionRef tx = GetTransaction(pindex, nullptr, spendTx.GetHash(), chainparams.GetConsensus(), hashBlock,
+                                        &bodies_not_held);
+    BOOST_CHECK(!tx);
+    BOOST_CHECK(bodies_not_held);
+
+    // A genuinely absent txid in the SAME (held) block must not claim
+    // not-held -- confirms this isn't just "always true when given a
+    // block_index".
+    CBlockIndex *pindexGenesisChild = ::ChainActive()[1];
+    BOOST_REQUIRE(pindexGenesisChild != nullptr);
+    BOOST_REQUIRE(HaveBodies(pindexGenesisChild));
+    uint256 randomHash = GetRandHash();
+    bool bodies_not_held2 = true; // must be reset to false, not left as-is
+    CTransactionRef tx2 = GetTransaction(pindexGenesisChild, nullptr, randomHash, chainparams.GetConsensus(),
+                                         hashBlock, &bodies_not_held2);
+    BOOST_CHECK(!tx2);
+    BOOST_CHECK(!bodies_not_held2);
+}
+
+// 4.3.3 (F-225): the same distinction via the txid-only fallback path
+// (block_index == nullptr, resolved through g_txindex -- TxIndex::FindTx's
+// own HaveBodies check, F-171, previously discarded at the return-false
+// boundary with no way for a caller like getrawtransaction's txid-only form
+// to tell it apart from a genuinely nonexistent transaction).
+//
+// Unlike the block_index-path test above, this needs a block that was
+// GENUINELY indexed (TxIndex::WriteBlock only ever runs against a block that
+// really had bodies at index time -- PerfWithholdGuard from the start would
+// leave no tx-position record at all, hitting FindTx's OWN "no index entry"
+// path instead of the HaveBodies path this test targets) and THEN loses its
+// bodies for real, matching wallet_tests.cpp's own established
+// PruneOneBlockFile pattern -- the actual windowed-node shape TxIndex::FindTx's
+// own doc comment describes ("that says nothing about whether it still does
+// now").
+BOOST_AUTO_TEST_CASE(gettransaction_distinguishes_not_held_from_not_found_via_txindex) {
+    const CChainParams &chainparams = Params();
+
+    // Force the spend into its own, dedicated block file so pruning it
+    // doesn't also strip bodies from the rest of TestChain100Setup's chain.
+    CBlockIndex *tipBefore = ::ChainActive().Tip();
+    GetBlockFileInfo(tipBefore->GetBlockPos().nFile)->nSize = MAX_BLOCKFILE_SIZE;
+
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock block = CreateAndProcessBlock({spendTx}, coinbaseKey);
+    CBlockIndex *pindex = LookupBlockIndex(block.GetHash());
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(HaveBodies(pindex));
+    g_txindex->BlockUntilSyncedToCurrentChain();
+
+    // Confirm the index genuinely has this transaction while bodies are
+    // still held, before pruning -- otherwise a false "not held" below could
+    // just as easily be a false "not found".
+    {
+        uint256 hashBlockBefore;
+        bool bodies_not_held_before = true;
+        CTransactionRef txBefore = GetTransaction(/* block_index */ nullptr, m_node.mempool, spendTx.GetHash(),
+                                                   chainparams.GetConsensus(), hashBlockBefore,
+                                                   &bodies_not_held_before);
+        BOOST_REQUIRE(txBefore);
+        BOOST_REQUIRE(!bodies_not_held_before);
+    }
+
+    {
+        LOCK(cs_main);
+        EnsureChainman(m_node).PruneOneBlockFile(pindex->GetBlockPos().nFile);
+    }
+    UnlinkPrunedFiles({pindex->GetBlockPos().nFile});
+    BOOST_REQUIRE(!HaveBodies(pindex));
+
+    uint256 hashBlock;
+    bool bodies_not_held = false;
+    CTransactionRef tx = GetTransaction(/* block_index */ nullptr, m_node.mempool, spendTx.GetHash(),
+                                        chainparams.GetConsensus(), hashBlock, &bodies_not_held);
+    BOOST_CHECK(!tx);
+    BOOST_CHECK(bodies_not_held);
+
+    uint256 randomHash = GetRandHash();
+    bool bodies_not_held2 = true;
+    CTransactionRef tx2 = GetTransaction(/* block_index */ nullptr, m_node.mempool, randomHash,
+                                         chainparams.GetConsensus(), hashBlock, &bodies_not_held2);
+    BOOST_CHECK(!tx2);
+    BOOST_CHECK(!bodies_not_held2);
+}
+
 // A stored record whose bytes were swapped for a DIFFERENT, equally-valid
 // pair of transactions (same total serialized size, so the file's own
 // framing is untouched) -- the shape a real corruption caused by a bit-flip
