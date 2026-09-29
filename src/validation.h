@@ -603,6 +603,55 @@ bool ReadBlockFromDisk(CBlock &block, const CBlockIndex *pindex, const Consensus
 bool ReadCommitmentBlockFromDisk(CCommitmentBlock &cblock, const CBlockIndex *pindex,
                                  const Consensus::Params &consensusParams);
 
+/** 2.4b (build-plan.md's 2.4 row, docs/findings.md F-219): does the body
+ *  record actually sitting in the body store (bodystore.h's own bdy*.dat
+ *  series) still hash-match what `pindex`'s own commitment block commits
+ *  to -- "at rest" corruption detection, independent of any network fetch.
+ *  This is the redundant, INDEPENDENTLY-readable copy 2.2's own fetch/serve
+ *  path relies on (bodystore.h's own `ReadBodyRecord`/`ReadBodyAt`); nothing
+ *  before this checked that it actually still agrees with the commitment
+ *  block's own committed identifier list once written -- a bad disk sector,
+ *  an interrupted bulk copy during onboarding, or a body-store bug could
+ *  each leave `bdy*.dat` silently wrong while every existing check (VerifyDB's
+ *  level 0+ read, ReadBlockFromDisk) keeps validating `blk*.dat` alone (F-110:
+ *  every block is still ALSO stored whole there today, so those checks say
+ *  nothing about the separate body-store copy).
+ *
+ *  Only meaningful for a block this node currently claims to hold in full
+ *  (`BLOCK_HAVE_BODIES` -- NOT_HELD otherwise, including a genuinely
+ *  withheld block under the test-only harness: nothing is claimed complete
+ *  there, so there is nothing to verify). Reuses `ReadCommitmentBlockFromDisk`
+ *  (immediately above) for the commitment side and `ValidateBodyRangeChunkHashes`
+ *  (bodyrange.h) -- the SAME per-tx hash check 2.2.4's own fetch client
+ *  already applies to a chunk arriving over the wire -- applied here to the
+ *  WHOLE record read back from local disk instead, rather than inventing a
+ *  second comparison.
+ *
+ *  Read-only: takes `cs_main` only to snapshot `pindex`'s status bits and
+ *  body position, never across the I/O that follows (this project's own
+ *  established discipline, matching every other body-related function in
+ *  this file). Does not mutate `pindex` or the body-store index -- see
+ *  `CVerifyDB::VerifyDB`'s own wiring of this function for why repair is
+ *  deliberately an offline/startup-time decision (fail closed, matching
+ *  every other VerifyDB corruption finding), not something this function or
+ *  its RPC caller (rpc/net.cpp's `verifybodystore`) does live. */
+enum class BodyRecordVerification {
+    OK,                      //!< every stored body hashes to its committed identifier, count matches
+    NOT_HELD,                //!< BLOCK_HAVE_BODIES is false -- nothing claimed held, nothing to check
+    COMMITMENTS_UNREADABLE,  //!< ReadCommitmentBlockFromDisk failed
+    BODY_UNREADABLE,         //!< ReadBodyRecord failed -- the record itself could not be opened/read
+    COUNT_MISMATCH,          //!< the stored record's own body count != commitments.vCommitments.size()
+    HASH_MISMATCH,           //!< at least one stored body's hash != its committed identifier
+};
+
+BodyRecordVerification VerifyBodyRecordAtRest(const CBlockIndex *pindex, const Consensus::Params &consensusParams);
+
+/** Human-readable name for a BodyRecordVerification value, matching this
+ *  file's own established to-string convention for a small result enum
+ *  (e.g. FormatStateMessage) -- used by both VerifyDB's log line and the
+ *  verifybodystore RPC (rpc/net.cpp), so the two never drift apart. */
+std::string BodyRecordVerificationToString(BodyRecordVerification result);
+
 bool UndoReadFromDisk(CBlockUndo &blockundo, const CBlockIndex *pindex);
 
 /** Functions for validating blocks and updating the block tree */

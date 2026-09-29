@@ -65,6 +65,8 @@ static const CRPCConvertParam vRPCConvertParams[] =
                 {"getchaintips", 0, "count"},
                 {"getchaintips", 1, "branchlen"},
                 {"getblockhash", 0, "height"},
+                {"verifybodystore", 0, "start_height"},
+                {"verifybodystore", 1, "end_height"},
                 {"getsuperblockbudget", 0, "index"},
                 {"waitforblockheight", 0, "height"},
                 {"waitforblockheight", 1, "timeout"},
