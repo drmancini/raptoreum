@@ -3724,6 +3724,20 @@ UniValue rescanblockchain(const JSONRPCRequest &request) {
             throw JSONRPCError(RPC_MISC_ERROR, "Rescan failed. Potentially corrupted data files.");
         case CWallet::ScanResult::USER_ABORT:
             throw JSONRPCError(RPC_MISC_ERROR, "Rescan aborted.");
+        case CWallet::ScanResult::RANGE_NOT_HELD:
+            // 4.3.2 (build-plan.md's 4.3 row, F-225): distinct from FAILURE's
+            // "potentially corrupted" -- this node structurally does not hold
+            // bodies for part of the requested range (a windowed node's own
+            // retention boundary, not a corruption/read error). The
+            // early-exit findPruned() check above already catches most
+            // requests before this point; this covers the residual case
+            // where the range was valid at that check but the tip (and so
+            // the effective stop_height, when none was given) moved before
+            // ScanForWalletTransactions itself re-checked it.
+            throw JSONRPCError(RPC_MISC_ERROR,
+                               "Rescan failed: block data not held here for part of the requested range "
+                               "(outside this node's retained range). Use getblockchaininfo to see how "
+                               "much history this node holds.");
             // compiler might warn about missing cases due to no default.
     }
     UniValue response(UniValue::VOBJ);
