@@ -36,7 +36,7 @@ struct CBlockAssetUndo {
     CAmount amount;
     CKeyID ownerAddress;
     CKeyID collateralAddress;
-    // F-222/B9: the index of the tx that produced this record within its own
+    // F-223/B9: the index of the tx that produced this record within its own
     // block (block.vtx). A block can touch the same asset from more than one
     // tx (two mints, or two updates); undo must be able to tell those
     // records apart, not just match by assetId, or disconnecting one tx

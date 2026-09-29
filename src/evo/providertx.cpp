@@ -195,7 +195,7 @@ bool CheckNewAssetTx(const CTransaction &tx, const CBlockIndex *pindexPrev, CVal
         return state.DoS(100, false, REJECT_INVALID, "bad-assets-targetAddress");
     }
 
-    // F-222 (3.4, bug 3): was `assetTx.type < 0 && assetTx.type > 3` -- type is
+    // F-223 (3.4, bug 3): was `assetTx.type < 0 && assetTx.type > 3` -- type is
     // uint8_t, so `type < 0` is always false, and `&&` with an always-false
     // operand makes the whole bound dead code (no type value was ever
     // rejected here). F-216 found this first. 0-3 (manual/coinbase/address/
@@ -266,7 +266,7 @@ bool CheckUpdateAssetTx(const CTransaction &tx, const CBlockIndex *pindexPrev, C
         return state.DoS(100, false, REJECT_INVALID, "bad-assets-targetAddress");
     }
 
-    // F-222 (3.4, bug 3): was `assetTx.type < 0 && assetTx.type > 3` -- type is
+    // F-223 (3.4, bug 3): was `assetTx.type < 0 && assetTx.type > 3` -- type is
     // uint8_t, so `type < 0` is always false, and `&&` with an always-false
     // operand makes the whole bound dead code (no type value was ever
     // rejected here). F-216 found this first. 0-3 (manual/coinbase/address/

@@ -271,11 +271,12 @@ class CharacteriseAssetsTest(BitcoinTestFramework):
                     lambda: self.issue(referenceHash=b"a" * 129))
         self.check("issuance: reserved root name RTM", lambda: self.issue(name=b"RTM"))
         self.check("issuance: inputsHash tampered", lambda: self.issue(_bad_inputs_hash=True))
-        # type is uint8_t compared `type < 0 && type > 3` -- always false for an
-        # unsigned field with `&&`, so no type value is ever rejected here. A
-        # commitment-checkable-looking bound that is silently dead code.
-        self.accepted_ok.add("issuance: out-of-range type is NOT rejected (dead bound, source-confirmed)")
-        self.check("issuance: out-of-range type is NOT rejected (dead bound, source-confirmed)",
+        # F-223 (build-plan 3.4, bug 3): was `type < 0 && type > 3` -- always
+        # false for an unsigned type field with `&&`, so no type value was
+        # ever rejected here (F-216 found this dead bound first). Fixed to
+        # `type > 3` (evo/providertx.cpp) -- out-of-range now rejected
+        # bad-assets-distibution-type, no longer in accepted_ok.
+        self.check("issuance: out-of-range type is now rejected (F-223 fix)",
                     lambda: self.issue(type=99, collateralAddress=b"\x01" * 20))
 
         self.log.info("=" * 72)
@@ -690,6 +691,17 @@ class CharacteriseAssetsTest(BitcoinTestFramework):
         return connected, reason
 
     def characterise_double_issuance_in_block(self):
+        """F-223 (build-plan 3.4, bug 1/B8): was a pure characterisation --
+        both individually passed CheckSpecialTx against the SAME pre-block
+        CAssetsCache snapshot (ProcessSpecialTxsInBlock validated the whole
+        block in one pass before ConnectBlock's own separate per-tx mutation
+        pass ever ran), the block connected, and the second name registration
+        was silently dropped (CAssetsCache::InsertAsset's own duplicate guard
+        returns false, unchecked by its caller) rather than rejected
+        outright. Fixed via a scratch CAssetsCache in ProcessSpecialTxsInBlock
+        (evo/specialtx.cpp), mutated immediately after each asset tx's own
+        check succeeds, so the second tx in the block now sees the first
+        tx's own just-registered name. Now asserted, not merely observed."""
         node = self.nodes[0]
         name = b"DUPEINBLOCK"
         txs = []
@@ -699,34 +711,30 @@ class CharacteriseAssetsTest(BitcoinTestFramework):
             txs.append(FromHex(CTransaction(), hexTx))
         connected, reason = self.mine_block_with(txs)
         self.log.info("=" * 72)
-        self.log.info("SURPRISE CANDIDATE: two NEW_ASSET txs, same name, one block")
+        self.log.info("two NEW_ASSET txs, same name, one block")
         self.log.info("  block with both connected: %s (reject reason if not: %s)", connected, reason)
-        if connected:
-            names = node.listassets()
-            self.log.info("  registry after: %s", list(names.keys()))
-            self.log.info("  -> both individually passed CheckSpecialTx against the SAME")
-            self.log.info("     pre-block CAssetsCache snapshot; the second name registration")
-            self.log.info("     was silently dropped rather than rejected outright.")
-        else:
-            self.log.info("  -> block REJECTED for: %s -- the within-block collision IS caught,", reason)
-            self.log.info("     just not (necessarily) by CheckNewAssetTx's own bad-assets-dup-name")
-            self.log.info("     rung -- see F-216 for which mechanism actually fired")
         self.log.info("=" * 72)
+        assert not connected, (
+            "F-223 regression: a block with two same-name NEW_ASSET txs connected -- "
+            "the second registration should now be rejected, not silently dropped")
         self.observed["same-block dup-name (two NEW_ASSET txs, one name, one block)"] = (
-            "connected, second silently dropped" if connected else ("REJECTED: %s" % reason))
+            "REJECTED: %s (F-223 fix confirmed)" % reason)
         self.double_issuance_connected = connected
 
     def characterise_double_mint_exceeds_cap_in_block(self):
-        """mintasset's own RPC-level guard (existsAssetTxConflict) refuses a
+        """F-223 (build-plan 3.4, bug 1/B8): was a pure characterisation --
+        mintasset's own RPC-level guard (existsAssetTxConflict) refuses a
         second concurrent mint on the same assetId ('Asset mint or update tx
-        exist on mempool') -- confirmed empirically, the same mempool-ATMP
-        layer characterise_double_issuance_in_block's own docstring names.
-        Route around it exactly the same way: build (cap+1) independently
-        hand-signed MINT_ASSET transactions (never sent to the mempool
-        individually) and submit them together in one hand-built block, which
-        only ever asks ProcessSpecialTxsInBlock's single per-block pass
-        whether each is individually valid against the SAME pre-block
-        CAssetsCache/UTXO snapshot -- the mempool guard is never consulted."""
+        exist on mempool'), so this routes around it exactly like
+        characterise_double_issuance_in_block does: build (cap+1)
+        independently hand-signed MINT_ASSET transactions (never sent to the
+        mempool individually) and submit them together in one hand-built
+        block. Before the fix, ProcessSpecialTxsInBlock's single per-block
+        pass checked each individually against the SAME pre-block
+        CAssetsCache/UTXO snapshot and all connected, ending mintCount one
+        past the cap. Fixed via the same scratch-cache change as the
+        dup-name row above (evo/specialtx.cpp) -- the second mint in the
+        block now sees the first mint's own effect. Now asserted."""
         node = self.nodes[0]
         # Every fresh_tx() call so far in this test locked its own inputs
         # (needed to stop TWO calls in a row from picking the same coin, see
@@ -746,20 +754,16 @@ class CharacteriseAssetsTest(BitcoinTestFramework):
         connected, reason = self.mine_block_with(txs)
 
         self.log.info("=" * 72)
-        self.log.info("SURPRISE CANDIDATE: %d hand-signed MINT_ASSET txs (cap=%d), one block",
-                      len(txs), cap)
+        self.log.info("%d hand-signed MINT_ASSET txs (cap=%d), one block", len(txs), cap)
         self.log.info("  block with all %d connected: %s (reject reason if not: %s)",
                       len(txs), connected, reason)
-        if connected:
-            after = node.getassetdetailsbyname("CAPPEDASSET")
-            self.log.info("  MintCount after = %d (cap was %d)", after["MintCount"], cap)
-            self.observed["mint: cap can be exceeded within one block"] = (
-                "MintCount=%d after cap=%d (block accepted)" % (after["MintCount"], cap))
-        else:
-            self.log.info("  block rejected: %s -- the cap has a same-block enforcement path after all", reason)
-            self.observed["mint: cap can be exceeded within one block"] = (
-                "block rejected (%s): same-block over-cap minting IS caught" % reason)
         self.log.info("=" * 72)
+        assert not connected, (
+            "F-223 regression: a block with %d mints against a cap of %d connected -- "
+            "the cap should now be enforced within a single block, not just across blocks"
+            % (len(txs), cap))
+        self.observed["mint: cap can be exceeded within one block"] = (
+            "block rejected (%s): F-223 fix confirmed, same-block over-cap minting IS caught" % reason)
 
 
 if __name__ == "__main__":

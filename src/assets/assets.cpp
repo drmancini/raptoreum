@@ -191,7 +191,7 @@ bool CAssetsCache::RemoveAsset(std::string assetId) {
 
 bool CAssetsCache::UndoUpdateAsset(const CUpdateAssetTx upAsset, uint32_t txIndex,
                                    const std::vector <std::pair<std::string, CBlockAssetUndo>> &vUndoData) {
-    // F-222: this function's own outer `mapAsset.count(upAsset.assetId) > 0`
+    // F-223: this function's own outer `mapAsset.count(upAsset.assetId) > 0`
     // guard checked only THIS CAssetsCache instance's own local map.
     // DisconnectTip/ConnectTip (validation.cpp) each construct a fresh,
     // empty CAssetsCache per call, so that guard was false for every asset
@@ -214,7 +214,7 @@ bool CAssetsCache::UndoUpdateAsset(const CUpdateAssetTx upAsset, uint32_t txInde
 
     NewAssetsToRemove.insert(mapAsset[upAsset.assetId]);
 
-    // F-222/B9: keyed by (assetId, tx index), not assetId alone -- a block
+    // F-223/B9: keyed by (assetId, tx index), not assetId alone -- a block
     // with two updates on the same asset writes one undo record per tx, and
     // without the index every disconnect of that block picked whichever
     // record happened to iterate last in vUndoData, regardless of which tx
@@ -247,7 +247,7 @@ bool CAssetsCache::UndoUpdateAsset(const CUpdateAssetTx upAsset, uint32_t txInde
 
 bool CAssetsCache::UndoMintAsset(const CMintAssetTx assetTx, uint32_t txIndex,
                                  const std::vector <std::pair<std::string, CBlockAssetUndo>> &vUndoData) {
-    // F-222: see UndoUpdateAsset's own comment above -- the same broken,
+    // F-223: see UndoUpdateAsset's own comment above -- the same broken,
     // local-only existence guard existed here.
     CAssetMetaData assetData;
     if (!GetAssetMetaData(assetTx.assetId, assetData)) {
@@ -259,7 +259,7 @@ bool CAssetsCache::UndoMintAsset(const CMintAssetTx assetTx, uint32_t txIndex,
 
     NewAssetsToRemove.insert(mapAsset[assetTx.assetId]);
 
-    // F-222/B9: keyed by (assetId, tx index) -- see UndoUpdateAsset above.
+    // F-223/B9: keyed by (assetId, tx index) -- see UndoUpdateAsset above.
     bool found = false;
     for (const auto &item: vUndoData) {
         if (item.first == assetTx.assetId && item.second.txIndex == txIndex) {
