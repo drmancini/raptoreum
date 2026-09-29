@@ -82,6 +82,34 @@ bool CAssetsDB::EraseAddressAssetAmount(const std::string &address, const std::s
     return Erase(std::make_pair(ADDRESS_ASSET_AMOUNT, std::make_pair(address, assetId)));
 }
 
+bool CAssetsDB::EraseAssetAddressAmounts() {
+    CDBBatch batch(*this);
+
+    std::unique_ptr<CDBIterator> pcursor1(NewIterator());
+    pcursor1->Seek(std::make_pair(ASSET_ADDRESS_AMOUNT, std::make_pair(std::string(), std::string())));
+    while (pcursor1->Valid()) {
+        std::pair<char, std::pair<std::string, std::string>> key;
+        if (!pcursor1->GetKey(key) || key.first != ASSET_ADDRESS_AMOUNT) {
+            break;
+        }
+        batch.Erase(key);
+        pcursor1->Next();
+    }
+
+    std::unique_ptr<CDBIterator> pcursor2(NewIterator());
+    pcursor2->Seek(std::make_pair(ADDRESS_ASSET_AMOUNT, std::make_pair(std::string(), std::string())));
+    while (pcursor2->Valid()) {
+        std::pair<char, std::pair<std::string, std::string>> key;
+        if (!pcursor2->GetKey(key) || key.first != ADDRESS_ASSET_AMOUNT) {
+            break;
+        }
+        batch.Erase(key);
+        pcursor2->Next();
+    }
+
+    return WriteBatch(batch);
+}
+
 bool CAssetsDB::WriteBlockUndoAssetData(const uint256 &blockHash,
                                         const std::vector <std::pair<std::string, CBlockAssetUndo>> &assetUndoData) {
     return Write(std::make_pair(BLOCK_ASSET_UNDO_DATA, blockHash), assetUndoData);

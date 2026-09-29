@@ -34,6 +34,22 @@ bool IsAssetNameValid(std::string name, bool isRoot=false);
 
 bool GetAssetId(const CScript &script, std::string &assetId);
 
+// 4.3.1 (build-plan.md's 4.3 row, docs/findings.md's F-225): rebuild the
+// asset ADDRESS-BALANCE secondary index (mapAssetAddressAmount / passetsdb's
+// ASSET_ADDRESS_AMOUNT+ADDRESS_ASSET_AMOUNT rows -- the only part of
+// -assetindex that is gated, see assets.cpp's AddAssetBlance/
+// RemoveAddressBalance) by scanning `view`'s CURRENT unspent outputs, rather
+// than requiring -reindex's full block replay. Correct because that index is
+// a pure aggregate over unspent asset-carrying outputs -- exactly what
+// AddAssetBlance/RemoveAddressBalance themselves compute incrementally, per
+// output, as blocks connect/disconnect; a coins-set scan reaches the same
+// fixed point in one pass with no history needed. Asset EXISTENCE/metadata
+// (mapAsset/mapAssetId) is untouched -- it is written unconditionally
+// regardless of -assetindex and is not part of this rebuild. Replaces any
+// existing balance-index rows outright (via CAssetsDB::EraseAssetAddressAmounts)
+// so the result is authoritative regardless of what was there before.
+bool BuildAssetIndexFromCoins(CCoinsView &view);
+
 bool validateAmount(const CAmount nAmount, const uint16_t decimalPoint);
 
 bool validateAmount(const std::string &assetId, const CAmount nAmount);

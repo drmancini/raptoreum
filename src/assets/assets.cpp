@@ -8,10 +8,13 @@
 #include <evo/providertx.h>
 #include <evo/specialtx.h>
 #include <regex>
+#include <script/standard.h>
 #include <spork.h>
 #include <validation.h>
 #include <wallet/wallet.h>
 #include <univalue.h>
+
+#include <boost/thread.hpp>
 
 static const std::regex name_root_characters("^[A-Z0-9._]{3,}$");
 static const std::regex name_sub_characters("^[a-zA-Z0-9 ]{3,}$");
@@ -831,6 +834,79 @@ void AddAssets(const CTransaction &tx, int nHeight, uint32_t nTxIndex, CAssetsCa
             }
         }
     }
+}
+
+bool BuildAssetIndexFromCoins(CCoinsView &view) {
+    if (!passetsdb) {
+        return error("%s: no assets database open", __func__);
+    }
+
+    // Matching assetsdb.cpp's own established GetListAssets/GetListAssetsByAddress/
+    // GetListAddressByAssets precedent: a cursor only sees what is actually ON
+    // DISK, and CCoinsViewCache's in-memory overlay (::ChainstateActive().CoinsTip())
+    // can hold dirty, not-yet-flushed coin changes -- a scan without this would
+    // silently read the coin set as of the last flush, not as of the current tip.
+    ::ChainstateActive().ForceFlushStateToDisk();
+
+    std::unique_ptr<CCoinsViewCursor> pcursor(view.Cursor());
+    if (!pcursor) {
+        return error("%s: failed to obtain a coins cursor", __func__);
+    }
+
+    std::map<std::pair<std::string, std::string>, CAmount128> balances;
+    while (pcursor->Valid()) {
+        boost::this_thread::interruption_point();
+        COutPoint key;
+        Coin coin;
+        if (!pcursor->GetKey(key) || !pcursor->GetValue(coin)) {
+            return error("%s: unable to read coin from the coins database", __func__);
+        }
+        if (!coin.IsSpent() && coin.out.scriptPubKey.IsAssetScript()) {
+            CAssetTransfer transfer;
+            if (GetTransferAsset(coin.out.scriptPubKey, transfer)) {
+                CTxDestination dest;
+                if (ExtractDestination(coin.out.scriptPubKey, dest)) {
+                    std::string address = EncodeDestination(dest);
+                    balances[std::make_pair(transfer.assetId, address)] += transfer.nAmount;
+                }
+                // An asset output whose script doesn't decode to a single
+                // address has nothing to key the balance index by -- the
+                // same silent skip AddAssetBlance's own ExtractDestination
+                // call already applies at write time (above), not a new gap
+                // this pass introduces.
+            }
+        }
+        pcursor->Next();
+    }
+
+    if (!passetsdb->EraseAssetAddressAmounts()) {
+        return error("%s: failed to clear the existing balance index before rebuilding it", __func__);
+    }
+    // The in-memory cache must go stale-to-fresh the same way the on-disk
+    // index just did -- GetBestAssetAddressAmount (assets.cpp) checks
+    // passetsCache->mapAssetAddressAmount BEFORE ever falling back to
+    // passetsdb, so a stale entry left behind here (e.g. an address whose
+    // entire holding of an asset just moved elsewhere) would keep answering
+    // with the old balance even though the database was correctly cleared.
+    if (passetsCache) {
+        passetsCache->mapAssetAddressAmount.clear();
+    }
+
+    for (const auto &item : balances) {
+        const std::string &assetId = item.first.first;
+        const std::string &address = item.first.second;
+        if (!passetsdb->WriteAssetAddressAmount(assetId, address, item.second) ||
+            !passetsdb->WriteAddressAssetAmount(address, assetId, item.second)) {
+            return error("%s: failed to write rebuilt asset balance to database", __func__);
+        }
+        if (passetsCache) {
+            passetsCache->mapAssetAddressAmount[item.first] = item.second;
+        }
+    }
+
+    LogPrintf("%s: rebuilt asset address-balance index from the coin set: %u (asset, address) pairs\n",
+              __func__, balances.size());
+    return true;
 }
 
 bool GetAssetData(const CScript &script, CAssetOutputEntry &data) {
