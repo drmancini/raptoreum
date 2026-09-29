@@ -818,10 +818,7 @@ BOOST_FIXTURE_TEST_CASE(assets_mint_undo_keyed_by_tx_index, TestChainDIP3BeforeA
     {
         LOCK(cs_main);
         CValidationState state;
-        bool ok = InvalidateBlock(state, Params(), pindexBlock2);
-        BOOST_TEST_MESSAGE("InvalidateBlock ok=" << ok << " reason=" << state.GetRejectReason()
-                                                  << " debug=" << state.GetDebugMessage());
-        BOOST_REQUIRE(ok);
+        BOOST_REQUIRE(InvalidateBlock(state, Params(), pindexBlock2));
     }
 
     BOOST_REQUIRE(passetsCache->GetAssetMetaData(assetId, asset));
