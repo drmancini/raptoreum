@@ -277,4 +277,39 @@ BOOST_AUTO_TEST_CASE( operator_with_self )
         BOOST_CHECK(v == UintToArith256(uint256S("0")));
         }
 
+// 3.6 (F-222): SetHex's "skip 0x" branch (uint256.cpp) only fires on a
+// literal '0' followed by 'x'/'X'. A leading letter-'o' (as chainparams.cpp's
+// mainnet defaultAssumeValid had, pre-fix) fails that check, so the string is
+// parsed hex-digit-by-hex-digit starting at the 'o' itself. 'o' is not a hex
+// digit, so the digit-scan loop's very first HexDigit() call already fails,
+// leaving m_data at its post-memset all-zero state -- constructed here
+// directly against the real pre-fix literal to PROVE the zero result rather
+// than infer it from reading SetHex alone.
+BOOST_AUTO_TEST_CASE(setHex_letter_o_prefix_silently_parses_to_zero) {
+    // The exact pre-fix chainparams.cpp mainnet defaultAssumeValid literal.
+    uint256 parsed = uint256S("ox6fb0b649723f51b67484019409fef94d077f17c8d88645e08c000b2e4fd3e28a");
+    BOOST_CHECK(parsed == uint256());
+    BOOST_CHECK(parsed.IsNull());
+
+    // The same string with the typo corrected does NOT parse to zero, and
+    // matches block 421457's real hash (raptoreum-cli getblockhash 421457 on
+    // a live, fully-synced mainnet node) -- confirming the fix's target value
+    // was already correct and only the "0x" prefix was wrong.
+    uint256 fixed = uint256S("0x6fb0b649723f51b67484019409fef94d077f17c8d88645e08c000b2e4fd3e28a");
+    BOOST_CHECK(!fixed.IsNull());
+    BOOST_CHECK(fixed == uint256S("6fb0b649723f51b67484019409fef94d077f17c8d88645e08c000b2e4fd3e28a"));
+}
+
+// 3.6 (F-222): chainparams.cpp's checkpointData entry for height 394273 omits
+// the "0x" prefix the other three entries have, which looks like the same
+// class of typo as defaultAssumeValid's but is NOT one -- SetHex never
+// requires a "0x" prefix, only strips it when present. Confirmed directly
+// rather than assumed.
+BOOST_AUTO_TEST_CASE(checkpoint_394273_hash_without_0x_prefix_parses_correctly) {
+    uint256 withoutPrefix = uint256S("0dc274a28864a01a9539e60afdbc38fcdb0f000fbc52553cd31651c97557dc04");
+    uint256 withPrefix = uint256S("0x0dc274a28864a01a9539e60afdbc38fcdb0f000fbc52553cd31651c97557dc04");
+    BOOST_CHECK(!withoutPrefix.IsNull());
+    BOOST_CHECK(withoutPrefix == withPrefix);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
