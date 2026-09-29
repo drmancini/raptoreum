@@ -435,11 +435,26 @@ void StopScriptCheckWorkerThreads();
  * @param[in]  hash            The txid
  * @param[in]  consensusParams The params
  * @param[out] hashBlock       The hash of block_index, if the tx was found via block_index
+ * @param[out] bodies_not_held 4.3.3 (build-plan.md's 4.3 row, docs/findings.md's
+ *                             F-225): when set, distinguishes a nullptr return
+ *                             caused by this node genuinely not holding the
+ *                             containing block's bodies (a real block/tx the
+ *                             caller should report as "not held here", not as
+ *                             "does not exist") from every other nullptr
+ *                             cause. Left untouched (false) on every other
+ *                             path, including a genuine not-found -- callers
+ *                             that don't pass this keep today's exact
+ *                             behaviour. Threaded through both the direct
+ *                             block_index path (this function's own existing
+ *                             HaveBodies check) and the g_txindex fallback
+ *                             (TxIndex::FindTx's own, pre-existing HaveBodies
+ *                             check, F-171/F-179 -- previously discarded at
+ *                             the return-false boundary).
  * @returns                    The tx if found, otherwise nullptr
  */
 CTransactionRef
 GetTransaction(const CBlockIndex *const block_index, const CTxMemPool *const mempool, const uint256 &hash,
-               const Consensus::Params &consensusParams, uint256 &hashBlock);
+               const Consensus::Params &consensusParams, uint256 &hashBlock, bool *bodies_not_held = nullptr);
 
 /**
  * Find the best known block, and make it the tip of the block chain

@@ -1161,8 +1161,12 @@ bool GetAddressUnspent(uint160 addressHash, int type,
 
 CTransactionRef
 GetTransaction(const CBlockIndex *const block_index, const CTxMemPool *const mempool, const uint256 &hash,
-               const Consensus::Params &consensusParams, uint256 &hashBlock) {
+               const Consensus::Params &consensusParams, uint256 &hashBlock, bool *bodies_not_held) {
     LOCK(cs_main);
+
+    if (bodies_not_held) {
+        *bodies_not_held = false;
+    }
 
     if (block_index) {
         // F-163 (4.1.1, F-160): the design doc's own named A1 site --
@@ -1175,6 +1179,14 @@ GetTransaction(const CBlockIndex *const block_index, const CTxMemPool *const mem
         // without consulting HaveBodies") even though nothing crashes
         // today (ReadBlockFromDisk fails gracefully on a genuine miss).
         if (!HaveBodies(block_index)) {
+            // 4.3.3 (F-225): this is the ONE call site that already knows,
+            // for certain, that the block genuinely exists (the caller
+            // resolved block_index itself) but this node just doesn't hold
+            // its bodies -- exactly BodyRecordVerification::NOT_HELD's own
+            // "nothing claimed held, nothing wrong" shape, not a failure.
+            if (bodies_not_held) {
+                *bodies_not_held = true;
+            }
             return nullptr;
         }
         CBlock block;
@@ -1194,7 +1206,7 @@ GetTransaction(const CBlockIndex *const block_index, const CTxMemPool *const mem
     }
     if (g_txindex) {
         CTransactionRef tx;
-        if (g_txindex->FindTx(hash, hashBlock, tx)) return tx;
+        if (g_txindex->FindTx(hash, hashBlock, tx, bodies_not_held)) return tx;
     }
     return nullptr;
 }
