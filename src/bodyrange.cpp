@@ -115,3 +115,15 @@ bool IsBodyRangeChunkAligned(size_t nAccumulatedSoFar, uint32_t nResponseStartIn
 bool ShouldDisconnectForBodyRangeAttempts(unsigned int nAttempts, unsigned int nDisconnectThreshold) {
     return nAttempts >= nDisconnectThreshold;
 }
+
+double RefillServeBudgetTokens(double nCurrentTokens, double nElapsedSeconds,
+                                 double nTokensPerSecond, double nCap) {
+    if (nElapsedSeconds <= 0.0) {
+        return std::min(nCurrentTokens, nCap);
+    }
+    return std::min(nCurrentTokens + nElapsedSeconds * nTokensPerSecond, nCap);
+}
+
+bool BodyRangeServeBudgetAvailable(double nCurrentTokens) {
+    return nCurrentTokens >= 1.0;
+}

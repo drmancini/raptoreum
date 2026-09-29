@@ -237,6 +237,14 @@ BASE_SCRIPTS = [
     # full green C++ suite.
     'feature_body_refetch.py',
     'feature_body_refetch_backoff.py',
+    # F-159/F-218: the two tests above never set -fetchbodyrange/
+    # -servebodyrange (confirmed by grep), so this is the only test that
+    # exercises a real GETBODYRANGE/BODYRANGE round trip between two node
+    # processes -- see feature_bodyrange_e2e.py's own module doc for why
+    # F-158's own wiring lesson (a test that exists but isn't listed here
+    # is exactly how that regression shipped past a green C++ suite) makes
+    # this registration itself part of closing the gap, not optional.
+    'feature_bodyrange_e2e.py',
     # Don't append tests at the end to avoid merge conflicts
     # Put them in a random line within the section that fits their approximate run-time
 ]
