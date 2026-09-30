@@ -1484,6 +1484,79 @@ BOOST_AUTO_TEST_CASE(verifydb_fails_closed_on_a_corrupt_body_store_record) {
     BOOST_CHECK(!CVerifyDB().VerifyDB(chainparams, &chainstate.CoinsTip(), /*nCheckLevel=*/0, /*nCheckDepth=*/1));
 }
 
+// Mike, 2026-09-30 ("have we tested... a node tries to share bad body
+// data?"): before this fix, a corrupted-at-rest record stayed serveable
+// forever -- ValidateGetBodyRange had no way to know, and would keep
+// answering a real GETBODYRANGE request with the wrong bytes, getting this
+// node Misbehaving()-banned by every honest peer's own hash check.
+// ScrubBodyRecordAtRestOnce is the fix: it runs the SAME
+// VerifyBodyRecordAtRest check this file's own tests above already prove
+// catches a swapped-bodies HASH_MISMATCH, and on a real corruption,
+// quarantines the record (RecordBodyPositionByHash's own fServeable flag --
+// already an established, live-mutable flag in the false->true direction
+// for a withheld block's body arriving later, per its own doc comment; this
+// is the same flag, the other direction) so ValidateGetBodyRange starts
+// answering MISS instead of handing out bytes nothing has vouched for.
+//
+// A second, untouched block is mined alongside the corrupted one and
+// checked before AND after the scrub -- proving this is a targeted
+// quarantine of the one bad record, not a side effect that also stops
+// serving everything else.
+BOOST_AUTO_TEST_CASE(a_corrupt_body_record_is_quarantined_and_stops_being_served) {
+    const CChainParams &chainparams = Params();
+
+    CMutableTransaction spendTx1 = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CMutableTransaction spendTx2 = MakeSpendOfCoinbase(m_coinbase_txns[1], coinbaseKey);
+    CBlock corruptBlock = CreateAndProcessBlock({spendTx1, spendTx2}, coinbaseKey);
+    CBlockIndex *pindexCorrupt = LookupBlockIndex(corruptBlock.GetHash());
+    BOOST_REQUIRE(pindexCorrupt != nullptr);
+    BOOST_REQUIRE(HaveBodies(pindexCorrupt));
+
+    CMutableTransaction spendTx3 = MakeSpendOfCoinbase(m_coinbase_txns[2], coinbaseKey);
+    CBlock goodBlock = CreateAndProcessBlock({spendTx3}, coinbaseKey);
+    CBlockIndex *pindexGood = LookupBlockIndex(goodBlock.GetHash());
+    BOOST_REQUIRE(pindexGood != nullptr);
+    BOOST_REQUIRE(HaveBodies(pindexGood));
+
+    // Same swap-two-bodies technique as body_record_at_rest_detects_a_hash_
+    // mismatch_from_swapped_bodies just above: readable, self-consistent,
+    // wrong -- the shape a real bit-flip deep inside a transaction's own
+    // fields would also take.
+    FlatFilePos posCorrupt = pindexCorrupt->GetBodyPos();
+    std::vector<CTransactionRef> original;
+    BOOST_REQUIRE(ReadBodyRecord(posCorrupt, original));
+    BOOST_REQUIRE_GE(original.size(), 2U);
+    BOOST_REQUIRE(original[0]->GetHash() != original[1]->GetHash());
+    std::vector<CTransactionRef> swapped = original;
+    std::swap(swapped[0], swapped[1]);
+    BOOST_REQUIRE(WriteBodyRecord(posCorrupt, swapped));
+    BOOST_REQUIRE(VerifyBodyRecordAtRest(pindexCorrupt, chainparams.GetConsensus())
+                  == BodyRecordVerification::HASH_MISMATCH);
+
+    auto isServeable = [](const uint256 &hash) {
+        FlatFilePos posOut;
+        return LookupServeableBodyPositionByHash(hash, posOut);
+    };
+
+    // Before scrubbing: the gap itself, reproduced -- corruption alone never
+    // stopped this from being served.
+    BOOST_REQUIRE(isServeable(corruptBlock.GetHash()));
+    BOOST_REQUIRE(isServeable(goodBlock.GetHash()));
+
+    ScrubBodyRecordAtRestOnce(pindexCorrupt, chainparams.GetConsensus());
+
+    BOOST_CHECK(!isServeable(corruptBlock.GetHash()));
+    // The untouched sibling must still be serveable -- this is a targeted
+    // quarantine, not a side effect that also stops serving everything else.
+    BOOST_CHECK(isServeable(goodBlock.GetHash()));
+
+    // Scrubbing an ALREADY-OK record must not itself do anything -- a
+    // mutant that quarantined unconditionally would still catch the
+    // corrupted case above, but would wrongly break this one.
+    ScrubBodyRecordAtRestOnce(pindexGood, chainparams.GetConsensus());
+    BOOST_CHECK(isServeable(goodBlock.GetHash()));
+}
+
 
 // The core mechanism: an accepted block's non-coinbase transactions must
 // actually be readable back from the body store, at the exact position the

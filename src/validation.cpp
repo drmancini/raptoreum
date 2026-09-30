@@ -1378,6 +1378,59 @@ std::string BodyRecordVerificationToString(BodyRecordVerification result) {
     return "unknown";
 }
 
+void ScrubBodyRecordAtRestOnce(const CBlockIndex *pindex, const Consensus::Params &consensusParams) {
+    BodyRecordVerification result = VerifyBodyRecordAtRest(pindex, consensusParams);
+    if (result == BodyRecordVerification::OK || result == BodyRecordVerification::NOT_HELD) {
+        return;
+    }
+    uint256 hash = pindex->GetBlockHash();
+    LogPrintf("ScrubBodyRecordAtRestOnce: *** quarantining corrupt body record at height %d, hash=%s (%s) "
+             "-- no longer offered to GETBODYRANGE peers; run verifybodystore or -reindex to investigate\n",
+             pindex->nHeight, hash.ToString(), BodyRecordVerificationToString(result));
+    RecordBodyPositionByHash(hash, pindex->GetBodyPos(), /*fServeable=*/false);
+}
+
+void ScrubBodyStoreAtRest() {
+    // 20 blocks/call, every 10 minutes: a 720-block retention window (A1's
+    // own framing, transaction-decoupling.md) is fully swept roughly every 6
+    // hours -- slow by design, matching this project's own established
+    // "self-verification of the store at rest" as a background health
+    // check, not a hot-path gate (BuildBodyRangeResponse's own F-150 fix
+    // already made real, per-request I/O expensive to avoid; re-reading and
+    // hashing an entire record on every serve would undo that).
+    static const int SCRUB_BATCH_SIZE = 20;
+    static std::atomic<int> nScrubCursor{1};
+
+    std::vector<const CBlockIndex *> candidates;
+    {
+        LOCK(cs_main);
+        int nTipHeight = ::ChainActive().Height();
+        if (nTipHeight < 1) {
+            return;
+        }
+        int nStart = nScrubCursor.load();
+        if (nStart > nTipHeight) {
+            nStart = 1;
+        }
+        int nEnd = std::min(nStart + SCRUB_BATCH_SIZE - 1, nTipHeight);
+        for (int h = nStart; h <= nEnd; h++) {
+            const CBlockIndex *pindex = ::ChainActive()[h];
+            if (pindex) {
+                candidates.push_back(pindex);
+            }
+        }
+        nScrubCursor = nEnd + 1;
+    }
+
+    // Off cs_main for the real I/O, matching every other body-related
+    // function in this file (VerifyBodyRecordAtRest's own doc comment) --
+    // candidates above are stable CBlockIndex* from mapBlockIndex, which
+    // outlives this call.
+    for (const CBlockIndex *pindex : candidates) {
+        ScrubBodyRecordAtRestOnce(pindex, Params().GetConsensus());
+    }
+}
+
 double ConvertBitsToDouble(unsigned int nBits) {
     int nShift = (nBits >> 24) & 0xff;
 

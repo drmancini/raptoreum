@@ -830,8 +830,10 @@ void SetupServerArgs() {
     gArgs.AddArg("-servebodyrange",
                  "Test-only: serve GETBODYRANGE requests (2.2.3a's fetch-protocol handler, "
                  "F-149/F-150/F-151/F-218). Off by default. A per-connection request-count and "
-                 "byte budget (F-218) rate-limits an opted-in handler; still test-only pending "
-                 "wider review before any live/exposed deployment. (default: 0)",
+                 "byte budget (F-218) rate-limits an opted-in handler; also schedules a periodic "
+                 "self-verification sweep of the body store at rest (F-233), quarantining any "
+                 "record found corrupt so it is never served. Still test-only pending wider review "
+                 "before any live/exposed deployment. (default: 0)",
                  ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     gArgs.AddArg("-maxbodyrangeinflight=<n>",
                  strprintf("Test-only: the aggregate cap on in-flight GETBODYRANGE requests across "
@@ -2876,6 +2878,15 @@ bool AppInitMain(const util::Ref &context, NodeContext &node, interfaces::BlockA
                 std::max((int) gArgs.GetArg("-statsperiod", DEFAULT_STATSD_PERIOD), MIN_STATSD_PERIOD),
                 MAX_STATSD_PERIOD);
         node.scheduler->scheduleEvery(PeriodicStats, nStatsPeriod * 1000);
+    }
+
+    // Mike, 2026-09-30: self-verification of the store at rest (C3's own
+    // fix note, transaction-decoupling.md 14.4) -- gated on -servebodyrange
+    // specifically, since the risk this closes (silently corrupted local
+    // data getting this node banned by every honest peer it serves) only
+    // arises for a node serving bodies to anyone at all.
+    if (gArgs.GetBoolArg("-servebodyrange", false)) {
+        node.scheduler->scheduleEvery(&ScrubBodyStoreAtRest, 600000); // every 10 minutes
     }
 
     llmq::StartLLMQSystem();
