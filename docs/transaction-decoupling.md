@@ -2604,3 +2604,86 @@ Two measurements and three questions.
 
 Until those land, the admission-only variant is the version to build, because it needs no
 consensus change and is the baseline the others must beat.
+
+### 17.6 Trí's answers, 2026-09-30 — the third row is real, and narrower than first assumed
+
+The three questions above went to trí directly. **Answered: this is the consensus-trust row
+(§17.4's third row), not admission-only, and it is general-purpose — not scoped to the
+non-recomputable-result case §17.1 guessed, and not scoped to the multi-input/output cost
+problem either** (that problem is real and separately measured, F-93/F-94/F-97, but it is a
+different fix with a different, narrower justification — see the note at the end of this
+section).
+
+**What is attested.** One threshold signature per routine interval, covering whatever
+transactions the quorum finished validating in that window — not a fixed batch size, not
+triggered by reaching a count. **Explicitly no minimum**: "if network has no traffic it would
+just wait there forever" is trí's own stated reason for interval-triggered rather than
+size-triggered batching. Consequence not raised with him, worth recording: an interval with one
+or two items still pays the full per-signature verification cost (§17.4's 1.15 ms BLS against
+~118 µs ECDSA saved) for that interval — routine batching fixes the liveness failure mode, not
+the break-even one. Accepted as a rare cost, not solved.
+
+**Scope.** "Buspool for all transaction shape and size" — not contract-execution results only,
+not multi-input/output transactions only. "Due to network latency we prob always has a mix of
+both" — mempool and buspool sourcing coexist per block by design, not as a transitional state.
+
+**What confirmation means.** "The initial implementation should only consider a transaction
+valid after it is mined... for now buspool is not consider confirm[ed]." Membership in buspool,
+and the quorum's signature on it, carry no validity status on their own — only connecting the
+block does. This sounded at first like the admission-only row (nothing trusted until connect),
+but it is not: what happens **at** connect, for a buspool-sourced transaction, is the shortened
+check below, run by every node — not the full verification admission-only still does, cold,
+once. "Only valid after mined" means *final*, not *independently checked*.
+
+**The shortened check, and the one thing that changes the risk assessment.** Trí's own words:
+"smartnode quorum signed -> peer verify signature on that transaction[s] + some sanity check...
+not a full verification. quorum sign + transaction hash should tell you they [are] signing the
+right transaction." The sanity check, itemised on request: total input value against total
+output (the inflation check, his own earlier term for it), input and output correctness against
+double-spend, and **"input sign"** — confirmed, on a direct follow-up, to mean the connecting
+node independently re-verifies each input's own signature, separately from and in addition to
+the quorum's signature over the transaction hash. **This is the load-bearing fact that changes
+the earlier draft of this section's own risk assessment**: a colluding or compromised quorum
+cannot authorise spending an input it does not hold the key for, because it cannot forge that
+input's signature either — the same cryptography that protects an ordinary transaction today
+protects this one. What a bad quorum *can* still do is sign off on a transaction that should
+never have been admitted for some non-signature reason the sanity check does not cover — the
+"not a full verification" qualifier says the general script interpreter (multisig, timelocks,
+non-standard scripts) is not being run, only a signature check plus the three sanity items above
+— so the actual remaining boundary is **which script/transaction shapes the shortened check
+can correctly validate**, not "is authorisation checked at all." Not yet itemised with trí:
+whether non-standard scripts fall back to full validation, get excluded from buspool entirely,
+or are covered by "input sign" in some form not yet described.
+
+**The mining-power part of trí's own security claim does not hold, independent of the above.**
+"Would require they compromise like 80% quorum and 51% mining power" was checked against the
+mechanism as described and found not to follow: getting one quorum-signed transaction mined
+needs no hashrate at all, since any honestly-run miner accepts it under the same rule every
+other node does — there is no reorg to win and nothing for mining power to contest. Mining
+power's actual lever, rewriting recent history, is the pre-existing PoW security question this
+design does not change either way. The 80% figure is real and worth keeping — if it is a
+deliberately raised threshold above the ~60% a live LLMQ normally signs at (chainparams.cpp),
+that is a genuine, separate mitigation on the quorum-collusion side, not yet confirmed as
+*deliberately* raised versus assumed.
+
+**What this settles, for the build-plan's own §5.4 row ("attested transaction type", currently
+"unknown, scope not ours").** Enough is now known to scope it: a transaction admitted to buspool
+carries a quorum signature over its hash; every connecting node, not just the miner, replaces
+full script execution with (a) that quorum signature, (b) independent re-verification of each
+input's own signature, and (c) the three sanity checks above; nothing is final before the block
+connects. What is **not yet settled**, and should be closed before or during the build rather
+than assumed: the non-standard-script boundary named above; the §17.4 reorg/undo cost (connecting
+on a shortened check still needs the real body back for `DisconnectBlock`, which nobody has put
+to trí); and whether 80% is a deliberate, tunable quorum parameter or an unconfirmed guess.
+
+**A separate, narrower thing this conversation surfaced and did not resolve, worth its own
+row.** The admission-only shortcut (§17.4's safe row, needing no consensus change) was, before
+this exchange, assumed to be worth little per-transaction (break-even 10-20 tx/signature,
+§17.4). That assumption was tested against a **fixed 2-in/2-out corpus** (§17.2) that never
+varied input count, and this project separately already measured a real, severe, quadratic-ish
+cost specifically for multi-input/output transactions (F-91/F-93/F-94/F-97: up to ~370-385 ms at
+mempool-acceptance for one pathological shape, ~70 ms for the same shape at connect, cost
+climbing to ~320 µs/sigop at the real per-transaction input-count ceiling). The admission-only
+shortcut, re-measured on **that** shape rather than the flat corpus, may be worth building on
+its own, independent of trí's answers above and independent of the consensus-trust row's own
+risk profile — because it needs no new trust boundary at all. Not measured yet.
