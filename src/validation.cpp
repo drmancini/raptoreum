@@ -199,6 +199,27 @@ static CCheckQueue <CScriptCheck> scriptcheckqueue(128);
  *  measures what that ceiling becomes when the same work is spread, with no
  *  change to what is checked and no trust assumption. */
 bool g_perf_parallel_atmp{false};
+
+/** Test-only: 5.3's admission-only shortcut (-perfadmissiononlyatmp).
+ *
+ *  An already-islocked transaction has already been independently validated
+ *  and threshold-signed by a live Smartnode quorum before this node ever
+ *  saw it -- the SAME trust boundary TrySignChainTip already leans on
+ *  (quorums_chainlocks.cpp) to decide what to sign, not a new one introduced
+ *  here. Skipping the script check at acceptance changes nothing about
+ *  consensus: ConnectBlock (this file, fScriptChecks unconditional per
+ *  non-coinbase transaction) still independently re-verifies every
+ *  signature, cold, before the block can connect -- this flag only skips
+ *  AcceptToMemoryPoolWorker's own two CheckInputs-family calls, and does so
+ *  for BOTH of them specifically because the second
+ *  (CheckInputsFromMempoolAndCache) is what populates scriptExecutionCache;
+ *  skipping only the first would let a cache miss at connect still be
+ *  correct, but skipping only the second while still running the first
+ *  would defeat the point of the measurement. A lying quorum still cannot
+ *  fork -- it can only waste this node's own acceptance-time diligence on a
+ *  transaction ConnectBlock will catch for real regardless. */
+bool g_perf_admission_only_atmp{false};
+
 std::atomic_bool fImporting(false);
 std::atomic_bool fReindex(false);
 std::atomic_bool fProcessingHeaders(false);
@@ -986,7 +1007,25 @@ static bool AcceptToMemoryPoolWorker(const CChainParams &chainparams, CTxMemPool
         // Check against previous transactions
         // This is done last to help prevent CPU exhaustion denial-of-service attacks.
         PrecomputedTransactionData txdata(tx);
-        if (g_perf_parallel_atmp) {
+
+        // 5.3 (build-plan.md, admission-only shortcut): an already-islocked
+        // transaction has already been independently validated by a live
+        // Smartnode quorum -- see g_perf_admission_only_atmp's own doc
+        // comment above for why this is not a new trust boundary and why
+        // ConnectBlock is unaffected either way. Both CheckInputs-family
+        // calls below are skipped, not just the first: this SECOND one
+        // (CheckInputsFromMempoolAndCache) is what actually populates
+        // scriptExecutionCache, and a cache hit there would let a skipped
+        // signature ride for free into ConnectBlock's own lookup -- the
+        // measurement this flag exists for is specifically "does ConnectBlock
+        // pay cold for this transaction," and a warm cache would answer that
+        // question wrong.
+        bool fAdmissionOnlyShortcut =
+                g_perf_admission_only_atmp && llmq::quorumInstantSendManager->IsLocked(hash);
+
+        if (fAdmissionOnlyShortcut) {
+            // Neither CheckInputs-family call below runs for this transaction.
+        } else if (g_perf_parallel_atmp) {
             std::vector <CScriptCheck> vChecks;
             CCheckQueueControl <CScriptCheck> control(&scriptcheckqueue);
             if (!CheckInputs(tx, state, view, true, scriptVerifyFlags, true, false, txdata, &vChecks))
@@ -1013,12 +1052,14 @@ static bool AcceptToMemoryPoolWorker(const CChainParams &chainparams, CTxMemPool
         // There is a similar check in CreateNewBlock() to prevent creating
         // invalid blocks (using TestBlockValidity), however allowing such
         // transactions into the mempool can be exploited as a DoS attack.
-        unsigned int currentBlockScriptVerifyFlags = GetBlockScriptFlags(::ChainActive().Tip(),
-                                                                         chainparams.GetConsensus());
-        if (!CheckInputsFromMempoolAndCache(tx, state, view, pool, currentBlockScriptVerifyFlags, true, txdata)) {
-            return error(
-                    "%s: BUG! PLEASE REPORT THIS! CheckInputs failed against latest-block but not STANDARD flags %s, %s",
-                    __func__, hash.ToString(), FormatStateMessage(state));
+        if (!fAdmissionOnlyShortcut) {
+            unsigned int currentBlockScriptVerifyFlags = GetBlockScriptFlags(::ChainActive().Tip(),
+                                                                             chainparams.GetConsensus());
+            if (!CheckInputsFromMempoolAndCache(tx, state, view, pool, currentBlockScriptVerifyFlags, true, txdata)) {
+                return error(
+                        "%s: BUG! PLEASE REPORT THIS! CheckInputs failed against latest-block but not STANDARD flags %s, %s",
+                        __func__, hash.ToString(), FormatStateMessage(state));
+            }
         }
 
         // This transaction should only count for fee estimation if:

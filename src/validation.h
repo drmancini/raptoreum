@@ -350,6 +350,14 @@ void WarnIfMaxMempoolBelowDesignFloor(bool fMiningGateLive, int64_t nMaxMempoolB
  *  pool rather than inline on the calling thread (-perfparallelatmp). See the
  *  definition in validation.cpp. */
 extern bool g_perf_parallel_atmp;
+
+/** Test-only: 5.3's admission-only shortcut (build-plan.md, "the baseline any
+ *  consensus version must beat") -- skip AcceptToMemoryPool's own script
+ *  checks for a transaction that already carries a valid InstantSend lock
+ *  (-perfadmissiononlyatmp). Consensus untouched: ConnectBlock always
+ *  independently re-verifies every transaction regardless of this flag. See
+ *  the definition in validation.cpp. */
+extern bool g_perf_admission_only_atmp;
 extern bool fAddressIndex;
 extern bool fAssetIndex;
 extern bool fTimestampIndex;

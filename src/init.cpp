@@ -827,6 +827,12 @@ void SetupServerArgs() {
                  "Test-only: run mempool-acceptance script checks on the script-check thread pool "
                  "instead of inline on the message handler. (default: 0)",
                  ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    gArgs.AddArg("-perfadmissiononlyatmp",
+                 "Test-only: skip mempool-acceptance script checks for a transaction that already "
+                 "carries a valid InstantSend lock (5.3's admission-only shortcut). ConnectBlock "
+                 "always independently re-verifies regardless. Performance measurement only. "
+                 "(default: 0)",
+                 ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     gArgs.AddArg("-servebodyrange",
                  "Test-only: serve GETBODYRANGE requests (2.2.3a's fetch-protocol handler, "
                  "F-149/F-150/F-151/F-218). Off by default. A per-connection request-count and "
@@ -1723,12 +1729,17 @@ bool AppInitParameterInteraction() {
     g_perf_inv_nosort = gArgs.GetBoolArg("-perfinvnosort", false);
     g_perf_skip_sigs = gArgs.GetBoolArg("-perfskipsigs", false);
     g_perf_parallel_atmp = gArgs.GetBoolArg("-perfparallelatmp", false);
+    g_perf_admission_only_atmp = gArgs.GetBoolArg("-perfadmissiononlyatmp", false);
     if (g_perf_skip_sigs) {
         LogPrintf("PERF: signature verification DISABLED (-perfskipsigs). "
                   "This node accepts invalid transactions.\n");
     }
     if (g_perf_parallel_atmp) {
         LogPrintf("PERF: mempool script checks run on the script-check pool (-perfparallelatmp)\n");
+    }
+    if (g_perf_admission_only_atmp) {
+        LogPrintf("PERF: mempool script checks skipped for already-islocked transactions "
+                  "(-perfadmissiononlyatmp)\n");
     }
 
     // Checkmempool and checkblockindex default to true in regtest mode
