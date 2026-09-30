@@ -280,6 +280,15 @@ BASE_SCRIPTS = [
     # each spend their own full, untouched budget. F-158's own registration
     # lesson applies here too.
     'feature_bodyrange_sybil_serve_budget.py',
+    # F-237 (Mike, 2026-09-30): the last scenario-backlog item -- an asset
+    # mint split across two SEPARATE commitment-only blocks, each recovered
+    # independently via its own GETBODYRANGE round trip. Needed
+    # -perfwithholdcount=2, not 1 or unset, to avoid feature_bodyrange_e2e.py's
+    # own already-documented F-218 gotcha (the shared counter must reach 0
+    # before either height's post-fetch read-back, confirmed live -- left
+    # unset it's a fatal AbortNode, not a graceful decline). F-158's own
+    # registration lesson applies here too.
+    'feature_decoupled_asset_mint_split.py',
     # Don't append tests at the end to avoid merge conflicts
     # Put them in a random line within the section that fits their approximate run-time
 ]
