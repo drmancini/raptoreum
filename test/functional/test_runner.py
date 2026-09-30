@@ -267,6 +267,13 @@ BASE_SCRIPTS = [
     # here too -- this is a functional test proving a fault-tolerance
     # property real production code paths depend on, not a unit test.
     'feature_bodyrange_multisource_failover.py',
+    # F-235 (Mike, 2026-09-30): "what I'm interested in is if a node bad
+    # actor starts to push altered bodies to other nodes ... have we tried
+    # something like this?" -- a genuine second daemon, own on-disk body
+    # record deliberately altered, serving it to a real honest peer over a
+    # real GETBODYRANGE/BODYRANGE round trip. F-158's own registration
+    # lesson applies here too.
+    'feature_malicious_body_server.py',
     # Don't append tests at the end to avoid merge conflicts
     # Put them in a random line within the section that fits their approximate run-time
 ]
