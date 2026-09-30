@@ -118,6 +118,28 @@ public:
 bool CheckAttestedTx(const CTransaction &tx, const CBlockIndex *pindexPrev, CValidationState &state,
                      const CCoinsViewCache &view, bool check_sigs);
 
+/** Fable review (2026-10-01), CONFIRMED CRITICAL, fixed: whether a
+ *  transaction IS an attested transaction must be judged identically
+ *  everywhere. CheckSpecialTx (evo/specialtx.cpp) only ever dispatches to
+ *  CheckAttestedTx when tx.nVersion == 3 exactly -- its own `nVersion != 3`
+ *  guard returns true, unchecked, for any other version, treating the
+ *  transaction as an ordinary payment regardless of nType. This function's
+ *  own type check, and validation.cpp's 5.4.3 whitelist/CheckInputs-skip
+ *  conditions, originally checked ONLY `nType == TRANSACTION_ATTESTED`, with
+ *  no nVersion term -- so a transaction with nVersion=4 (or anything other
+ *  than 3) and nType=11 passed the whitelist and took the CheckInputs skip
+ *  in both ATMP and ConnectBlock while CheckSpecialTx silently never ran
+ *  CheckAttestedTx at all, meaning NEITHER check ran. Confirmed live via the
+ *  review's own executable PoC: an unsigned spend of an arbitrary coin
+ *  connects into the chain once EUpdate::ATTESTED_TX is active. Every one of
+ *  those three sites (and this function's own type check, for the same
+ *  reason, even though CheckSpecialTx's own guard means it is not reachable
+ *  with the wrong version via that one path today) now goes through this
+ *  single, shared predicate instead of re-deriving it. */
+inline bool IsAttestedTx(const CTransaction &tx) {
+    return tx.nVersion == 3 && tx.nType == TRANSACTION_ATTESTED;
+}
+
 /** Exposed (not file-local `static`) purely so attestedtx_tests.cpp can hold
  *  this HIGH-severity fix (Fable review, 2026-09-30) to a genuine mutation
  *  test: no live quorum is obtainable in this test environment (F-216's own

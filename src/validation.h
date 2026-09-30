@@ -761,6 +761,14 @@ bool CheckCommitmentBlock(const CCommitmentBlock &block, CValidationState &state
 bool ContextualCheckCommitmentBlock(const CCommitmentBlock &block, CValidationState &state,
                                     const Consensus::Params &consensusParams, const CBlockIndex *pindexPrev);
 
+/** Context-dependent per-transaction checks (nType whitelist, including the
+ *  5.4.3/F-242 EUpdate::ATTESTED_TX gate; oversize). Not previously declared
+ *  here despite having external linkage -- exposed so attestedtx_activation_tests.cpp
+ *  can exercise the new gate directly, matching ContextualCheckCommitmentBlock's
+ *  own already-public shape immediately below. */
+bool ContextualCheckTransaction(const CTransaction &tx, CValidationState &state,
+                                const Consensus::Params &consensusParams, const CBlockIndex *pindexPrev);
+
 /** Check a block is completely valid from start to finish (only works on top of our current best block) */
 bool TestBlockValidity(CValidationState &state, const CChainParams &chainparams, const CBlock &block,
                        CBlockIndex *pindexPrev, bool fCheckPOW = true, bool fCheckMerkleRoot = true)

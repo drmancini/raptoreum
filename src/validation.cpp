@@ -51,6 +51,7 @@
 #include <smartnode/smartnode-payments.h>
 //#include <smartnode/smartnode-collaterals.h>
 
+#include <evo/attestedtx.h>
 #include <evo/specialtx.h>
 #include <evo/deterministicmns.h>
 #include <assets/assets.h>
@@ -499,6 +500,32 @@ ContextualCheckTransaction(const CTransaction &tx, CValidationState &state, cons
     if (fDIP0003Active_context) {
         // check version 3 transaction types
         if (tx.nVersion >= 3) {
+            // 5.4.3 (F-242): TRANSACTION_ATTESTED is allowed through this
+            // whitelist ONLY once EUpdate::ATTESTED_TX is active for this
+            // exact pindexPrev -- confirmed live by direct query, not
+            // inferred from any cache, so this is correct both for a live
+            // block and for a historical block revisited by `-reindex`
+            // (which still re-runs ContextualCheckBlock's own per-tx loop,
+            // calling this function, unlike `-reindex-chainstate`).
+            // `-reindex-chainstate` never reaches this function at all for
+            // an already-accepted block (ContextualCheckBlock is not invoked
+            // from ConnectBlock, see that function's own header comment) --
+            // meaning any on-disk block containing this nType was already
+            // correctly gated once, at first acceptance, and does not need
+            // (or get) a second, potentially-stale re-check here.
+            //
+            // Fable review (2026-10-01), CONFIRMED CRITICAL, fixed: this
+            // originally read `tx.nType == TRANSACTION_ATTESTED`, with no
+            // nVersion term -- letting a nVersion=4 (or anything other than
+            // 3), nType=11 transaction through this whitelist, even though
+            // CheckSpecialTx (evo/specialtx.cpp) only ever dispatches to
+            // CheckAttestedTx when nVersion == 3 exactly, silently treating
+            // any other version as an ordinary, unchecked transaction. See
+            // evo/attestedtx.h's own IsAttestedTx doc comment for the full
+            // finding, confirmed live via an executable PoC (an unsigned
+            // spend of an arbitrary coin, connected into the chain).
+            bool fAttestedTxAllowed = IsAttestedTx(tx) &&
+                                       Updates().IsActive(EUpdate::ATTESTED_TX, pindexPrev);
             if (tx.nType != TRANSACTION_NORMAL &&
                 tx.nType != TRANSACTION_PROVIDER_REGISTER &&
                 tx.nType != TRANSACTION_PROVIDER_UPDATE_SERVICE &&
@@ -509,7 +536,8 @@ ContextualCheckTransaction(const CTransaction &tx, CValidationState &state, cons
                 tx.nType != TRANSACTION_FUTURE &&
                 tx.nType != TRANSACTION_NEW_ASSET &&
                 tx.nType != TRANSACTION_UPDATE_ASSET &&
-                tx.nType != TRANSACTION_MINT_ASSET) {
+                tx.nType != TRANSACTION_MINT_ASSET &&
+                !fAttestedTxAllowed) {
                 return state.DoS(100, false, REJECT_INVALID, "bad-txns-type");
             }
             if (tx.IsCoinBase() && tx.nType != TRANSACTION_COINBASE)
@@ -1023,7 +1051,28 @@ static bool AcceptToMemoryPoolWorker(const CChainParams &chainparams, CTxMemPool
         bool fAdmissionOnlyShortcut =
                 g_perf_admission_only_atmp && llmq::quorumInstantSendManager->IsLocked(hash);
 
-        if (fAdmissionOnlyShortcut) {
+        // 5.4.3 (build-plan.md, F-242): unlike the test-only shortcut above,
+        // this one is real and production (no perf/test flag gating it) --
+        // reaching this point with TRANSACTION_ATTESTED is proof
+        // CheckSpecialTx->CheckAttestedTx (this function's own earlier call,
+        // checked-and-returned-on-failure above) already ran with
+        // check_sigs=true and passed, which itself required
+        // EUpdate::ATTESTED_TX to be active at ::ChainActive().Tip()
+        // (ContextualCheckTransaction's own whitelist, this function's own
+        // even-earlier call) -- so no separate activation query is needed
+        // here. Both CheckInputs-family calls are skipped, matching the
+        // admission-only shortcut's identical reasoning above and 5.3/
+        // F-238's exact shape.
+        //
+        // Fable review (2026-10-01), CONFIRMED CRITICAL, fixed: IsAttestedTx
+        // (evo/attestedtx.h) checks nVersion==3 as well as nType -- the
+        // reasoning above ("CheckSpecialTx already ran") is only true when
+        // both match, since CheckSpecialTx's own nVersion!=3 guard silently
+        // no-ops for any other version regardless of nType.
+        bool fAttestedTxShortcut = IsAttestedTx(tx);
+        bool fSkipCheckInputs = fAdmissionOnlyShortcut || fAttestedTxShortcut;
+
+        if (fSkipCheckInputs) {
             // Neither CheckInputs-family call below runs for this transaction.
         } else if (g_perf_parallel_atmp) {
             std::vector <CScriptCheck> vChecks;
@@ -1052,7 +1101,7 @@ static bool AcceptToMemoryPoolWorker(const CChainParams &chainparams, CTxMemPool
         // There is a similar check in CreateNewBlock() to prevent creating
         // invalid blocks (using TestBlockValidity), however allowing such
         // transactions into the mempool can be exploited as a DoS attack.
-        if (!fAdmissionOnlyShortcut) {
+        if (!fSkipCheckInputs) {
             unsigned int currentBlockScriptVerifyFlags = GetBlockScriptFlags(::ChainActive().Tip(),
                                                                              chainparams.GetConsensus());
             if (!CheckInputsFromMempoolAndCache(tx, state, view, pool, currentBlockScriptVerifyFlags, true, txdata)) {
@@ -2819,13 +2868,45 @@ bool CChainState::ConnectBlock(const CBlock &block, CValidationState &state, CBl
         txdata.emplace_back(tx);
         if (!tx.IsCoinBase()) {
 
-            std::vector <CScriptCheck> vChecks;
-            bool fCacheResults = fJustCheck; /* Don't cache results if we're actually connecting blocks (still consult the cache, though) */
-            if (!CheckInputs(tx, state, view, fScriptChecks, flags, fCacheResults, fCacheResults, txdata[i],
-                             g_parallel_script_checks ? &vChecks : nullptr))
-                return error("ConnectBlock(): CheckInputs on %s failed with %s",
-                             tx.GetHash().ToString(), FormatStateMessage(state));
-            control.Add(vChecks);
+            // 5.4.3 (build-plan.md, F-242): this transaction's own quorum
+            // attestation was already checked above, by this function's own
+            // unconditional ProcessSpecialTxsInBlock->CheckSpecialTx->
+            // CheckAttestedTx call (with check_sigs=fScriptChecks, the same
+            // value CheckInputs below would itself have used) -- and it
+            // already returned true, or ConnectBlock would already have
+            // returned at that earlier call site, never reaching this loop
+            // at all. The type's own EUpdate::ATTESTED_TX existence gate
+            // (ContextualCheckTransaction's whitelist) is a SEPARATE
+            // invariant, not something re-checked in this same call: for a
+            // live or plain-`-reindex`-replayed block it already ran moments
+            // earlier via ContextualCheckBlock, at first acceptance; for
+            // `-reindex-chainstate` it is not re-run at all (ContextualCheckBlock
+            // is not invoked from ConnectBlock), but this block is already on
+            // disk, meaning that gate already passed once, at whatever
+            // earlier acceptance put it there -- never inside THIS replay
+            // pass, but always before it. Either way, no separate activation
+            // query is needed at this skip site -- mirrors the ATMP
+            // shortcut's identical reasoning above (fAttestedTxShortcut) and
+            // 5.3/F-238's exact skip shape, now for real rather than
+            // test-only.
+            //
+            // Fable review (2026-10-01), CONFIRMED CRITICAL, fixed: the
+            // "CheckSpecialTx already ran CheckAttestedTx" claim two
+            // paragraphs up only holds when IsAttestedTx (evo/attestedtx.h,
+            // nVersion==3 AND nType==TRANSACTION_ATTESTED) is true --
+            // CheckSpecialTx's own nVersion!=3 guard silently returns true
+            // without ever calling CheckAttestedTx for any other version,
+            // regardless of nType.
+            bool fAttestedTxShortcut = IsAttestedTx(tx);
+            if (!fAttestedTxShortcut) {
+                std::vector <CScriptCheck> vChecks;
+                bool fCacheResults = fJustCheck; /* Don't cache results if we're actually connecting blocks (still consult the cache, though) */
+                if (!CheckInputs(tx, state, view, fScriptChecks, flags, fCacheResults, fCacheResults, txdata[i],
+                                 g_parallel_script_checks ? &vChecks : nullptr))
+                    return error("ConnectBlock(): CheckInputs on %s failed with %s",
+                                 tx.GetHash().ToString(), FormatStateMessage(state));
+                control.Add(vChecks);
+            }
         }
 
         if (fAddressIndex || fFutureIndex) {

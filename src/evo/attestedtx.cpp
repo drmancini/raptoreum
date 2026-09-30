@@ -93,7 +93,7 @@ static bool IsPlausibleAttestationSignHeight(int32_t nSignHeight, const CBlockIn
 
 bool CheckAttestedTx(const CTransaction &tx, const CBlockIndex *pindexPrev, CValidationState &state,
                      const CCoinsViewCache &view, bool check_sigs) {
-    if (tx.nType != TRANSACTION_ATTESTED) {
+    if (!IsAttestedTx(tx)) {
         return state.DoS(100, false, REJECT_INVALID, "bad-attested-tx-type");
     }
 

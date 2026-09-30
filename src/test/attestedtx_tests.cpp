@@ -173,6 +173,26 @@ BOOST_FIXTURE_TEST_CASE(attested_tx_rejects_the_wrong_type, BasicTestingSetup) {
     BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-attested-tx-type");
 }
 
+BOOST_FIXTURE_TEST_CASE(attested_tx_rejects_the_right_type_at_the_wrong_version, BasicTestingSetup) {
+    // Fable review (2026-10-01), CONFIRMED CRITICAL, fixed: IsAttestedTx
+    // (evo/attestedtx.h) requires nVersion==3 as well as nType -- not
+    // reachable via CheckSpecialTx's own dispatch today (its nVersion!=3
+    // guard never calls this function at all), but defense in depth for the
+    // same reason validation.cpp's three 5.4.3 sites all needed the fix:
+    // two different files must not re-derive "is this an attested tx" with
+    // two different predicates.
+    CCoinsView coinsDummy;
+    CCoinsViewCache view(&coinsDummy);
+    COutPoint prevout(InsecureRand256(), 0);
+    view.AddCoin(prevout, Coin(CTxOut(2, P2PKScript(NewPubKey())), 100, false, 0, {}), true);
+
+    CMutableTransaction tx = MakeAttestedSpend(prevout);
+    tx.nVersion = 4;
+    CValidationState state;
+    BOOST_CHECK(!CheckAttestedTx(CTransaction(tx), nullptr, state, view, true));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-attested-tx-type");
+}
+
 BOOST_FIXTURE_TEST_CASE(attested_tx_rejects_no_inputs, BasicTestingSetup) {
     CCoinsView coinsDummy;
     CCoinsViewCache view(&coinsDummy);
