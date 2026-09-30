@@ -276,9 +276,11 @@ std::unique_ptr <CAssetsDB> passetsdb;
 std::unique_ptr <CAssetsCache> passetsCache;
 
 // See definition for documentation
-static void FindFilesToPruneManual(ChainstateManager &chainman, std::set<int> &setFilesToPrune, int nManualPruneHeight);
+static void FindFilesToPruneManual(ChainstateManager &chainman, std::set<int> &setFilesToPrune,
+                                   std::set<int> &setBodyFilesToPrune, int nManualPruneHeight);
 
-static void FindFilesToPrune(ChainstateManager &chainman, std::set<int> &setFilesToPrune, uint64_t nPruneAfterHeight);
+static void FindFilesToPrune(ChainstateManager &chainman, std::set<int> &setFilesToPrune,
+                             std::set<int> &setBodyFilesToPrune, uint64_t nPruneAfterHeight);
 
 bool CheckInputs(const CTransaction &tx, CValidationState &state, const CCoinsViewCache &inputs, bool fScriptChecks,
                  unsigned int flags, bool cacheSigStore, bool cacheFullScriptStore, PrecomputedTransactionData &txdata,
@@ -3116,6 +3118,7 @@ bool CChainState::FlushStateToDisk(const CChainParams &chainparams, CValidationS
     static int64_t nLastWrite = 0;
     static int64_t nLastFlush = 0;
     std::set<int> setFilesToPrune;
+    std::set<int> setBodyFilesToPrune;
     bool full_flush_completed = false;
 
     const size_t coins_count = ::ChainstateActive().CoinsTip().GetCacheSize();
@@ -3129,9 +3132,9 @@ bool CChainState::FlushStateToDisk(const CChainParams &chainparams, CValidationS
             LOCK(cs_LastBlockFile);
             if (fPruneMode && (fCheckForPruning || nManualPruneHeight > 0) && !fReindex) {
                 if (nManualPruneHeight > 0) {
-                    FindFilesToPruneManual(g_chainman, setFilesToPrune, nManualPruneHeight);
+                    FindFilesToPruneManual(g_chainman, setFilesToPrune, setBodyFilesToPrune, nManualPruneHeight);
                 } else {
-                    FindFilesToPrune(g_chainman, setFilesToPrune, chainparams.PruneAfterHeight());
+                    FindFilesToPrune(g_chainman, setFilesToPrune, setBodyFilesToPrune, chainparams.PruneAfterHeight());
                     fCheckForPruning = false;
                 }
                 if (!setFilesToPrune.empty()) {
@@ -3207,9 +3210,15 @@ bool CChainState::FlushStateToDisk(const CChainParams &chainparams, CValidationS
                         return AbortNode(state, "Failed to write to block index database");
                     }
                 }
-                // Finally remove any pruned files
-                if (fFlushForPrune)
+                // Finally remove any pruned files -- body files too (Mike,
+                // 2026-09-30), only after the SAME WriteBatchSync above has
+                // durably persisted ResetBodyFileInfo's own dirty marks
+                // (threaded through vBodyFiles just like the block-file
+                // family), matching UnlinkPrunedFiles' own ordering.
+                if (fFlushForPrune) {
                     UnlinkPrunedFiles(setFilesToPrune);
+                    UnlinkPrunedBodyFiles(setBodyFilesToPrune);
+                }
                 nLastWrite = nNow;
             }
             // Flush best chain related state. This can only be done if the blocks / block index write was also done.
@@ -5554,7 +5563,7 @@ uint64_t CalculateCurrentUsage() {
     return retval;
 }
 
-void ChainstateManager::PruneOneBlockFile(const int fileNumber) {
+void ChainstateManager::PruneOneBlockFile(const int fileNumber, std::set<int> *setBodyFilesTouchedOut) {
     AssertLockHeld(cs_main);
     LOCK(cs_LastBlockFile);
 
@@ -5578,14 +5587,32 @@ void ChainstateManager::PruneOneBlockFile(const int fileNumber) {
             // but missed this, the one CLEAR site, leaving the index
             // answering "serveable" for a block HaveBodies() now says is
             // gone until a restart happened to rebuild it correctly.
-            // BLOCK_HAVE_BODY_RECORD/nBodyFile/nBodyPos are untouched by
-            // pruning (no body-file pruning exists yet, F-141/F-142's own
-            // confirmed grep) -- guarded on IsNull() regardless, matching
-            // ConnectTip's own precedent, since a pre-2.1.4-style entry
-            // could reach here with no record at all.
+            //
+            // Mike, 2026-09-30 ("if node is pruned, bodies should be pruned
+            // identically to block data"): this used to stop at marking the
+            // index entry unserveable, leaving BLOCK_HAVE_BODY_RECORD/
+            // nBodyFile/nBodyPos untouched forever -- no body-file pruning
+            // existed at all (F-141/F-142's own confirmed grep), so a
+            // pruned node's disk usage was unbounded for exactly the data
+            // -prune exists to bound. Now cleared in the SAME event as the
+            // classic block data it accompanies: erase the hash index entry
+            // entirely (not merely mark unserveable -- the position is
+            // about to mean nothing once its file is gone, unlike a
+            // withheld block's, which may yet arrive), clear the status
+            // bit and position fields, and hand the touched body-file
+            // number to the caller so FindOrphanedBodyFiles can decide,
+            // once every file in this prune event is processed, whether
+            // anything still standing still needs it.
             FlatFilePos bodyPos = pindex->GetBodyPos();
             if (!bodyPos.IsNull()) {
-                RecordBodyPositionByHash(pindex->GetBlockHash(), bodyPos, false);
+                EraseBodyPositionByHash(pindex->GetBlockHash());
+                if (setBodyFilesTouchedOut) {
+                    setBodyFilesTouchedOut->insert(bodyPos.nFile);
+                }
+                pindex->nStatus &= ~BLOCK_HAVE_BODY_RECORD;
+                pindex->nBodyFile = 0;
+                pindex->nBodyPos = 0;
+                setDirtyBlockIndex.insert(pindex);
             }
 
             // Prune from m_blocks_unlinked -- any block we prune would have
@@ -5607,6 +5634,46 @@ void ChainstateManager::PruneOneBlockFile(const int fileNumber) {
     setDirtyFileInfo.insert(fileNumber);
 }
 
+std::set<int> ChainstateManager::FindOrphanedBodyFiles(const std::set<int> &setBodyFilesTouched) {
+    AssertLockHeld(cs_main);
+
+    if (setBodyFilesTouched.empty()) {
+        return {};
+    }
+
+    // One pass over the whole (already in-memory) block index, checking
+    // every remaining BLOCK_HAVE_BODY_RECORD entry's own nBodyFile against
+    // the touched set -- cheaper than a per-candidate rescan, and correct
+    // regardless of how body-file boundaries happen to fall relative to
+    // blk-file boundaries (bodystore.h's own independent-numbering
+    // decision, 2.1.1): a body file is only ever reported orphaned once
+    // NOTHING anywhere in the index still names it, not because of
+    // anything assumed about height ranges.
+    std::set<int> setStillReferenced;
+    for (const auto &entry: m_blockman.m_block_index) {
+        const CBlockIndex *pindex = entry.second;
+        if (pindex->nStatus & BLOCK_HAVE_BODY_RECORD) {
+            setStillReferenced.insert(pindex->GetBodyPos().nFile);
+        }
+    }
+
+    std::set<int> setOrphaned;
+    for (int fileNumber : setBodyFilesTouched) {
+        if (setStillReferenced.count(fileNumber) == 0) {
+            setOrphaned.insert(fileNumber);
+        }
+    }
+    return setOrphaned;
+}
+
+
+void UnlinkPrunedBodyFiles(const std::set<int> &setBodyFilesToPrune) {
+    for (int fileNumber : setBodyFilesToPrune) {
+        FlatFilePos pos(fileNumber, 0);
+        fs::remove(BodyFileSeq().FileName(pos));
+        LogPrintf("Prune: %s deleted bdy (%05u)\n", __func__, fileNumber);
+    }
+}
 
 void UnlinkPrunedFiles(const std::set<int> &setFilesToPrune) {
     for (std::set<int>::iterator it = setFilesToPrune.begin(); it != setFilesToPrune.end(); ++it) {
@@ -5619,7 +5686,8 @@ void UnlinkPrunedFiles(const std::set<int> &setFilesToPrune) {
 
 /* Calculate the block/rev files to delete based on height specified by user with RPC command pruneblockchain */
 static void
-FindFilesToPruneManual(ChainstateManager &chainman, std::set<int> &setFilesToPrune, int nManualPruneHeight) {
+FindFilesToPruneManual(ChainstateManager &chainman, std::set<int> &setFilesToPrune,
+                       std::set<int> &setBodyFilesToPrune, int nManualPruneHeight) {
     assert(fPruneMode && nManualPruneHeight > 0);
 
     LOCK2(cs_main, cs_LastBlockFile);
@@ -5630,14 +5698,23 @@ FindFilesToPruneManual(ChainstateManager &chainman, std::set<int> &setFilesToPru
     unsigned int nLastBlockWeCanPrune = std::min((unsigned) nManualPruneHeight,
                                                  ::ChainActive().Tip()->nHeight - MIN_BLOCKS_TO_KEEP);
     int count = 0;
+    std::set<int> setBodyFilesTouched;
     for (int fileNumber = 0; fileNumber < nLastBlockFile; fileNumber++) {
         if (vinfoBlockFile[fileNumber].nSize == 0 || vinfoBlockFile[fileNumber].nHeightLast > nLastBlockWeCanPrune)
             continue;
-        chainman.PruneOneBlockFile(fileNumber);
+        chainman.PruneOneBlockFile(fileNumber, &setBodyFilesTouched);
         setFilesToPrune.insert(fileNumber);
         count++;
     }
-    LogPrintf("Prune (Manual): prune_height=%d removed %d blk/rev pairs\n", nLastBlockWeCanPrune, count);
+    // Mike, 2026-09-30: bodies pruned identically to block data -- see
+    // ChainstateManager::FindOrphanedBodyFiles' own doc for why this is a
+    // single whole-index pass rather than a per-candidate rescan.
+    for (int fileNumber : chainman.FindOrphanedBodyFiles(setBodyFilesTouched)) {
+        ResetBodyFileInfo(fileNumber);
+        setBodyFilesToPrune.insert(fileNumber);
+    }
+    LogPrintf("Prune (Manual): prune_height=%d removed %d blk/rev pairs, %d bdy files\n", nLastBlockWeCanPrune,
+             count, (int) setBodyFilesToPrune.size());
 }
 
 /* This function is called from the RPC code for pruneblockchain */
@@ -5664,7 +5741,8 @@ void PruneBlockFilesManual(int nManualPruneHeight) {
  *
  * @param[out]   setFilesToPrune   The set of file indices that can be unlinked will be returned
  */
-static void FindFilesToPrune(ChainstateManager &chainman, std::set<int> &setFilesToPrune, uint64_t nPruneAfterHeight) {
+static void FindFilesToPrune(ChainstateManager &chainman, std::set<int> &setFilesToPrune,
+                             std::set<int> &setBodyFilesToPrune, uint64_t nPruneAfterHeight) {
     LOCK2(cs_main, cs_LastBlockFile);
     if (::ChainActive().Tip() == nullptr || nPruneTarget == 0) {
         return;
@@ -5681,6 +5759,7 @@ static void FindFilesToPrune(ChainstateManager &chainman, std::set<int> &setFile
     uint64_t nBuffer = BLOCKFILE_CHUNK_SIZE + UNDOFILE_CHUNK_SIZE;
     uint64_t nBytesToPrune;
     int count = 0;
+    std::set<int> setBodyFilesTouched;
 
     if (nCurrentUsage + nBuffer >= nPruneTarget) {
         // On a prune event, the chainstate DB is flushed.
@@ -5705,7 +5784,7 @@ static void FindFilesToPrune(ChainstateManager &chainman, std::set<int> &setFile
             if (vinfoBlockFile[fileNumber].nHeightLast > nLastBlockWeCanPrune)
                 continue;
 
-            chainman.PruneOneBlockFile(fileNumber);
+            chainman.PruneOneBlockFile(fileNumber, &setBodyFilesTouched);
             // Queue up the files for removal
             setFilesToPrune.insert(fileNumber);
             nCurrentUsage -= nBytesToPrune;
@@ -5713,10 +5792,23 @@ static void FindFilesToPrune(ChainstateManager &chainman, std::set<int> &setFile
         }
     }
 
-    LogPrint(BCLog::PRUNE, "Prune: target=%dMiB actual=%dMiB diff=%dMiB max_prune_height=%d removed %d blk/rev pairs\n",
+    // Mike, 2026-09-30 ("if node is pruned, bodies should be pruned
+    // identically to block data"): outside the nCurrentUsage-triggered
+    // branch too -- a manual pruneblockchain call or an earlier partial
+    // prune could leave setBodyFilesTouched non-empty even when this
+    // call's own usage check declines to prune further blk/rev pairs, and
+    // FindOrphanedBodyFiles' own empty-set short-circuit makes this free
+    // when there is nothing to do.
+    for (int fileNumber : chainman.FindOrphanedBodyFiles(setBodyFilesTouched)) {
+        ResetBodyFileInfo(fileNumber);
+        setBodyFilesToPrune.insert(fileNumber);
+    }
+
+    LogPrint(BCLog::PRUNE, "Prune: target=%dMiB actual=%dMiB diff=%dMiB max_prune_height=%d removed %d blk/rev "
+                          "pairs, %d bdy files\n",
              nPruneTarget / 1024 / 1024, nCurrentUsage / 1024 / 1024,
              ((int64_t) nPruneTarget - (int64_t) nCurrentUsage) / 1024 / 1024,
-             nLastBlockWeCanPrune, count);
+             nLastBlockWeCanPrune, count, (int) setBodyFilesToPrune.size());
 }
 
 static FlatFileSeq BlockFileSeq() {

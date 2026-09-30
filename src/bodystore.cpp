@@ -415,6 +415,15 @@ void GetDirtyBodyFileInfo(std::vector<std::pair<int, CBodyFileInfo>> &vFilesOut,
     nLastFileOut = nLastBodyFile;
 }
 
+void ResetBodyFileInfo(int fileNumber) {
+    LOCK(cs_LastBodyFile);
+    if ((size_t) fileNumber >= vinfoBodyFile.size()) {
+        return;
+    }
+    vinfoBodyFile[fileNumber].SetNull();
+    setDirtyBodyFileInfo.insert(fileNumber);
+}
+
 void ResetBodyFileState() {
     LOCK(cs_LastBodyFile);
     // F-133 review: vector::clear() drops elements but keeps capacity, so in
@@ -445,6 +454,11 @@ unsigned int TestOnlyGetBodyFileSize(int nFile) {
 void RecordBodyPositionByHash(const uint256 &hash, const FlatFilePos &pos, bool fServeable) {
     LOCK(cs_bodyIndex);
     mapBodyPosByHash[hash] = BodyHashEntry{pos, fServeable};
+}
+
+void EraseBodyPositionByHash(const uint256 &hash) {
+    LOCK(cs_bodyIndex);
+    mapBodyPosByHash.erase(hash);
 }
 
 bool LookupBodyPositionByHash(const uint256 &hash, FlatFilePos &posOut, bool *fServeableOut) {

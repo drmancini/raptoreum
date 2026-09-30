@@ -67,6 +67,10 @@ public:
         READWRITE(VARINT(obj.nSize));
     }
 
+    void SetNull() {
+        nSize = 0;
+    }
+
     std::string ToString() const;
 };
 
@@ -241,6 +245,20 @@ bool FlushBodyFile(bool fFinalize = false);
  *  entirely instead of documenting an invariant every future caller must honour. */
 void GetDirtyBodyFileInfo(std::vector<std::pair<int, CBodyFileInfo>> &vFilesOut, int &nLastFileOut);
 
+/** Mike, 2026-09-30 ("if node is pruned, bodies should be pruned identically
+ *  to block data"): the CBodyFileInfo analogue of clearing
+ *  `vinfoBlockFile[fileNumber]` in `PruneOneBlockFile` -- resets this body
+ *  file's own size bookkeeping to null and marks it dirty so the next
+ *  flush persists the reset, exactly like the block-file family. Callers
+ *  must only pass a file number `ChainstateManager::FindOrphanedBodyFiles`
+ *  has already confirmed nothing in the block index still names, and must
+ *  call this BEFORE the underlying `bdy*.dat` bytes are actually deleted
+ *  -- matching `PruneOneBlockFile`'s own ordering relative to
+ *  `UnlinkPrunedFiles`, so a crash between the two still leaves the
+ *  database and the filesystem mutually consistent (a file marked gone
+ *  that may briefly still exist, never the reverse). */
+void ResetBodyFileInfo(int fileNumber);
+
 /** Reset FindBodyPos's in-memory state -- validation.cpp's UnloadBlockIndex
  *  calls this alongside its own vinfoBlockFile.clear()/nLastBlockFile=0 reset
  *  (F-135, 2.1.4 review: UnloadBlockIndex had no body-store counterpart,
@@ -330,6 +348,15 @@ bool LookupBodyPositionByHash(const uint256 &hash, FlatFilePos &posOut, bool *fS
  *  explicitly so 2.2.3's implementation plan can point at it rather than
  *  re-deriving "must check both facts" from scratch. */
 bool LookupServeableBodyPositionByHash(const uint256 &hash, FlatFilePos &posOut);
+
+/** Mike, 2026-09-30 ("if node is pruned, bodies should be pruned identically
+ *  to block data"): the erase counterpart to RecordBodyPositionByHash, used
+ *  when pruning has determined a block's body-store record is gone for
+ *  good, not merely withheld -- unlike RecordBodyPositionByHash(hash, pos,
+ *  false), which keeps a real, meaningful position around for a withheld
+ *  block whose body may yet arrive later, this removes the entry entirely.
+ *  A no-op if `hash` has no entry. No `cs_main` required. */
+void EraseBodyPositionByHash(const uint256 &hash);
 
 /** Record the ACTIVE CHAIN's body position and hash at a height -- call at
  *  `ConnectTip`, after the connect itself succeeds. Overwrites any existing
