@@ -171,7 +171,20 @@ std::unique_ptr <CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript &s
     bool fDIP0003Active_context = chainparams.GetConsensus().DIP0003Enabled;
     bool fDIP0008Active_context = chainparams.GetConsensus().DIP0008Enabled;
 
-    pblock->nVersion = Updates().ComputeBlockVersion(pindexPrev);
+    // UpdateManager::State's own roundNumber math (update/update.cpp) uses
+    // blockIndex->nHeight directly with no adjustment, so
+    // ComputeBlockVersion(pindexPrev) answers "what does the PARENT's own
+    // height expect" -- one height too early for a block that will actually
+    // land at nHeight. ComputeNextBlockVersion queries State() only on the
+    // real, persistent pindexPrev (State()/GetVote() cache by CBlockIndex*
+    // for this UpdateManager's lifetime, so a synthetic lookahead index here
+    // would eventually alias a stale cached result onto an unrelated real
+    // block once its stack frame was reused) and corrects for the one
+    // reference-point mismatch this causes. Found via a real "Warning:
+    // unknown new rules activated" on a live two-node devnet, exactly at
+    // the one block where a deployment crosses from LockedIn into Active
+    // (ComputeBlockVersion stops including a bit once Active).
+    pblock->nVersion = Updates().ComputeNextBlockVersion(pindexPrev, nHeight);
 
     // -regtest only: allow overriding block.nVersion with
     // -blockversion=N to test forking scenarios
