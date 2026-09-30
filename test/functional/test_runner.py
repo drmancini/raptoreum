@@ -246,6 +246,12 @@ BASE_SCRIPTS = [
     # is exactly how that regression shipped past a green C++ suite) makes
     # this registration itself part of closing the gap, not optional.
     'feature_bodyrange_e2e.py',
+    # F-230-adjacent (Mike, 2026-09-30): crosses feature_bodyrange_e2e.py's
+    # own two-node withhold/fetch shape with real asset and future
+    # transactions -- every existing asset/futures test runs with no
+    # decoupling flags, and every existing decoupling test carries no real
+    # asset/future payload, so this combination had never actually run.
+    'feature_decoupled_assets_futures.py',
     # 2.4a (build-plan.md's 2.4 row, F-219): a real 3-node failover proof --
     # a source that never answers (disconnected, simulating a "deliberately
     # erasing source" per this row's own goal statement) does not
