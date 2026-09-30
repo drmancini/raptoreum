@@ -24,7 +24,11 @@ enum {
     TRANSACTION_FUTURE = 7,
     TRANSACTION_NEW_ASSET = 8,
     TRANSACTION_UPDATE_ASSET = 9,
-    TRANSACTION_MINT_ASSET = 10
+    TRANSACTION_MINT_ASSET = 10,
+    // 5.4.1 (build-plan.md): a transaction whose validity rule is a quorum
+    // threshold attestation plus a sanity check, not the full script
+    // interpreter -- see evo/attestedtx.h for the check itself.
+    TRANSACTION_ATTESTED = 11
 };
 
 /** An outpoint - a combination of a transaction hash and an index n into its vout */

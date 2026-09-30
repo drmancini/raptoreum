@@ -10,6 +10,7 @@
 #include <hash.h>
 #include <primitives/block.h>
 #include <validation.h>
+#include <evo/attestedtx.h>
 #include <evo/cbtx.h>
 #include <evo/deterministicmns.h>
 #include <llmq/quorums_commitment.h>
@@ -49,6 +50,8 @@ bool CheckSpecialTx(const CTransaction &tx, const CBlockIndex *pindexPrev, CVali
                 return CheckUpdateAssetTx(tx, pindexPrev, state, view, assetsCache);
             case TRANSACTION_MINT_ASSET:
                 return CheckMintAssetTx(tx, pindexPrev, state, view, assetsCache);
+            case TRANSACTION_ATTESTED:
+                return CheckAttestedTx(tx, pindexPrev, state, view, check_sigs);
         }
     } catch (const std::exception &e) {
         LogPrintf("%s -- failed: %s\n", __func__, e.what());
@@ -81,6 +84,8 @@ bool ProcessSpecialTx(const CTransaction &tx, const CBlockIndex *pindex, CValida
             return true;
         case TRANSACTION_MINT_ASSET:
             return true;
+        case TRANSACTION_ATTESTED:
+            return true; // value movement is handled by ConnectBlock's ordinary UTXO loop
     }
     return state.DoS(100, false, REJECT_INVALID, "bad-tx-type-proc");
 }
@@ -107,6 +112,8 @@ bool UndoSpecialTx(const CTransaction &tx, const CBlockIndex *pindex) {
         case TRANSACTION_UPDATE_ASSET:
             return true;
         case TRANSACTION_MINT_ASSET:
+            return true;
+        case TRANSACTION_ATTESTED:
             return true;
     }
     return false;
