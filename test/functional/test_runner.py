@@ -274,6 +274,12 @@ BASE_SCRIPTS = [
     # real GETBODYRANGE/BODYRANGE round trip. F-158's own registration
     # lesson applies here too.
     'feature_malicious_body_server.py',
+    # F-236 (Mike, 2026-09-30): the Sybil serve-budget-exhaustion backlog
+    # item. GETBODYRANGE's own per-connection token bucket has no aggregate
+    # cap across connections -- confirmed live, N independent connections
+    # each spend their own full, untouched budget. F-158's own registration
+    # lesson applies here too.
+    'feature_bodyrange_sybil_serve_budget.py',
     # Don't append tests at the end to avoid merge conflicts
     # Put them in a random line within the section that fits their approximate run-time
 ]
