@@ -3255,8 +3255,13 @@ EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
             }
 
             // Check the version of the last 100 blocks to see if we need to upgrade:
+            // ComputeBlockVersion(pindex), not pindex->pprev: State()'s own
+            // roundNumber math (update/update.cpp) uses blockIndex->nHeight
+            // directly with no adjustment, so the expectation for a real,
+            // already-connected block is evaluated at ITS OWN height, same
+            // as the single-block check just above.
             for (int i = 0; i < 100 && pindex != nullptr; i++) {
-                nExpectedVersion = Updates().ComputeBlockVersion(pindex->pprev);
+                nExpectedVersion = Updates().ComputeBlockVersion(pindex);
                 if (pindex->nVersion > VERSIONBITS_LAST_OLD_BLOCK_VERSION &&
                     (pindex->nVersion | nExpectedVersion) != nExpectedVersion)
                     ++nUpgraded;

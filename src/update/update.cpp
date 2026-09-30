@@ -531,3 +531,18 @@ uint32_t UpdateManager::ComputeBlockVersion(const CBlockIndex *blockIndex) {
     }
     return nVersion;
 }
+
+uint32_t UpdateManager::ComputeNextBlockVersion(const CBlockIndex *pindexPrev, int64_t nHeight) {
+    LOCK2(cs_main, updateMutex);
+    uint32_t nVersion = VERSIONBITS_TOP_BITS;
+    for (auto const &update: updates) {
+        StateInfo si = State(update.first, pindexPrev);
+        EUpdateState effectiveState = si.State;
+        if (effectiveState == EUpdateState::LockedIn && nHeight >= si.FinalHeight) {
+            effectiveState = EUpdateState::Active;
+        }
+        if (effectiveState == EUpdateState::Voting || effectiveState == EUpdateState::LockedIn)
+            nVersion |= update.second.BitMask();
+    }
+    return nVersion;
+}
