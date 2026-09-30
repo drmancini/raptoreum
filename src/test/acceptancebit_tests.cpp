@@ -194,6 +194,152 @@ BOOST_AUTO_TEST_CASE(unrequested_arrival_fills_a_commitment_only_block) {
     BOOST_CHECK_EQUAL(pindex->nDataPos, nDataPosBefore);
 }
 
+// Spies on the raw CMainSignals::BlockChecked signal itself, not
+// PeerLogicValidation's own net_processing.cpp consumer of it (that
+// consumer's mapBlockSource/Misbehaving wiring is net_processing-level glue,
+// exercised functionally elsewhere in this tree, e.g. F-218's own
+// feature_bodyrange_e2e.py) -- this test only needs to know the SIGNAL
+// fired at all, with the right invalidity/DoS verdict, matching
+// RelayAtomicitySpy's own established split just above.
+class BlockCheckedSpy : public CValidationInterface {
+public:
+    struct Call {
+        uint256 hash;
+        bool invalid;
+        unsigned int nDoS;
+    };
+    std::vector<Call> calls;
+
+protected:
+    void BlockChecked(const CBlock &block, const CValidationState &state) override {
+        int nDoS = 0;
+        calls.push_back({block.GetHash(), state.IsInvalid(nDoS), (unsigned int) nDoS});
+    }
+};
+
+// Same PerfWithholdGuard precedent applied to CValidationInterface
+// registration: a thrown BOOST_REQUIRE between Register and Unregister would
+// leave this spy's now-destroyed stack frame registered as a live listener
+// for every later test in the process -- the next real BlockChecked() call
+// anywhere else would then invoke a dangling pointer.
+template <typename Spy>
+struct ValidationInterfaceGuard {
+    Spy *spy;
+
+    explicit ValidationInterfaceGuard(Spy *spyIn) : spy(spyIn) { RegisterValidationInterface(spy); }
+
+    ~ValidationInterfaceGuard() { UnregisterValidationInterface(spy); }
+};
+
+// Mike, 2026-09-30 ("does a bad block ban the IP it came from"): a body
+// recovered via the GETBODYRANGE path (ProcessFetchedBodyRange) that turns
+// out aggregate-invalid once real bodies are examined -- the one class of
+// invalidity CheckCommitmentBlock's own count-only bound at commitment-
+// accept time cannot see (that function's own comment: "necessary but not
+// sufficient") -- never reached GetMainSignals().BlockChecked() at all, so
+// PeerLogicValidation::BlockChecked (net_processing.cpp) never had a chance
+// to Misbehaving() the peer mapBlockSource still names for this hash. Every
+// OTHER path that can determine a block invalid -- AcceptBlock's own
+// re-offer-the-whole-block branch (unrequested_arrival_fills_a_commitment_
+// only_block's own CheckBlock/ContextualCheckBlock call, a few lines above,
+// propagates its own failure up through ProcessNewBlock's wrapper), and
+// ConnectTip's own ConnectBlock call -- already does this; this one
+// silently didn't.
+//
+// Getting a genuinely commitment-only precondition (BLOCK_HAVE_DATA set,
+// HaveBodies false) with an INVALID body waiting behind it is not
+// constructible by withholding a real delivery: ProcessNewBlock's own
+// belt-and-suspenders CheckBlock (validation.cpp, ahead of AcceptBlock) runs
+// the full per-tx CheckTransaction pass on any whole, freshly-delivered
+// block regardless of -perfwithholdheight -- that flag only fakes a LATER
+// disk read-BACK failure (ReadBlockFromDisk's own PerfWithholdStillActive
+// peek), which by construction can only ever apply to a body that already
+// passed this same full validation once, to get written in the first
+// place. So this test builds the commitment-only precondition the proven
+// way (an all-coinbase block, trivially aggregate-valid, via the identical
+// PerfWithholdGuard pattern unrequested_arrival_fills_a_commitment_only_
+// block already uses) to get a real, indexed pindex, then exercises
+// ProcessFetchedBodyRange directly with a SEPARATELY constructed
+// commitments/bodies pair carrying one genuinely invalid extra transaction
+// -- legitimate, since the function takes both as plain parameters and
+// never cross-checks them against whatever pindex's own real commitments
+// were; it is the exact shape of a real caller (net_processing.cpp's
+// GETBODYRANGE response handler) handing it whatever a peer answered with.
+// A non-coinbase transaction with an empty vout is the minimal invalid
+// body: MaterialiseBlock's own hash check only demands bodies[i]->GetHash()
+// == commitments.vCommitments[i], which holds by construction (the
+// commitment is this transaction's own real hash), so it passes that
+// unchanged and only fails once CheckBlock's per-tx CheckTransaction
+// examines the transaction's actual content.
+BOOST_AUTO_TEST_CASE(bad_body_from_getbodyrange_notifies_blockchecked) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    const CChainParams &chainparams = Params();
+
+    CBlock block = CreateBlock({}, coinbaseKey);
+    std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
+    uint256 hash = block.GetHash();
+
+    BlockCheckedSpy spy;
+    ValidationInterfaceGuard<BlockCheckedSpy> spyGuard(&spy);
+
+    const CBlockIndex *pindex;
+    {
+        PerfWithholdGuard guard(hash);
+        bool fNewBlock = false;
+        BOOST_REQUIRE(chainman.ProcessNewBlock(chainparams, shared_pblock, /*fForceProcessing=*/true, &fNewBlock));
+        BOOST_REQUIRE(fNewBlock);
+
+        pindex = LookupBlockIndex(hash);
+        BOOST_REQUIRE(pindex != nullptr);
+        BOOST_REQUIRE(pindex->nStatus & BLOCK_HAVE_DATA);
+        BOOST_REQUIRE(!HaveBodies(pindex));
+    }
+    // No BlockChecked call yet -- commitment-only acceptance is a success,
+    // not a verdict, and AcceptBlock's own success path (unlike its failure
+    // path) never signals it.
+    BOOST_REQUIRE(spy.calls.empty());
+
+    CMutableTransaction badTx;
+    badTx.nVersion = 1;
+    badTx.vin.resize(1);
+    badTx.vin[0].prevout.hash = m_coinbase_txns[0]->GetHash();
+    badTx.vin[0].prevout.n = 0;
+    badTx.vin[0].scriptSig = CScript();
+    // vout deliberately left empty -- CheckTransaction's own
+    // "bad-txns-vout-empty" (consensus/tx_check.cpp), a structural check
+    // needing no UTXO lookup and no coinbase-specific reasoning.
+    CTransactionRef badTxRef = MakeTransactionRef(badTx);
+
+    // Replace, not append: CreateBlock({}, ...) may still have assembled the
+    // coinbase alongside automatically-included transactions of its own
+    // (e.g. an llmq commitment), so vCommitments cannot be assumed empty --
+    // this test only needs A pair that hash-matches itself and is not the
+    // coinbase, not fidelity to whatever else the original block held.
+    CCommitmentBlock commitments = CommitmentsFromBlock(block);
+    commitments.vCommitments = {badTxRef->GetHash()};
+    std::vector<CTransactionRef> bodies = {badTxRef};
+
+    CValidationState state;
+    bool ok;
+    {
+        LOCK(cs_main);
+        ok = ::ChainstateActive().ProcessFetchedBodyRange(const_cast<CBlockIndex *>(pindex), commitments, bodies,
+                                                           state, chainparams);
+    }
+    BOOST_REQUIRE(!ok);
+    BOOST_REQUIRE(state.IsInvalid());
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-txns-vout-empty");
+
+    // Not compared against `hash`: materialised (built from THIS call's own
+    // commitments/bodies, deliberately different from pindex's real,
+    // coinbase-only content) genuinely hashes differently -- the point
+    // here is that the signal fired at all, carrying the real invalidity
+    // this call just produced, not that it named the original block.
+    BOOST_REQUIRE_EQUAL(spy.calls.size(), 1u);
+    BOOST_CHECK(spy.calls[0].invalid);
+    BOOST_CHECK_GT(spy.calls[0].nDoS, 0u);
+}
+
 // The fix must not touch pruning's own, deliberate "ignore a re-offered
 // pruned block" behaviour (feature_characterise_pruned_arrival.py's pinned
 // baseline): a block whose BLOCK_HAVE_DATA has been cleared (nTx != 0 stays,
