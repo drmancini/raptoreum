@@ -5300,8 +5300,22 @@ bool CChainState::ProcessFetchedBodyRange(CBlockIndex *pindexNew, const CCommitm
     // CorruptionPossible() failure means for the peer that supplied it.
     CBlock materialised;
     if (!MaterialiseBlock(commitments, bodies, materialised)) {
-        return state.DoS(20, false, REJECT_INVALID, "bodyrange-hash-mismatch", /*corruptionIn=*/true,
-                         "fetched bodies do not match the block's committed identifiers");
+        state.DoS(20, false, REJECT_INVALID, "bodyrange-hash-mismatch", /*corruptionIn=*/true,
+                  "fetched bodies do not match the block's committed identifiers");
+        // Unlike AcceptBlock/ConnectTip (validation.cpp's own two other
+        // BlockChecked call sites), nothing else on this path ever notifies
+        // PeerLogicValidation::BlockChecked -- without this, a body that
+        // fails materialisation carries a real DoS score that nothing ever
+        // reads, so the peer that supplied it is never Misbehaving()'d.
+        // Harmless for the real GETBODYRANGE caller today (net_processing.cpp
+        // already bans via ValidateBodyRangeChunkHashes before this function
+        // is even reached), but the empty-body shortcut caller has no
+        // equivalent earlier gate, and neither caller should have to
+        // remember to wire this up itself -- matching AcceptBlock/ConnectTip's
+        // own convention of calling this at the point the validity verdict
+        // is actually decided, not at each call site.
+        GetMainSignals().BlockChecked(materialised, state);
+        return false;
     }
 
     // The body-dependent rows a commitment-only accept could not run --
@@ -5332,6 +5346,21 @@ bool CChainState::ProcessFetchedBodyRange(CBlockIndex *pindexNew, const CCommitm
             pindexNew->nStatus |= BLOCK_FAILED_VALID;
             setDirtyBlockIndex.insert(pindexNew);
         }
+        // The gap this closes: these two checks are genuinely body-dependent
+        // (real sigop count, real serialized size, aggregate input count --
+        // see the comment above) and CheckCommitmentBlock's own count-only
+        // bound at commitment-accept time is "necessary but not sufficient"
+        // for exactly these rows -- a block can pass commitment-only accept
+        // and still fail here once its real bodies arrive. Every OTHER path
+        // that can determine a block invalid (AcceptBlock's own header-stage
+        // rejection, ConnectTip's own ConnectBlock call) notifies
+        // GetMainSignals().BlockChecked() so PeerLogicValidation::BlockChecked
+        // can Misbehaving() the peer mapBlockSource still names for this
+        // hash -- this path, discovered live while auditing whether a bad
+        // block actually bans its source the way an operator would expect,
+        // did not, silently exempting whoever propagated a block that is
+        // coarse-valid but aggregate-invalid from ever being scored for it.
+        GetMainSignals().BlockChecked(materialised, state);
         return false;
     }
 
