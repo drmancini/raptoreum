@@ -91,6 +91,13 @@ BASE_SCRIPTS = [
     'feature_llmq_signing.py',
     'feature_llmq_signing.py --spork21',
     'feature_llmq_chainlocks.py',
+    # F-231-adjacent (Mike, 2026-09-30): F-137's own review deferred "a real
+    # 3-of-3 functional-test scenario proving the literal retry path" -- this
+    # is that scenario, live-firing transaction-decoupling.md 3A.7's
+    # manufactured quorum split against the three real smartnodes with
+    # decoupling flags active throughout, not the plain reorg the reference
+    # test above already covers.
+    'feature_llmq_chainlocks_decoupled.py',
     'feature_llmq_connections.py',
     'feature_llmq_simplepose.py',
     'feature_llmq_is_cl_conflicts.py',
