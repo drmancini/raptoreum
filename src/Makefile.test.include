@@ -36,6 +36,7 @@ BITCOIN_TESTS =\
   test/amount_tests.cpp \
   test/allocator_tests.cpp \
   test/acceptancebit_tests.cpp \
+  test/attestedtx_tests.cpp \
   test/assets_tests.cpp \
   test/base32_tests.cpp \
   test/base58_tests.cpp \
