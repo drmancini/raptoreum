@@ -4,8 +4,13 @@
 
 #include <evo/attestedtx.h>
 
+#include <chain.h>
+#include <chainparams.h>
 #include <coins.h>
 #include <consensus/validation.h>
+#include <evo/specialtx.h>
+#include <hash.h>
+#include <llmq/quorums_signing.h>
 #include <script/standard.h>
 
 /** build-plan.md's own 5.4 row, interim decision (a): restricted to
@@ -18,6 +23,26 @@ static bool IsRestrictedSingleSigScript(const CScript &scriptPubKey) {
     std::vector <std::vector<unsigned char>> solutions;
     txnouttype type = Solver(scriptPubKey, solutions);
     return type == TX_PUBKEY || type == TX_PUBKEYHASH;
+}
+
+/** 5.4.2: mirrors CLSIG_REQUESTID_PREFIX's own established shape exactly
+ *  (llmq/quorums_chainlocks.cpp, "clsig", domain-separating a chainlock's
+ *  own signing session from anything else that might share a quorum type)
+ *  -- a different prefix here means an attestation signature can never be
+ *  replayed as, or confused with, a chainlock or islock signature over the
+ *  coincidentally-identical hash of some other object, even though this
+ *  type currently reuses ChainLocks' own llmqType (see this file's own
+ *  header doc comment for why that reuse, not a new quorum type, is v1's
+ *  own interim choice). */
+static const std::string ATTESTATION_REQUESTID_PREFIX = "atx";
+
+/** id/msgHash are both derived from the transaction's own hash, never
+ *  carried on the wire (CAttestationPayload's own doc comment explains
+ *  why) -- id additionally mixes in the domain-separation prefix above so
+ *  a signature produced for this purpose cannot be replayed as one of a
+ *  different kind sharing the same quorum. */
+static uint256 BuildAttestationId(const uint256 &txHash) {
+    return ::SerializeHash(std::make_pair(ATTESTATION_REQUESTID_PREFIX, txHash));
 }
 
 bool CheckAttestedTx(const CTransaction &tx, const CBlockIndex *pindexPrev, CValidationState &state,
@@ -61,15 +86,35 @@ bool CheckAttestedTx(const CTransaction &tx, const CBlockIndex *pindexPrev, CVal
         }
     }
 
-    // 5.4.2 (not yet built, build-plan.md): the quorum attestation
-    // signature itself -- needs a payload format and an llmqType decision,
-    // neither of which exist yet. check_sigs is accepted as a parameter
-    // now, matching every sibling CheckXxxTx function's own convention
-    // (CheckProRegTx et al.), specifically so 5.4.2's own attestation
-    // check has an established place to land without changing this
-    // function's signature again.
-    (void) check_sigs;
-    (void) pindexPrev;
+    if (!check_sigs) {
+        // Matches every sibling CheckXxxTx function's own convention
+        // (CheckProRegTx et al.): callers that have already verified
+        // signatures elsewhere (or deliberately do not need to, e.g. a
+        // -reindex replay of already-connected history) may skip doing it
+        // again here.
+        return true;
+    }
+
+    CAttestationPayload payload;
+    if (!GetTxPayload(tx, payload)) {
+        return state.DoS(100, false, REJECT_INVALID, "bad-attested-tx-payload");
+    }
+    if (payload.nVersion == 0 || payload.nVersion > CAttestationPayload::CURRENT_VERSION) {
+        return state.DoS(100, false, REJECT_INVALID, "bad-attested-tx-payload-version");
+    }
+
+    const uint256 txHash = tx.GetHash();
+    const uint256 id = BuildAttestationId(txHash);
+    const int signedAtHeight = pindexPrev ? pindexPrev->nHeight : 0;
+    // v1's own interim choice (this file's own header doc comment):
+    // ChainLocks' existing, already-live llmqType, not a new one stood up
+    // for this purpose -- confirmed a real ::Consensus field by direct
+    // read of chainparams.cpp before relying on it, matching every other
+    // call site that already trusts it (quorums_chainlocks.cpp).
+    const Consensus::LLMQType llmqType = Params().GetConsensus().llmqTypeChainLocks;
+    if (!llmq::CSigningManager::VerifyRecoveredSig(llmqType, signedAtHeight, id, txHash, payload.sig)) {
+        return state.DoS(100, false, REJECT_INVALID, "bad-attested-tx-attestation");
+    }
 
     return true;
 }
