@@ -596,6 +596,13 @@ public:
         updateManager.Add(
             Update(EUpdate::COMMITMENT_MODE, std::string("Commitment Mode"), 3, 10, 100, 5, 10, 5, false,
                 VoteThreshold(85, 85, 1), VoteThreshold(0, 0, 1)));
+        // 5.4.3 (F-242): reuses EUpdate::ATTESTED_TX (bit 4, already built by
+        // 5.4.1/5.4.2) and mirrors COMMITMENT_MODE's own devnet shape
+        // directly above -- same startHeight=100 reasoning (devnet carries no
+        // real value and no real users), same ROUND_VOTING-derived thresholds.
+        updateManager.Add(
+            Update(EUpdate::ATTESTED_TX, std::string("Attested Transaction"), 4, 10, 100, 5, 10, 5, false,
+                VoteThreshold(85, 85, 1), VoteThreshold(0, 0, 1)));
 
         // The best chain should have at least this much work.
         consensus.nMinimumChainWork = uint256S("0x000000000000000000000000000000000000000000000000000000000000000");
@@ -775,6 +782,13 @@ public:
         // devnet registration's own comment for why.
         updateManager.Add(
             Update(EUpdate::COMMITMENT_MODE, std::string("Commitment Mode"), 3, 10, 100000000, 10, 100, 10, false,
+                VoteThreshold(85, 85, 1), VoteThreshold(0, 0, 1)));
+        // 5.4.3 (F-242): mechanism-testing registration only -- same
+        // reasoning as the devnet registration above and as COMMITMENT_MODE's
+        // own regtest registration directly above this one. NOT registered
+        // on mainnet or testnet.
+        updateManager.Add(
+            Update(EUpdate::ATTESTED_TX, std::string("Attested Transaction"), 4, 10, 100000000, 10, 100, 10, false,
                 VoteThreshold(85, 85, 1), VoteThreshold(0, 0, 1)));
 
         // The best chain should have at least this much work.

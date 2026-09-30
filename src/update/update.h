@@ -42,6 +42,23 @@ enum class EUpdate {
     // (registered, but startHeight unreachable) -- neither differs from
     // g_commitmentBudgetActive's own permanent production default.
     COMMITMENT_MODE = 3,
+    // 5.4.3 (build-plan.md, F-242): gates whether TRANSACTION_ATTESTED
+    // (primitives/transaction.h, evo/attestedtx.h, 5.4.1/5.4.2) is allowed to
+    // exist at all -- checked in ContextualCheckTransaction's own nType
+    // whitelist (validation.cpp), keyed on that call's own per-call
+    // pindexPrev parameter directly. Unlike COMMITMENT_MODE, this needs no
+    // g_commitmentBudgetActive-style tip cache or CommitmentModeAtHeight-style
+    // RAII pin: every consumption site (ContextualCheckTransaction; the
+    // ATMP/ConnectBlock CheckInputs-skip, which piggybacks on "did
+    // CheckAttestedTx already pass for this tx" rather than re-querying
+    // activation state at all) already receives the correct block context as
+    // a direct parameter, so there is no tip-vs-historical-block staleness
+    // for a -reindex-chainstate replay to exploit in the first place -- see
+    // F-242's own finding for the full argument. Mirrors COMMITMENT_MODE's
+    // registration shape exactly (F-214/F-228): devnet gets a real, reachable
+    // startHeight=100; regtest and mainnet/testnet stay at the same
+    // structurally-unreachable/unregistered defaults, chainparams.cpp.
+    ATTESTED_TX = 4,
 
     MAX_VERSION_BITS_DEPLOYMENTS
 };
