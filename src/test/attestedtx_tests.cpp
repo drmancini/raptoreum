@@ -18,6 +18,7 @@
 
 #include <coins.h>
 #include <consensus/validation.h>
+#include <evo/specialtx.h>
 #include <key.h>
 #include <primitives/transaction.h>
 #include <pubkey.h>
@@ -62,6 +63,12 @@ namespace {
 }
 
 BOOST_FIXTURE_TEST_CASE(attested_tx_accepts_a_single_sig_p2pk_input, BasicTestingSetup) {
+    // check_sigs=false: this test is specifically about 5.4.1's own
+    // script-shape restriction, not 5.4.2's attestation check -- a real,
+    // quorum-verifiable attestation cannot be constructed without a live
+    // quorum (F-216's own documented problem), so proving THIS rule in
+    // isolation needs the same skip every sibling CheckXxxTx function's
+    // own check_sigs parameter already provides for exactly this reason.
     CCoinsView coinsDummy;
     CCoinsViewCache view(&coinsDummy);
     COutPoint prevout(InsecureRand256(), 0);
@@ -69,8 +76,24 @@ BOOST_FIXTURE_TEST_CASE(attested_tx_accepts_a_single_sig_p2pk_input, BasicTestin
 
     CMutableTransaction tx = MakeAttestedSpend(prevout);
     CValidationState state;
-    BOOST_CHECK(CheckAttestedTx(CTransaction(tx), nullptr, state, view, true));
+    BOOST_CHECK(CheckAttestedTx(CTransaction(tx), nullptr, state, view, false));
     BOOST_CHECK(state.IsValid());
+}
+
+BOOST_FIXTURE_TEST_CASE(attested_tx_rejects_a_missing_attestation_payload, BasicTestingSetup) {
+    // 5.4.2: check_sigs=true and no vExtraPayload at all -- must fail at
+    // GetTxPayload, before ever reaching quorum lookup or BLS
+    // verification, matching every sibling CheckXxxTx function's own
+    // "bad payload" convention (CheckMintAssetTx et al.).
+    CCoinsView coinsDummy;
+    CCoinsViewCache view(&coinsDummy);
+    COutPoint prevout(InsecureRand256(), 0);
+    view.AddCoin(prevout, Coin(CTxOut(2, P2PKScript(NewPubKey())), 100, false, 0, {}), true);
+
+    CMutableTransaction tx = MakeAttestedSpend(prevout);
+    CValidationState state;
+    BOOST_CHECK(!CheckAttestedTx(CTransaction(tx), nullptr, state, view, true));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-attested-tx-payload");
 }
 
 BOOST_FIXTURE_TEST_CASE(attested_tx_rejects_a_bare_multisig_input, BasicTestingSetup) {
@@ -128,6 +151,37 @@ BOOST_FIXTURE_TEST_CASE(attested_tx_rejects_a_missing_input, BasicTestingSetup) 
     CValidationState state;
     BOOST_CHECK(!CheckAttestedTx(CTransaction(tx), nullptr, state, view, true));
     BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-attested-tx-missing-input");
+}
+
+BOOST_FIXTURE_TEST_CASE(attested_tx_rejects_an_attestation_with_no_live_quorum, TestingSetup) {
+    // Genuinely tried with BasicTestingSetup first and found a real
+    // SIGABRT, not a hang -- `test_raptoreum: validation.cpp:99:
+    // CChainState& ChainstateActive(): Assertion
+    // 'g_chainman.m_active_chainstate' failed.`, confirmed via
+    // --catch_system_errors=no rather than guessed from Boost.Test's own
+    // signal report. That is BasicTestingSetup never initialising a
+    // chainstate manager at all -- a test-fixture gap, not a production
+    // one; ChainstateActive() is always valid by the time any real node
+    // runs transaction validation. TestingSetup (this fixture) does
+    // initialise one, and with it this reaches
+    // llmq::CSigningManager::VerifyRecoveredSig's real quorum lookup and
+    // returns false cleanly -- no quorum exists in this lightweight
+    // fixture either (no live 3-of-3, F-216's own documented problem,
+    // same as 5.3/F-238), but SelectQuorumForSigning's own "no quorum"
+    // path is safe, confirmed live rather than assumed. This is the
+    // closest this environment can get to testing 5.4.2's real
+    // verification call without a live quorum actually signing anything.
+    CCoinsView coinsDummy;
+    CCoinsViewCache view(&coinsDummy);
+    COutPoint prevout(InsecureRand256(), 0);
+    view.AddCoin(prevout, Coin(CTxOut(2, P2PKScript(NewPubKey())), 100, false, 0, {}), true);
+
+    CMutableTransaction tx = MakeAttestedSpend(prevout);
+    CAttestationPayload payload;
+    SetTxPayload(tx, payload);
+    CValidationState state;
+    BOOST_CHECK(!CheckAttestedTx(CTransaction(tx), nullptr, state, view, true));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-attested-tx-attestation");
 }
 
 BOOST_AUTO_TEST_SUITE_END()
