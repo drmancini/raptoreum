@@ -1362,6 +1362,93 @@ BOOST_AUTO_TEST_CASE(gettransaction_distinguishes_not_held_from_not_found_via_tx
     BOOST_CHECK(!bodies_not_held2);
 }
 
+// Mike, 2026-09-30 ("if node is pruned, bodies should be pruned identically
+// to block data"): PruneOneBlockFile used to stop at marking the body-store
+// index entry unserveable, leaving BLOCK_HAVE_BODY_RECORD/nBodyFile/nBodyPos
+// untouched forever (no body-file pruning existed at all -- confirmed by
+// grep before fixing anything, and PruneOneBlockFile's own prior comment
+// said so outright). This is the per-block half of the fix: pruning a
+// block's classic data must clear its body-record claim in the SAME event,
+// not merely its serveability.
+BOOST_AUTO_TEST_CASE(pruning_a_block_clears_its_body_record_identically_to_its_block_data) {
+    CMutableTransaction spendTx = MakeSpendOfCoinbase(m_coinbase_txns[0], coinbaseKey);
+    CBlock block = CreateAndProcessBlock({spendTx}, coinbaseKey);
+    CBlockIndex *pindex = LookupBlockIndex(block.GetHash());
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(pindex->nStatus & BLOCK_HAVE_BODY_RECORD);
+    FlatFilePos bodyPos = pindex->GetBodyPos();
+    BOOST_REQUIRE(!bodyPos.IsNull());
+
+    FlatFilePos posOut;
+    BOOST_REQUIRE(LookupBodyPositionByHash(block.GetHash(), posOut));
+
+    {
+        LOCK(cs_main);
+        EnsureChainman(m_node).PruneOneBlockFile(pindex->GetBlockPos().nFile);
+    }
+
+    BOOST_CHECK(!(pindex->nStatus & BLOCK_HAVE_BODY_RECORD));
+    BOOST_CHECK_EQUAL(pindex->nBodyFile, 0);
+    BOOST_CHECK_EQUAL(pindex->nBodyPos, 0U);
+    // Erased entirely, not merely marked unserveable -- the position means
+    // nothing once the file it names may be deleted, unlike a withheld
+    // block's, which may yet arrive for real.
+    BOOST_CHECK(!LookupBodyPositionByHash(block.GetHash(), posOut));
+}
+
+// The safety property FindOrphanedBodyFiles exists to guarantee: a body
+// file real, standing blocks still reference must never come back as
+// orphaned, regardless of what else was just pruned. TestChain100Setup's
+// own pre-mined chain already has many blocks with BLOCK_HAVE_BODY_RECORD
+// set against body-file 0 (bodies are written in block order like blk*.dat,
+// so a small test chain never rotates away from it) -- exactly the
+// still-standing reference this test names directly rather than relying on
+// incidentally not disturbing it.
+BOOST_AUTO_TEST_CASE(find_orphaned_body_files_never_reports_a_still_referenced_file) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    CBlockIndex *pindex = ::ChainActive()[1];
+    BOOST_REQUIRE(pindex != nullptr);
+    BOOST_REQUIRE(pindex->nStatus & BLOCK_HAVE_BODY_RECORD);
+    int nFile = pindex->GetBodyPos().nFile;
+
+    LOCK(cs_main);
+    std::set<int> setOrphaned = chainman.FindOrphanedBodyFiles({nFile});
+    BOOST_CHECK_EQUAL(setOrphaned.count(nFile), 0U);
+}
+
+// The other half: a file number nothing in the index has ever heard of must
+// come back as orphaned -- FindOrphanedBodyFiles answers empirically
+// (nothing still references it), not by assuming anything about height
+// ranges CBodyFileInfo deliberately does not track (bodystore.h's own
+// "simpler, just nSize" note).
+BOOST_AUTO_TEST_CASE(find_orphaned_body_files_reports_a_genuinely_unreferenced_file) {
+    ChainstateManager &chainman = EnsureChainman(m_node);
+    LOCK(cs_main);
+    std::set<int> setOrphaned = chainman.FindOrphanedBodyFiles({88888});
+    BOOST_CHECK_EQUAL(setOrphaned.count(88888), 1U);
+}
+
+// The mechanical half: given a file FindOrphanedBodyFiles has already
+// cleared, UnlinkPrunedBodyFiles must actually remove its bytes -- proven
+// against a real file on disk, not just the index's own bookkeeping.
+// Written directly via WriteBodyRecord at a synthetic, definitely-unused
+// file number (88889, distinct from the previous test's 88888) rather than
+// through real block acceptance: mapBodyPosByHash/vinfoBodyFile are
+// process-global for this whole test binary, and file 0 is shared by every
+// other test case that assumes TestChain100Setup's own pre-mined bodies
+// stay intact -- actually deleting it here would corrupt them.
+BOOST_AUTO_TEST_CASE(unlink_pruned_body_files_deletes_the_actual_bytes) {
+    FlatFilePos pos(88889, 0);
+    std::vector<CTransactionRef> bodies = {MakeTransactionRef(CMutableTransaction())};
+    BOOST_REQUIRE(WriteBodyRecord(pos, bodies));
+    fs::path bodyFilePath = BodyFileSeq().FileName(pos);
+    BOOST_REQUIRE(fs::exists(bodyFilePath));
+
+    UnlinkPrunedBodyFiles({88889});
+
+    BOOST_CHECK(!fs::exists(bodyFilePath));
+}
+
 // A stored record whose bytes were swapped for a DIFFERENT, equally-valid
 // pair of transactions (same total serialized size, so the file's own
 // framing is untouched) -- the shape a real corruption caused by a bit-flip
@@ -2076,6 +2163,14 @@ BOOST_AUTO_TEST_CASE(body_index_serveability_is_rebuilt_correctly_by_loadblockin
 // bit simulation, matching what CheckBlockIndex/fHavePruned bookkeeping
 // genuinely needs) so this is a genuine regression test, not merely a
 // characterisation of intent.
+//
+// UPDATED (F-234, 2026-09-30): this test's own final assertion used to
+// prove the entry stayed FOUND, merely marked unserveable, on the explicit
+// premise "no body-file pruning exists yet" -- true when F-145 wrote it,
+// false now that PruneOneBlockFile clears the body-record claim entirely
+// (bodies pruned identically to block data, Mike's own framing). Not
+// reverted: this is the exact, deliberate behaviour change F-234 built,
+// caught here because this test still described the superseded contract.
 BOOST_AUTO_TEST_CASE(body_index_serveability_flag_is_cleared_by_a_real_prune) {
     ChainstateManager &chainman = EnsureChainman(m_node);
     const CChainParams &chainparams = Params();
@@ -2102,12 +2197,12 @@ BOOST_AUTO_TEST_CASE(body_index_serveability_flag_is_cleared_by_a_real_prune) {
     }
     BOOST_REQUIRE(!HaveBodies(pindex));
 
-    // The index must now agree with HaveBodies() -- still found (the bytes
-    // are still really there, no body-file pruning exists yet), but no
-    // longer serveable, with no restart required.
+    // The index must now agree with HaveBodies() -- gone entirely (F-234:
+    // pruning clears the body-record claim in the same event as the
+    // classic block data), not merely marked unserveable, with no restart
+    // required.
     fServeableOut = true;
-    BOOST_REQUIRE(LookupBodyPositionByHash(hash, posOut, &fServeableOut));
-    BOOST_CHECK(!fServeableOut);
+    BOOST_CHECK(!LookupBodyPositionByHash(hash, posOut, &fServeableOut));
 }
 
 // F-145 (Fable review of F-144, LOW): ReceivedBlockBodies's own comment

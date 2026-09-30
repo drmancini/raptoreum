@@ -485,6 +485,15 @@ uint64_t CalculateCurrentUsage();
  */
 void UnlinkPrunedFiles(const std::set<int> &setFilesToPrune);
 
+/** The body-store counterpart to UnlinkPrunedFiles -- deletes bdy*.dat for
+ *  file numbers ChainstateManager::FindOrphanedBodyFiles has already
+ *  confirmed nothing in the block index still names, and resets each
+ *  file's own size bookkeeping (bodystore.h's ResetBodyFileInfo). Callers
+ *  must persist that reset (the same WriteBatchSync flush that already
+ *  carries GetDirtyBodyFileInfo, F-132) before calling this, mirroring
+ *  UnlinkPrunedFiles' own ordering relative to the block-index flush. */
+void UnlinkPrunedBodyFiles(const std::set<int> &setBodyFilesToPrune);
+
 /** Prune block files up to a given height */
 void PruneBlockFilesManual(int nManualPruneHeight);
 
@@ -1467,8 +1476,27 @@ public:
 
     LOCKS_EXCLUDED(cs_main);
 
-    //! Mark one block file as pruned (modify associated database entries)
-    void PruneOneBlockFile(const int fileNumber)
+    //! Mark one block file as pruned (modify associated database entries).
+    //! `setBodyFilesTouchedOut`, if given, collects the body-store file
+    //! number of every block pruned this call that had one -- the caller's
+    //! own job to decide, after ALL files in this prune event are done,
+    //! whether any of them are now unreferenced by anything still standing
+    //! (Mike, 2026-09-30: "if node is pruned, bodies should be pruned
+    //! identically to block data" -- FindOrphanedBodyFiles below).
+    void PruneOneBlockFile(const int fileNumber, std::set<int> *setBodyFilesTouchedOut = nullptr)
+
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    //! Of the body-store file numbers touched by a just-completed prune
+    //! event, which are now referenced by NOTHING still standing in the
+    //! block index -- safe to actually delete. A single pass over the
+    //! whole (already in-memory) index, not a per-file rescan: cheap enough
+    //! to run once per prune event (infrequent) without needing any
+    //! per-body-file height-range bookkeeping, unlike CBlockFileInfo's own
+    //! nHeightFirst/nHeightLast -- CBodyFileInfo deliberately carries no
+    //! analogue (bodystore.h's own "simpler, just nSize" note), so this
+    //! answers the question empirically each time instead.
+    std::set<int> FindOrphanedBodyFiles(const std::set<int> &setBodyFilesTouched)
 
     EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
