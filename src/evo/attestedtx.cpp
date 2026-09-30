@@ -36,13 +36,59 @@ static bool IsRestrictedSingleSigScript(const CScript &scriptPubKey) {
  *  own interim choice). */
 static const std::string ATTESTATION_REQUESTID_PREFIX = "atx";
 
-/** id/msgHash are both derived from the transaction's own hash, never
- *  carried on the wire (CAttestationPayload's own doc comment explains
- *  why) -- id additionally mixes in the domain-separation prefix above so
- *  a signature produced for this purpose cannot be replayed as one of a
- *  different kind sharing the same quorum. */
-static uint256 BuildAttestationId(const uint256 &txHash) {
-    return ::SerializeHash(std::make_pair(ATTESTATION_REQUESTID_PREFIX, txHash));
+/** Fable review (2026-09-30), CONFIRMED HIGH, fixed here: the attested
+ *  message cannot be tx.GetHash() itself. CTransaction::Serialize writes
+ *  vExtraPayload unconditionally whenever nType != TRANSACTION_NORMAL
+ *  (primitives/transaction.h) with no SER_GETHASH exclusion at that layer,
+ *  and vExtraPayload IS this type's own CAttestationPayload -- which
+ *  carries the very signature being verified. tx.GetHash() therefore
+ *  depends on payload.sig, and a signer cannot choose a signature whose
+ *  value determines the message it is supposed to be a signature over.
+ *  No valid attestation could ever have been constructed against the
+ *  unfixed version; this is why CProRegTx/CProUpServTx (evo/providertx.h)
+ *  exclude their own signature field under SER_GETHASH -- but that guard
+ *  only matters when the PAYLOAD OBJECT is itself the thing being
+ *  SerializeHash'd. Here the payload is pre-flattened into opaque
+ *  vExtraPayload bytes before the OUTER transaction is hashed, so a guard
+ *  inside CAttestationPayload's own SERIALIZE_METHODS would never be
+ *  consulted -- the fix has to strip vExtraPayload from a COPY of the
+ *  transaction before hashing, at the outer layer, not add a guard the
+ *  outer layer never triggers. */
+uint256 ComputeAttestedMessageHash(const CTransaction &tx) {
+    CMutableTransaction stripped(tx);
+    stripped.vExtraPayload.clear();
+    return ::SerializeHash(CTransaction(stripped));
+}
+
+/** id/msgHash are both derived from the payload-stripped transaction hash
+ *  above, never carried on the wire (CAttestationPayload's own doc
+ *  comment explains why nSignHeight, the one field that IS carried, is
+ *  carried) -- id additionally mixes in the domain-separation prefix
+ *  above so a signature produced for this purpose cannot be replayed as
+ *  one of a different kind sharing the same quorum. */
+static uint256 BuildAttestationId(const uint256 &strippedTxHash) {
+    return ::SerializeHash(std::make_pair(ATTESTATION_REQUESTID_PREFIX, strippedTxHash));
+}
+
+/** Fable review (2026-09-30), CONFIRMED MEDIUM, fixed here: bounding the
+ *  explicitly-carried nSignHeight (CAttestationPayload's own doc comment)
+ *  against the block actually being validated, rather than trusting it
+ *  unconditionally. Deliberately simple for v1, not islock's own
+ *  cycleHash/dkgInterval scheme (quorums_instantsend.cpp) -- a real
+ *  attestation-cycle concept is 5.4.4's own design job, not invented
+ *  here. This only rejects a height that is structurally impossible
+ *  (negative, or after the block being validated) or implausibly stale;
+ *  it does not attempt to reconstruct which quorum rotation was live. */
+static const int32_t MAX_ATTESTATION_SIGN_HEIGHT_AGE = 576; // ~1 day at 2.5 min/block, an interim bound only
+
+static bool IsPlausibleAttestationSignHeight(int32_t nSignHeight, const CBlockIndex *pindexPrev) {
+    if (nSignHeight < 0 || pindexPrev == nullptr) {
+        return false;
+    }
+    if (nSignHeight > pindexPrev->nHeight) {
+        return false;
+    }
+    return pindexPrev->nHeight - nSignHeight <= MAX_ATTESTATION_SIGN_HEIGHT_AGE;
 }
 
 bool CheckAttestedTx(const CTransaction &tx, const CBlockIndex *pindexPrev, CValidationState &state,
@@ -67,34 +113,46 @@ bool CheckAttestedTx(const CTransaction &tx, const CBlockIndex *pindexPrev, CVal
         return state.DoS(100, false, REJECT_INVALID, "bad-attested-tx-no-inputs");
     }
 
+    // Fable review (2026-09-30), CONFIRMED MEDIUM, fixed: this loop's own
+    // Coin lookup is NOT redundant with Consensus::CheckTxInputs the way
+    // the comment below used to claim -- ATMP passes CoinsTip() to
+    // CheckSpecialTx (validation.cpp), deliberately mempool-blind,
+    // while CheckTxInputs itself ran against the mempool-backed view; in
+    // ConnectBlock, ProcessSpecialTxsInBlock runs BEFORE the per-tx loop's
+    // own CheckTxInputs/UpdateCoins, not after. Spending an unconfirmed
+    // parent -- an attested transaction chained off another one still in
+    // the mempool -- genuinely reaches this branch; it is not a "something
+    // else already broke" signal. Treated as a real, if narrow, consensus
+    // restriction (attested inputs must already be confirmed) rather than
+    // an impossible case, matching this file's own single-signature
+    // restriction in kind: a deliberate v1 narrowing, named as one.
     for (const CTxIn &txin: tx.vin) {
         const Coin &coin = view.AccessCoin(txin.prevout);
         if (coin.IsSpent()) {
-            // Consensus::CheckTxInputs (validation.cpp, called before
-            // CheckSpecialTx's own dispatch in both ATMP and ConnectBlock)
-            // already refuses a transaction whose inputs are missing or
-            // spent, for every nType -- reaching this branch would mean
-            // that guarantee no longer holds, not that this function found
-            // a new problem. Fails closed rather than reading a spent/
-            // null Coin's own default-constructed fields as if they were
-            // real.
-            return state.DoS(100, false, REJECT_INVALID, "bad-attested-tx-missing-input");
+            return state.DoS(10, false, REJECT_INVALID, "bad-attested-tx-unconfirmed-input", false,
+                             "TRANSACTION_ATTESTED inputs must already be confirmed (5.4.1)");
         }
         if (!IsRestrictedSingleSigScript(coin.out.scriptPubKey)) {
-            return state.DoS(10, false, REJECT_NONSTANDARD, "bad-attested-tx-nonstandard-input", false,
+            // Fable review (2026-09-30), LOW, fixed: this rule is enforced
+            // inside ConnectBlock (consensus), not mempool policy --
+            // REJECT_NONSTANDARD is policy vocabulary (BIP61 messages, log
+            // triage) and misleading here.
+            return state.DoS(10, false, REJECT_INVALID, "bad-attested-tx-nonstandard-input", false,
                              "TRANSACTION_ATTESTED is restricted to single-signature inputs (5.4.1)");
         }
     }
 
-    if (!check_sigs) {
-        // Matches every sibling CheckXxxTx function's own convention
-        // (CheckProRegTx et al.): callers that have already verified
-        // signatures elsewhere (or deliberately do not need to, e.g. a
-        // -reindex replay of already-connected history) may skip doing it
-        // again here.
-        return true;
-    }
-
+    // Fable review (2026-09-30), CONFIRMED MEDIUM, fixed: payload presence
+    // and version are structural rules, not signature verification --
+    // every sibling CheckXxxTx function (CheckProRegTx et al.) parses and
+    // validates its own payload unconditionally and gates ONLY the
+    // signature check on check_sigs. The previous version of this function
+    // returned true here before ever calling GetTxPayload, so a
+    // completely payload-less attested transaction could pass under
+    // assumevalid/RollforwardBlock's check_sigs=false while a fully-
+    // validating node would reject it -- moved below the structural
+    // checks to match the real sibling convention this file's own
+    // comment already claimed to follow.
     CAttestationPayload payload;
     if (!GetTxPayload(tx, payload)) {
         return state.DoS(100, false, REJECT_INVALID, "bad-attested-tx-payload");
@@ -102,17 +160,29 @@ bool CheckAttestedTx(const CTransaction &tx, const CBlockIndex *pindexPrev, CVal
     if (payload.nVersion == 0 || payload.nVersion > CAttestationPayload::CURRENT_VERSION) {
         return state.DoS(100, false, REJECT_INVALID, "bad-attested-tx-payload-version");
     }
+    if (!IsPlausibleAttestationSignHeight(payload.nSignHeight, pindexPrev)) {
+        return state.DoS(10, false, REJECT_INVALID, "bad-attested-tx-payload-height");
+    }
 
-    const uint256 txHash = tx.GetHash();
-    const uint256 id = BuildAttestationId(txHash);
-    const int signedAtHeight = pindexPrev ? pindexPrev->nHeight : 0;
+    if (!check_sigs) {
+        // Matches every sibling CheckXxxTx function's own convention
+        // (CheckProRegTx et al.): callers that have already verified
+        // signatures elsewhere (or deliberately do not need to, e.g. a
+        // -reindex replay of already-connected history) may skip doing it
+        // again here -- now correctly only skipping the signature check
+        // itself, not the structural payload checks above.
+        return true;
+    }
+
+    const uint256 msgHash = ComputeAttestedMessageHash(tx);
+    const uint256 id = BuildAttestationId(msgHash);
     // v1's own interim choice (this file's own header doc comment):
     // ChainLocks' existing, already-live llmqType, not a new one stood up
     // for this purpose -- confirmed a real ::Consensus field by direct
     // read of chainparams.cpp before relying on it, matching every other
     // call site that already trusts it (quorums_chainlocks.cpp).
     const Consensus::LLMQType llmqType = Params().GetConsensus().llmqTypeChainLocks;
-    if (!llmq::CSigningManager::VerifyRecoveredSig(llmqType, signedAtHeight, id, txHash, payload.sig)) {
+    if (!llmq::CSigningManager::VerifyRecoveredSig(llmqType, payload.nSignHeight, id, msgHash, payload.sig)) {
         return state.DoS(100, false, REJECT_INVALID, "bad-attested-tx-attestation");
     }
 
