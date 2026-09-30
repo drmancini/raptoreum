@@ -668,6 +668,41 @@ BodyRecordVerification VerifyBodyRecordAtRest(const CBlockIndex *pindex, const C
  *  verifybodystore RPC (rpc/net.cpp), so the two never drift apart. */
 std::string BodyRecordVerificationToString(BodyRecordVerification result);
 
+/** Mike, 2026-09-30 ("have we tested... a node tries to share bad body
+ *  data?"): VerifyBodyRecordAtRest and the verifybodystore RPC above are
+ *  both operator-triggered diagnostics -- nothing ran either one
+ *  automatically before this, so a node whose local storage silently
+ *  corrupted (bit rot, a bad sector) kept serving the wrong bytes to every
+ *  GETBODYRANGE peer that asked, each of which correctly Misbehaving()-banned
+ *  it under ValidateBodyRangeChunkHashes' own hash check -- an innocent
+ *  victim of its own hardware, punished network-wide, with no way to notice
+ *  short of an operator manually running verifybodystore.
+ *
+ *  Deliberately NOT "repair" -- VerifyBodyRecordAtRest's own doc comment
+ *  above explains why this project fails closed on corruption rather than
+ *  attempting any live fix, and why clearing BLOCK_HAVE_BODIES on a
+ *  connected block has no precedent and real risk (every HaveBodies()
+ *  reader assumes that bit, once true, stays true). This does not touch it.
+ *  It touches a narrower, already-live-mutable flag with exactly one reader:
+ *  RecordBodyPositionByHash's own `fServeable` (bodystore.h) already flips
+ *  false->true live when a withheld block's body arrives later -- its own
+ *  doc comment says so -- and its only consumer is
+ *  LookupServeableBodyPositionByHash, called from nowhere but the
+ *  GETBODYRANGE serving path (ValidateGetBodyRange, bodyrange.cpp).
+ *  Flipping it true->false changes what this one node offers to peers and
+ *  nothing else -- not BLOCK_HAVE_BODIES, not ConnectTip, not any other
+ *  HaveBodies() reader. */
+void ScrubBodyRecordAtRestOnce(const CBlockIndex *pindex, const Consensus::Params &consensusParams);
+
+/** Scheduled maintenance (-servebodyrange only -- the exact risk this
+ *  closes never arises for a node that serves nobody): walks a bounded
+ *  batch of blocks per call via a rotating height cursor, so the whole
+ *  chain is swept over many calls rather than in one expensive pass, and
+ *  calls ScrubBodyRecordAtRestOnce on each. This is C3's own fix note
+ *  (transaction-decoupling.md 14.4, "self-verification of the store at
+ *  rest") -- the check it names already existed; nothing ran it. */
+void ScrubBodyStoreAtRest();
+
 bool UndoReadFromDisk(CBlockUndo &blockundo, const CBlockIndex *pindex);
 
 /** Functions for validating blocks and updating the block tree */
