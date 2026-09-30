@@ -377,6 +377,24 @@ public:
 
     uint32_t ComputeBlockVersion(const CBlockIndex *blockIndex);
 
+    // Computes the version a block being newly constructed on top of
+    // pindexPrev (at height nHeight == pindexPrev->nHeight + 1, which does
+    // not exist as a real CBlockIndex yet) should advertise. Deliberately
+    // does NOT take a CBlockIndex for the not-yet-existing block: State()
+    // and the per-update GetVote() caches key their results by CBlockIndex*
+    // for the lifetime of this UpdateManager, and a synthetic/stack
+    // CBlockIndex's address would eventually be reused by an unrelated,
+    // real CBlockIndex once its stack frame is gone -- silently aliasing a
+    // stale cached result onto the wrong block. This queries State() only
+    // on the real, persistent pindexPrev (cache-safe, same as every other
+    // caller) and corrects for the one known reference-point mismatch this
+    // causes: a proposal that is LockedIn as of pindexPrev flips to Active
+    // exactly at its own FinalHeight (see State()'s own LockedIn case), so
+    // if the block actually being built lands at or past that height, it
+    // must not advertise a bit the block's own real height will no longer
+    // expect.
+    uint32_t ComputeNextBlockVersion(const CBlockIndex *pindexPrev, int64_t nHeight);
+
 private :
     typedef std::unordered_map <EUpdate, Update> UpdateMap;
     typedef std::unordered_map <EUpdate, StateInfo> FinalStateMap; // Caches final states and heights of all completed proposals
