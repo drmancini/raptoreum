@@ -268,7 +268,7 @@ uint256 CAttestationBatchHandler::TrySignBatch() {
 }
 
 bool CAttestationBatchHandler::GetAttestation(const uint256 &msgHash, CBLSSignature &retSig, int32_t &retSignHeight,
-                                              CPartialMerkleTree &retProof) const {
+                                              CAttestationBatchProof &retProof) const {
     LOCK(cs);
     for (const auto &entry: recoveredBatches) {
         const RecoveredBatch &batch = entry.second;
