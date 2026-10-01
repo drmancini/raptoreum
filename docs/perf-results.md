@@ -2995,3 +2995,82 @@ to body size, so any figure quoted for it has to say which body size it assumes.
 `MaterialiseBlock` returns a **fresh** `CBlock`, so `fChecked` is false by construction, and a test
 asserts that even when handed an object with the flag already set — F-45 addressed in the format
 rather than left to callers.
+
+## 2026-10-01 — Admission-only, finally measured (F-238's own "built to be measured, not yet
+measured")
+
+§17 priced `skipsigs`/`parallel` in September. 5.3/F-238 built a third arm, `admission-only`, two
+weeks later — the real production shortcut (`g_perf_admission_only_atmp`), gated on a real
+InstantSend lock rather than unconditional. It was never run: F-216's own live-quorum limitation
+means no real islock can be produced in this environment, so a second flag,
+`g_perf_force_islocked_atmp` (F-250), substitutes the islock precondition's own answer -- proved
+honest the identical way every arm in this file already is (§17's own trap-transaction technique,
+`test/perf/badsig.py`): a well-formed but wrong signature is **accepted** while the flag is on,
+**rejected** while it is off, on every run below.
+
+Two corpora this time, not one: `corpus v2` (2-in/2-out, the same shape §17 used) and a new,
+genuinely wider `corpus w3` (3-in/3-out) -- F-238's own point 6 asked for the heavier shape
+specifically, not just the toy one. `test/perf/build_corpus.py` gained a `--width` argument for
+this (backward compatible: unset, it is exactly the old 2-in/2-out behaviour). Neither corpus's
+own chain state survived from September -- a fresh fan-out, fresh snapshot, same methodology.
+
+| arm | corpus | median | p90 | peak |
+|---|---|---|---|---|
+| stock | 2-in/2-out | 4,098 tx/s | 7,409 | 7,572 |
+| **admission-only** | 2-in/2-out | **22,027 tx/s** | 25,945 | 26,768 |
+| stock | 3-in/3-out | 2,499 tx/s | 5,096 | 5,228 |
+| **admission-only** | 3-in/3-out | **19,089 tx/s** | 23,513 | 25,889 |
+
+Stock's own 2-in/2-out number (4,098) is the same order of magnitude as September's 5,269 on
+different hardware months apart -- close enough that this is the same measurement, not a different
+one. `admission-only` beats even September's `skipsigs` ceiling (15,842) on both corpus shapes,
+which is the right direction: `skipsigs` only short-circuits `VerifySignature` inside script
+execution, while `admission-only` skips `CheckInputs` entirely, script interpretation included.
+
+**A ~90x false floor, found and fixed before trusting a single number from it.** The first runs
+measured 58-60 tx/s regardless of arm or corpus -- a result that would have said admission-only is
+worthless. Three real bugs stacked before the true numbers above were reachable: (1) a path bug in
+this round's own driver script (`generate.py`'s `--corpus` wants the directory, not `txs.bin`
+directly -- confirmed by reading its own `load()`, not guessed); (2) a contaminated snapshot --
+`mempool.dat` from an earlier crashed run had baked itself into what was assumed to be the pristine
+pre-flood snapshot, so every "restore" was quietly loading ~7,800 stale entries
+(`-persistmempool=0` added so this class of bug cannot recur); (3) the actual dominant cost:
+**`reference-regtest-checks-mempool-every-tx.md`'s own documented issue**, hit again --
+`checkmempool` is on by default on regtest (`fDefaultConsistencyChecks`), so `CTxMemPool::check()`
+re-validates the *entire* mempool
+after every accepted transaction, same mechanism and nearly the same magnitude (that memory's own
+case: 91 tx/s apparent versus 5,600 real, a 60x gap) as measured here. `perf`/`gdb`/`strace` are
+all blocked by this sandbox's ptrace restrictions, so the third bug was found by adding a single
+temporary `LogPrintf` timing line to `AcceptToMemoryPoolWorker` itself (confirmed each call
+completed in 0ms -- proving the cost was not inside the function being measured at all, which is
+what pointed at the caller's own `mempool.check()` instead) rather than a profiler. All three fixes
+are now permanent parts of `run_arm.sh`'s own node invocation, not one-off workarounds.
+
+### What this says about 5.2's own batching economics
+
+build-plan.md's own 5.2 row (and §17.4 of transaction-decoupling.md): verifying one InstantSend
+lock costs **at least 1.15 ms of BLS** (F-22, not re-measured in this round) against "roughly 118
+µs of ECDSA saved on a two-input transaction" -- break-even 10-20 transactions per signature. That
+118 µs figure was always a theoretical per-signature estimate, never a measurement of the actual
+shortcut's own real per-transaction saving. This round's own numbers give the real one directly:
+
+- 2-in/2-out: stock 4,098 tx/s (244 µs/tx) vs admission-only 22,027 tx/s (45 µs/tx) -- **~199 µs/tx saved**
+- 3-in/3-out: stock 2,499 tx/s (400 µs/tx) vs admission-only 19,089 tx/s (52 µs/tx) -- **~348 µs/tx saved**
+
+Both real savings are larger than the 118 µs estimate they were meant to justify -- `admission-only`
+skips the whole `CheckInputs` call, not just the signature math `skipsigs` isolates, so this is the
+expected direction, not a surprise. Using these real numbers in place of the estimate moves
+break-even to roughly **5.8 transactions per signature** (2-in/2-out) or **3.3** (3-in/3-out) against
+the same 1.15 ms BLS cost -- lower than the "10-20" figure build-plan.md's own row currently cites.
+This is a derived recompute, not an independent remeasurement of the BLS side -- F-22's own 1.15 ms
+figure is cited as-is, unverified in this round.
+
+### Still open
+
+- `ConnectBlock`'s own cold cost for a block full of never-pre-verified transactions, at either
+  corpus shape, was not measured this round -- deliberately out of scope here, matching F-238's own
+  point 6 (§17's closing section already names the qualitative shape of this cost; this round adds
+  the acceptance-side number only).
+- The two corpora's own fan-out/chain state do not persist between sessions (regenerated this
+  round, not reused from September) -- a future measurement needing exact reproducibility should
+  say so and regenerate, not assume a stale snapshot is still valid.

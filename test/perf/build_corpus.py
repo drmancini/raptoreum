@@ -26,12 +26,12 @@ import wire  # noqa: E402
 
 
 def sign_one(spec):
-    """spec: ((txid_int, vout, value, pubkey, secret) x2, out_value)"""
-    (a, b), out_value = spec
-    inputs = [(a[0], a[1], a[2], a[3]), (b[0], b[1], b[2], b[3])]
-    outputs = [(a[3], out_value), (b[3], out_value)]
+    """spec: ((txid_int, vout, value, pubkey, secret) x width, out_value)"""
+    group, out_value = spec
+    inputs = [(u[0], u[1], u[2], u[3]) for u in group]
+    outputs = [(u[3], out_value) for u in group]
     tx = wire.build_tx(inputs, outputs)
-    keys = [coincurve.PrivateKey(a[4]), coincurve.PrivateKey(b[4])]
+    keys = [coincurve.PrivateKey(u[4]) for u in group]
     wire.sign_tx(tx, inputs, lambda i, msg32: keys[i].sign(msg32, hasher=None))
     return tx.hash, wire.tx_message(tx)
 
@@ -48,28 +48,29 @@ def lineage_fee(seed, lineage, lo, hi):
     return int(lo + (hi - lo) * (u ** 3))
 
 
-def generation(pool, utxos, fee, chunk, fee_range=None, fee_seed=b""):
-    """Pair the utxos up, sign, and return (results, next_utxos)."""
+def generation(pool, utxos, fee, chunk, width=2, fee_range=None, fee_seed=b""):
+    """Group the utxos width-at-a-time, sign, and return (results, next_utxos)."""
     specs = []
-    for i in range(0, len(utxos) - 1, 2):
-        a, b = utxos[i], utxos[i + 1]
-        f = fee if fee_range is None else lineage_fee(fee_seed, i // 2, *fee_range)
-        # keep both outputs comfortably above dust however large the fee is
-        f = min(f, max(0, a[2] + b[2] - 4000))
-        out_value = (a[2] + b[2] - f) // 2
+    for i in range(0, len(utxos) - width + 1, width):
+        group = utxos[i:i + width]
+        total_in = sum(u[2] for u in group)
+        f = fee if fee_range is None else lineage_fee(fee_seed, i // width, *fee_range)
+        # keep every output comfortably above dust however large the fee is
+        f = min(f, max(0, total_in - 2000 * width))
+        out_value = (total_in - f) // width
         if out_value <= 0:
             break
-        specs.append(((a, b), out_value))
+        specs.append((group, out_value))
     if pool is None:
         results = [sign_one(s) for s in specs]
     else:
         results = pool.map(sign_one, specs, chunksize=chunk)
 
     nxt = []
-    for (txid_hex, _msg), ((a, b), out_value) in zip(results, specs):
+    for (txid_hex, _msg), (group, out_value) in zip(results, specs):
         txid = int(txid_hex, 16)
-        nxt.append((txid, 0, out_value, a[3], a[4]))
-        nxt.append((txid, 1, out_value, b[3], b[4]))
+        for vout, u in enumerate(group):
+            nxt.append((txid, vout, out_value, u[3], u[4]))
     return results, nxt
 
 
@@ -77,6 +78,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--corpus", required=True)
     ap.add_argument("--count", type=int, default=250000)
+    ap.add_argument("--width", type=int, default=2, help="inputs (and outputs) per transaction")
     ap.add_argument("--depth", type=int, default=5)
     ap.add_argument("--fee", type=int, default=10000)
     ap.add_argument("--fee-min", type=int, default=0, help="if set, draw a per-lineage fee in [fee-min, fee-max]")
@@ -103,7 +105,7 @@ def main():
             if written >= a.count:
                 break
             fee_range = (a.fee_min, a.fee_max) if a.fee_max > a.fee_min else None
-            results, utxos = generation(pool, utxos, a.fee, a.chunk,
+            results, utxos = generation(pool, utxos, a.fee, a.chunk, a.width,
                                         fee_range, a.fee_seed.encode())
             if not results:
                 print("generation %d produced nothing; values exhausted" % gen)
@@ -124,7 +126,7 @@ def main():
         pool.join()
 
     elapsed = time.time() - t0
-    manifest = dict(count=written, depth=a.depth, fee=a.fee,
+    manifest = dict(count=written, width=a.width, depth=a.depth, fee=a.fee,
                     fee_min=a.fee_min, fee_max=a.fee_max, fee_seed=a.fee_seed,
                     payload_min=min(sizes), payload_max=max(sizes),
                     payload_mean=round(sum(sizes) / len(sizes), 1),
