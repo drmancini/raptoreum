@@ -65,14 +65,45 @@ namespace {
         return tx;
     }
 
-    // A well-formed-but-unverifiable payload (default CBLSSignature is
+    // A well-formed-but-unverifiable v1 payload (default CBLSSignature is
     // invalid and safely fails VerifyInsecure, bls/bls.cpp -- confirmed
     // during the Fable review, not assumed) at a given height, for tests
     // that need to get past the structural/height checks without a live
-    // quorum actually signing anything.
+    // quorum actually signing anything. nVersion pinned explicitly, not
+    // left to the default: CAttestationPayload's own default (1) happens
+    // to be v1 today, but this helper's callers all care specifically
+    // about the v1 (direct-signature) path, so relying on the default
+    // would silently start testing v2 instead the next time that default
+    // ever changes (exactly the regression 5.4.4.1's own CURRENT_VERSION
+    // bump caused here before being caught and fixed).
     void AttachPlausiblePayload(CMutableTransaction &tx, int32_t signHeight) {
         CAttestationPayload payload;
+        payload.nVersion = 1;
         payload.nSignHeight = signHeight;
+        SetTxPayload(tx, payload);
+    }
+
+    // 5.4.4.1 (build-plan.md, F-243): a well-formed v2 (batched) payload --
+    // a real CPartialMerkleTree proof that this tx's own
+    // ComputeAttestedMessageHash is included in a batch alongside
+    // `otherLeafCount` other, unrelated transactions. Whether the batch's
+    // root has a recovered signature anywhere is NOT this helper's
+    // concern -- it only builds a structurally correct proof, matching
+    // AttachPlausiblePayload's own scope for v1.
+    void AttachPlausibleBatchPayload(CMutableTransaction &tx, int32_t signHeight, size_t otherLeafCount = 2) {
+        const uint256 myHash = ComputeAttestedMessageHash(CTransaction(tx));
+        std::vector <uint256> leaves;
+        std::vector<bool> match;
+        leaves.push_back(myHash);
+        match.push_back(true);
+        for (size_t i = 0; i < otherLeafCount; i++) {
+            leaves.push_back(InsecureRand256());
+            match.push_back(false);
+        }
+        CAttestationPayload payload;
+        payload.nVersion = 2;
+        payload.nSignHeight = signHeight;
+        payload.batchProof = CPartialMerkleTree(leaves, match);
         SetTxPayload(tx, payload);
     }
 }
@@ -284,14 +315,21 @@ BOOST_FIXTURE_TEST_CASE(attested_tx_message_hash_is_independent_of_the_signature
     CBLSSecretKey sk;
     sk.MakeNewKey();
 
+    // nVersion pinned explicitly (5.4.4.1): this test's own payload.sig
+    // field is only ever serialized under v1 -- relying on the default
+    // caused exactly this test to silently start exercising v2 instead the
+    // one time CAttestationPayload's own default briefly tracked
+    // CURRENT_VERSION (mutation-tested, not hypothetical).
     CMutableTransaction txA = MakeAttestedSpend(COutPoint(InsecureRand256(), 0));
     CAttestationPayload payloadA;
+    payloadA.nVersion = 1;
     payloadA.nSignHeight = 50;
     payloadA.sig = sk.Sign(InsecureRand256());
     SetTxPayload(txA, payloadA);
 
     CMutableTransaction txB = txA;
     CAttestationPayload payloadB;
+    payloadB.nVersion = 1;
     payloadB.nSignHeight = 50;
     payloadB.sig = sk.Sign(InsecureRand256());
     BOOST_REQUIRE(payloadB.sig != payloadA.sig);
@@ -348,6 +386,158 @@ BOOST_FIXTURE_TEST_CASE(attested_tx_rejects_a_missing_payload_even_when_check_si
     CValidationState state;
     BOOST_CHECK(!CheckAttestedTx(CTransaction(tx), ::ChainActive().Tip(), state, view, false));
     BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-attested-tx-payload");
+}
+
+// 5.4.4.1 (build-plan.md, F-243/F-244): the v2 (batched) payload's own
+// tests. Fable review (2026-10-01), CONFIRMED CRITICAL: v2 originally
+// carried no signature at all, looking one up in quorumSigningManager's
+// own store instead -- fixed to carry the batch's own signature directly
+// and verify via VerifyRecoveredSig exactly like v1 (CAttestationPayload's
+// own `sig` doc comment, evo/attestedtx.h, has the full finding). This
+// means every structural-rejection test below now needs TestingSetup, not
+// BasicTestingSetup: a mutation that weakens an earlier check no longer
+// falls through into a store lookup (which could null-pointer-crash
+// under BasicTestingSetup, a real finding from this same review) but into
+// the SAME VerifyRecoveredSig call v1 uses, which needs ChainstateActive()
+// -- confirmed, not assumed, by F-241's own mutant 2 hitting exactly this
+// once already. None of these need a live quorum except the last, same as
+// v1 -- a well-formed, correctly-matching proof whose batch signature
+// does not verify is fully testable; the "genuinely signed by a real
+// quorum" branch is the SAME kind of irreducible gap v1's own
+// VerifyRecoveredSig call always had (F-216).
+
+BOOST_FIXTURE_TEST_CASE(attested_tx_rejects_a_v2_payload_with_a_malformed_proof, TestingSetup) {
+    CCoinsView coinsDummy;
+    CCoinsViewCache view(&coinsDummy);
+    COutPoint prevout(InsecureRand256(), 0);
+    view.AddCoin(prevout, Coin(CTxOut(2, P2PKScript(NewPubKey())), 100, false, 0, {}), true);
+
+    const CBlockIndex *pindexPrev = ::ChainActive().Tip();
+    BOOST_REQUIRE(pindexPrev != nullptr);
+    CMutableTransaction tx = MakeAttestedSpend(prevout);
+    CAttestationPayload payload;
+    payload.nVersion = 2;
+    payload.nSignHeight = pindexPrev->nHeight;
+    // batchProof left default-constructed -- zero transactions, no hashes,
+    // no match bits. ExtractMatches (merkleblock.h) returns a null root for
+    // this shape (confirmed by reading its own implementation, not assumed).
+    SetTxPayload(tx, payload);
+
+    CValidationState state;
+    BOOST_CHECK(!CheckAttestedTx(CTransaction(tx), pindexPrev, state, view, true));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-attested-tx-batch-proof");
+}
+
+BOOST_FIXTURE_TEST_CASE(attested_tx_rejects_a_v2_payload_matching_zero_leaves, TestingSetup) {
+    // Fable review (2026-10-01), CONFIRMED MEDIUM: this file's own first
+    // attempt at proving ExtractAttestedBatchRoot's `matchedHashes.size()
+    // != 1` check is load-bearing mutation-tested the WRONG scenario (two
+    // matches, not zero) -- this is the genuine one: a well-formed proof
+    // that matches NOTHING. Without the size check, `matchedHashes[0]`
+    // would be an out-of-bounds read on an empty vector.
+    CCoinsView coinsDummy;
+    CCoinsViewCache view(&coinsDummy);
+    COutPoint prevout(InsecureRand256(), 0);
+    view.AddCoin(prevout, Coin(CTxOut(2, P2PKScript(NewPubKey())), 100, false, 0, {}), true);
+
+    const CBlockIndex *pindexPrev = ::ChainActive().Tip();
+    BOOST_REQUIRE(pindexPrev != nullptr);
+    CMutableTransaction tx = MakeAttestedSpend(prevout);
+    std::vector <uint256> leaves = {InsecureRand256(), InsecureRand256(), InsecureRand256()};
+    std::vector<bool> match = {false, false, false};
+    CAttestationPayload payload;
+    payload.nVersion = 2;
+    payload.nSignHeight = pindexPrev->nHeight;
+    payload.batchProof = CPartialMerkleTree(leaves, match);
+    SetTxPayload(tx, payload);
+
+    CValidationState state;
+    BOOST_CHECK(!CheckAttestedTx(CTransaction(tx), pindexPrev, state, view, true));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-attested-tx-batch-proof");
+}
+
+BOOST_FIXTURE_TEST_CASE(attested_tx_rejects_a_v2_payload_whose_proof_is_for_a_different_transaction, TestingSetup) {
+    CCoinsView coinsDummy;
+    CCoinsViewCache view(&coinsDummy);
+    COutPoint prevout(InsecureRand256(), 0);
+    view.AddCoin(prevout, Coin(CTxOut(2, P2PKScript(NewPubKey())), 100, false, 0, {}), true);
+
+    const CBlockIndex *pindexPrev = ::ChainActive().Tip();
+    BOOST_REQUIRE(pindexPrev != nullptr);
+    CMutableTransaction tx = MakeAttestedSpend(prevout);
+    // A real, well-formed 3-leaf proof -- but matching a leaf that is NOT
+    // this transaction's own ComputeAttestedMessageHash, e.g. a proof
+    // copied from a different transaction's own payload.
+    std::vector <uint256> leaves = {InsecureRand256(), InsecureRand256(), InsecureRand256()};
+    std::vector<bool> match = {false, true, false};
+    CAttestationPayload payload;
+    payload.nVersion = 2;
+    payload.nSignHeight = pindexPrev->nHeight;
+    payload.batchProof = CPartialMerkleTree(leaves, match);
+    SetTxPayload(tx, payload);
+
+    CValidationState state;
+    BOOST_CHECK(!CheckAttestedTx(CTransaction(tx), pindexPrev, state, view, true));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-attested-tx-batch-proof");
+}
+
+BOOST_FIXTURE_TEST_CASE(attested_tx_rejects_a_v2_payload_matching_more_than_one_leaf, TestingSetup) {
+    CCoinsView coinsDummy;
+    CCoinsViewCache view(&coinsDummy);
+    COutPoint prevout(InsecureRand256(), 0);
+    view.AddCoin(prevout, Coin(CTxOut(2, P2PKScript(NewPubKey())), 100, false, 0, {}), true);
+
+    const CBlockIndex *pindexPrev = ::ChainActive().Tip();
+    BOOST_REQUIRE(pindexPrev != nullptr);
+    CMutableTransaction tx = MakeAttestedSpend(prevout);
+    const uint256 myHash = ComputeAttestedMessageHash(CTransaction(tx));
+    // This tx's own hash included TWICE -- an attested transaction's own
+    // payload must prove only itself, never a set of leaves.
+    std::vector <uint256> leaves = {myHash, InsecureRand256(), myHash};
+    std::vector<bool> match = {true, false, true};
+    CAttestationPayload payload;
+    payload.nVersion = 2;
+    payload.nSignHeight = pindexPrev->nHeight;
+    payload.batchProof = CPartialMerkleTree(leaves, match);
+    SetTxPayload(tx, payload);
+
+    CValidationState state;
+    BOOST_CHECK(!CheckAttestedTx(CTransaction(tx), pindexPrev, state, view, true));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-attested-tx-batch-proof");
+}
+
+BOOST_FIXTURE_TEST_CASE(attested_tx_rejects_a_v2_payload_whose_signature_does_not_verify, TestChain100Setup) {
+    // TestChain100Setup, not TestingSetup: v2 now reaches the SAME
+    // VerifyRecoveredSig->SelectQuorumForSigning call v1's own no-live-
+    // quorum test does, which needs signHeight - SIGN_HEIGHT_OFFSET (8,
+    // llmq/quorums_signing.h) >= 0 to reach the real quorum scan rather
+    // than an early-return guard -- confirmed by this test's own runtime
+    // (matching v1's own ~4.6s, not v1's sibling structural tests' ~10ms).
+    CCoinsView coinsDummy;
+    CCoinsViewCache view(&coinsDummy);
+    COutPoint prevout(InsecureRand256(), 0);
+    view.AddCoin(prevout, Coin(CTxOut(2, P2PKScript(NewPubKey())), 100, false, 0, {}), true);
+
+    const CBlockIndex *pindexPrev = ::ChainActive().Tip();
+    BOOST_REQUIRE(pindexPrev != nullptr);
+    BOOST_REQUIRE(pindexPrev->nHeight >= 8);
+    CMutableTransaction tx = MakeAttestedSpend(prevout);
+    AttachPlausibleBatchPayload(tx, pindexPrev->nHeight);
+
+    CValidationState state;
+    BOOST_CHECK(!CheckAttestedTx(CTransaction(tx), pindexPrev, state, view, true));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-attested-tx-batch-attestation");
+}
+
+BOOST_AUTO_TEST_CASE(attested_tx_payload_default_version_is_one_not_current_version) {
+    // Fable review (2026-10-01), LOW: hardening every OTHER test to pin
+    // nVersion explicitly (the 5.4.4.1 CURRENT_VERSION-bump regression,
+    // this file's own earlier fix) removed the only canary that would
+    // catch a future "tidy-up" reverting the deliberate {1} default
+    // (evo/attestedtx.h's own comment there explains why) back to
+    // {CURRENT_VERSION} -- every sibling payload type uses CURRENT_VERSION
+    // as both, making that an easy, plausible slip.
+    BOOST_CHECK_EQUAL(CAttestationPayload().nVersion, 1);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
