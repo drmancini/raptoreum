@@ -6,8 +6,8 @@
 #define BITCOIN_LLMQ_QUORUMS_ATTESTATIONBATCH_H
 
 #include <bls/bls.h>
+#include <evo/attestationbatch.h>
 #include <llmq/quorums_signing.h>
-#include <merkleblock.h>
 #include <sync.h>
 #include <uint256.h>
 
@@ -67,13 +67,12 @@ namespace llmq {
  *  transport itself, and the init.cpp/net_processing.cpp wiring to start
  *  this handler on a real node at all, are this row's own next sub-step.
  *
- *  Also still open (build-plan.md's own 5.4.4.1-OPEN row, F-244): the
- *  CPartialMerkleTree padding-bit malleability BuildAttestationBatchProof
- *  (evo/attestationbatch.h) inherits for free from CPartialMerkleTree
- *  itself is NOT fully closed by anything in this file -- that gap, if it
- *  is ever closed, belongs in CheckAttestedTx's own canonical-re-encoding
- *  check (attestedtx.cpp), not here, but a reader of THIS file's own
- *  proof-construction path should not assume it already is closed. */
+ *  5.4.4.1-OPEN row's own item (b), F-244's txid-malleability MEDIUM, is
+ *  now closed (F-247): BuildAttestationBatchProof/GetAttestation below
+ *  carry a CAttestationBatchProof (evo/attestationbatch.h), not a
+ *  CPartialMerkleTree -- the new type has no padding bits, flag bytes, or
+ *  any other encoding freedom left for a re-encoding to exploit, by
+ *  construction, not by an added check. */
 /** Pure phase-alignment math for Start()'s own first scheduled tick
  *  (HIGH-2, Fable review 2026-10-01) -- exposed, and kept free of
  *  CAttestationBatchHandler entirely, so it can be tested directly
@@ -200,7 +199,7 @@ public:
      *  class's own guards correctly rejected, proving the "not found"
      *  branch instead. */
     bool GetAttestation(const uint256 &msgHash, CBLSSignature &retSig, int32_t &retSignHeight,
-                        CPartialMerkleTree &retProof) const;
+                        CAttestationBatchProof &retProof) const;
 
     /** Fable review (2026-10-01), CONFIRMED HIGH, fixed: accepting ANY
      *  well-formed recovered signature that matched this node's own

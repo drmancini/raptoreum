@@ -33,6 +33,8 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
+
 BOOST_AUTO_TEST_SUITE(attestedtx_tests)
 
 namespace {
@@ -83,27 +85,26 @@ namespace {
         SetTxPayload(tx, payload);
     }
 
-    // 5.4.4.1 (build-plan.md, F-243): a well-formed v2 (batched) payload --
-    // a real CPartialMerkleTree proof that this tx's own
-    // ComputeAttestedMessageHash is included in a batch alongside
-    // `otherLeafCount` other, unrelated transactions. Whether the batch's
-    // root has a recovered signature anywhere is NOT this helper's
-    // concern -- it only builds a structurally correct proof, matching
-    // AttachPlausiblePayload's own scope for v1.
+    // 5.4.4.1 (build-plan.md, F-243/F-247): a well-formed v2 (batched)
+    // payload -- a real CAttestationBatchProof (evo/attestationbatch.h)
+    // proving this tx's own ComputeAttestedMessageHash is included in a
+    // batch alongside `otherLeafCount` other, unrelated transactions,
+    // built via the SAME BuildAttestationBatchProof production code uses
+    // (CAttestationBatchHandler::GetAttestation), not hand-rolled.
+    // Whether the batch's root has a recovered signature anywhere is NOT
+    // this helper's concern -- it only builds a structurally correct
+    // proof, matching AttachPlausiblePayload's own scope for v1.
     void AttachPlausibleBatchPayload(CMutableTransaction &tx, int32_t signHeight, size_t otherLeafCount = 2) {
         const uint256 myHash = ComputeAttestedMessageHash(CTransaction(tx));
-        std::vector <uint256> leaves;
-        std::vector<bool> match;
-        leaves.push_back(myHash);
-        match.push_back(true);
+        std::vector <uint256> leaves = {myHash};
         for (size_t i = 0; i < otherLeafCount; i++) {
             leaves.push_back(InsecureRand256());
-            match.push_back(false);
         }
+        std::sort(leaves.begin(), leaves.end());
         CAttestationPayload payload;
         payload.nVersion = 2;
         payload.nSignHeight = signHeight;
-        payload.batchProof = CPartialMerkleTree(leaves, match);
+        payload.batchProof = BuildAttestationBatchProof(leaves, myHash);
         SetTxPayload(tx, payload);
     }
 }
@@ -406,7 +407,17 @@ BOOST_FIXTURE_TEST_CASE(attested_tx_rejects_a_missing_payload_even_when_check_si
 // quorum" branch is the SAME kind of irreducible gap v1's own
 // VerifyRecoveredSig call always had (F-216).
 
-BOOST_FIXTURE_TEST_CASE(attested_tx_rejects_a_v2_payload_with_a_malformed_proof, TestingSetup) {
+BOOST_FIXTURE_TEST_CASE(attested_tx_rejects_a_v2_payload_with_a_default_constructed_proof, TestingSetup) {
+    // 5.4.4.1-OPEN item (b) (F-247): with CAttestationBatchProof
+    // (evo/attestationbatch.h) there is no distinct "malformed proof"
+    // rejection anymore -- a default-constructed proof (zero siblings)
+    // simply makes ExtractAttestationBatchRoot return the leaf itself
+    // unchanged (the single-leaf-batch case), which then fails the
+    // ordinary attestation check below it like any other wrong root does
+    // (no live quorum ever signs this transaction's own bare hash as a
+    // "batch" of one, F-216). One rejection path, not two -- this test's
+    // own reject reason reflects that, not the old, now-nonexistent
+    // "bad-attested-tx-batch-proof".
     CCoinsView coinsDummy;
     CCoinsViewCache view(&coinsDummy);
     COutPoint prevout(InsecureRand256(), 0);
@@ -418,45 +429,22 @@ BOOST_FIXTURE_TEST_CASE(attested_tx_rejects_a_v2_payload_with_a_malformed_proof,
     CAttestationPayload payload;
     payload.nVersion = 2;
     payload.nSignHeight = pindexPrev->nHeight;
-    // batchProof left default-constructed -- zero transactions, no hashes,
-    // no match bits. ExtractMatches (merkleblock.h) returns a null root for
-    // this shape (confirmed by reading its own implementation, not assumed).
+    // batchProof left default-constructed.
     SetTxPayload(tx, payload);
 
     CValidationState state;
     BOOST_CHECK(!CheckAttestedTx(CTransaction(tx), pindexPrev, state, view, true));
-    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-attested-tx-batch-proof");
-}
-
-BOOST_FIXTURE_TEST_CASE(attested_tx_rejects_a_v2_payload_matching_zero_leaves, TestingSetup) {
-    // Fable review (2026-10-01), CONFIRMED MEDIUM: this file's own first
-    // attempt at proving ExtractAttestedBatchRoot's `matchedHashes.size()
-    // != 1` check is load-bearing mutation-tested the WRONG scenario (two
-    // matches, not zero) -- this is the genuine one: a well-formed proof
-    // that matches NOTHING. Without the size check, `matchedHashes[0]`
-    // would be an out-of-bounds read on an empty vector.
-    CCoinsView coinsDummy;
-    CCoinsViewCache view(&coinsDummy);
-    COutPoint prevout(InsecureRand256(), 0);
-    view.AddCoin(prevout, Coin(CTxOut(2, P2PKScript(NewPubKey())), 100, false, 0, {}), true);
-
-    const CBlockIndex *pindexPrev = ::ChainActive().Tip();
-    BOOST_REQUIRE(pindexPrev != nullptr);
-    CMutableTransaction tx = MakeAttestedSpend(prevout);
-    std::vector <uint256> leaves = {InsecureRand256(), InsecureRand256(), InsecureRand256()};
-    std::vector<bool> match = {false, false, false};
-    CAttestationPayload payload;
-    payload.nVersion = 2;
-    payload.nSignHeight = pindexPrev->nHeight;
-    payload.batchProof = CPartialMerkleTree(leaves, match);
-    SetTxPayload(tx, payload);
-
-    CValidationState state;
-    BOOST_CHECK(!CheckAttestedTx(CTransaction(tx), pindexPrev, state, view, true));
-    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-attested-tx-batch-proof");
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-attested-tx-batch-attestation");
 }
 
 BOOST_FIXTURE_TEST_CASE(attested_tx_rejects_a_v2_payload_whose_proof_is_for_a_different_transaction, TestingSetup) {
+    // A real, well-formed proof -- but built for a leaf that is NOT this
+    // transaction's own ComputeAttestedMessageHash, e.g. a proof copied
+    // from a different transaction's own payload. ExtractAttestationBatchRoot
+    // hashes THIS transaction's own leaf up through siblings that were
+    // never computed against it, so the resulting root is simply wrong --
+    // rejected the same ordinary way any wrong root is, not a distinct
+    // "wrong leaf" check the old CPartialMerkleTree-based design needed.
     CCoinsView coinsDummy;
     CCoinsViewCache view(&coinsDummy);
     COutPoint prevout(InsecureRand256(), 0);
@@ -465,45 +453,17 @@ BOOST_FIXTURE_TEST_CASE(attested_tx_rejects_a_v2_payload_whose_proof_is_for_a_di
     const CBlockIndex *pindexPrev = ::ChainActive().Tip();
     BOOST_REQUIRE(pindexPrev != nullptr);
     CMutableTransaction tx = MakeAttestedSpend(prevout);
-    // A real, well-formed 3-leaf proof -- but matching a leaf that is NOT
-    // this transaction's own ComputeAttestedMessageHash, e.g. a proof
-    // copied from a different transaction's own payload.
     std::vector <uint256> leaves = {InsecureRand256(), InsecureRand256(), InsecureRand256()};
-    std::vector<bool> match = {false, true, false};
+    std::sort(leaves.begin(), leaves.end());
     CAttestationPayload payload;
     payload.nVersion = 2;
     payload.nSignHeight = pindexPrev->nHeight;
-    payload.batchProof = CPartialMerkleTree(leaves, match);
+    payload.batchProof = BuildAttestationBatchProof(leaves, leaves[1]); // a proof for someone else's leaf
     SetTxPayload(tx, payload);
 
     CValidationState state;
     BOOST_CHECK(!CheckAttestedTx(CTransaction(tx), pindexPrev, state, view, true));
-    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-attested-tx-batch-proof");
-}
-
-BOOST_FIXTURE_TEST_CASE(attested_tx_rejects_a_v2_payload_matching_more_than_one_leaf, TestingSetup) {
-    CCoinsView coinsDummy;
-    CCoinsViewCache view(&coinsDummy);
-    COutPoint prevout(InsecureRand256(), 0);
-    view.AddCoin(prevout, Coin(CTxOut(2, P2PKScript(NewPubKey())), 100, false, 0, {}), true);
-
-    const CBlockIndex *pindexPrev = ::ChainActive().Tip();
-    BOOST_REQUIRE(pindexPrev != nullptr);
-    CMutableTransaction tx = MakeAttestedSpend(prevout);
-    const uint256 myHash = ComputeAttestedMessageHash(CTransaction(tx));
-    // This tx's own hash included TWICE -- an attested transaction's own
-    // payload must prove only itself, never a set of leaves.
-    std::vector <uint256> leaves = {myHash, InsecureRand256(), myHash};
-    std::vector<bool> match = {true, false, true};
-    CAttestationPayload payload;
-    payload.nVersion = 2;
-    payload.nSignHeight = pindexPrev->nHeight;
-    payload.batchProof = CPartialMerkleTree(leaves, match);
-    SetTxPayload(tx, payload);
-
-    CValidationState state;
-    BOOST_CHECK(!CheckAttestedTx(CTransaction(tx), pindexPrev, state, view, true));
-    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-attested-tx-batch-proof");
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-attested-tx-batch-attestation");
 }
 
 BOOST_FIXTURE_TEST_CASE(attested_tx_rejects_a_v2_payload_whose_signature_does_not_verify, TestChain100Setup) {

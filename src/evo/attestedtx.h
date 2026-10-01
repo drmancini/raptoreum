@@ -6,7 +6,7 @@
 #define BITCOIN_EVO_ATTESTEDTX_H
 
 #include <bls/bls.h>
-#include <merkleblock.h>
+#include <evo/attestationbatch.h>
 #include <primitives/transaction.h>
 #include <serialize.h>
 
@@ -95,19 +95,27 @@ public:
     CBLSSignature sig;
     // 5.4.4.1 (build-plan.md, F-243): v2 only (default-constructed, unused,
     // for v1). Proves THIS transaction's own ComputeAttestedMessageHash(tx)
-    // is one leaf of the batch `sig` above is actually a signature over --
-    // CPartialMerkleTree (merkleblock.h, the existing SPV single/multi-leaf
-    // inclusion-proof primitive, reused rather than hand-rolling a new
-    // branch/sibling-hash format) constructed with exactly one matched leaf
-    // (this transaction's own hash) out of the batch's full leaf list.
+    // is one leaf of the batch `sig` above is actually a signature over.
+    //
+    // 5.4.4.1-OPEN item (b) (F-247): CAttestationBatchProof
+    // (evo/attestationbatch.h), not CPartialMerkleTree (merkleblock.h) --
+    // the original choice, a general multi-leaf SPV inclusion-proof
+    // primitive reused rather than hand-rolling a new branch/sibling-hash
+    // format. Changed because that reuse itself was the malleability
+    // vector F-244 found and could not fully close: CPartialMerkleTree's
+    // own flag-byte/vBits encoding has no canonical form for a decoded
+    // result, confirmed not assumed. CAttestationBatchProof's own doc
+    // comment (evo/attestationbatch.h) has the full account.
+    //
     // HOW a batch's signature actually gets requested, collected, and
     // recovered in the first place -- the hard, genuinely novel "N quorum
     // members must agree on identical batch membership with no leader"
     // problem build-plan.md's own 5.4.4.2 row names as still open -- is
-    // deliberately NOT built here. This sub-step is the payload shape and
-    // the verification side, exercisable and testable on their own once a
-    // real batch signature exists, however it got produced.
-    CPartialMerkleTree batchProof;
+    // built separately (llmq/quorums_attestationbatch.h). This sub-step is
+    // the payload shape and the verification side, exercisable and
+    // testable on their own once a real batch signature exists, however
+    // it got produced.
+    CAttestationBatchProof batchProof;
 
     SERIALIZE_METHODS(CAttestationPayload, obj)
     {
@@ -122,7 +130,7 @@ public:
             // no live exposure today, but a future caller that reuses one
             // object across multiple GetTxPayload calls would otherwise
             // silently inherit stale proof data on a v1 read.
-            SER_READ(obj, obj.batchProof = CPartialMerkleTree());
+            SER_READ(obj, obj.batchProof = CAttestationBatchProof());
         }
     }
 };

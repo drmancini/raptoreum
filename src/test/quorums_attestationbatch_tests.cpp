@@ -204,7 +204,7 @@ BOOST_AUTO_TEST_CASE(get_attestation_fails_before_any_signature_recovers) {
 
     CBLSSignature retSig;
     int32_t retHeight;
-    CPartialMerkleTree retProof;
+    CAttestationBatchProof retProof;
     BOOST_CHECK(!handler.GetAttestation(ComputeAttestedMessageHash(tx), retSig, retHeight, retProof));
 }
 
@@ -227,7 +227,7 @@ BOOST_AUTO_TEST_CASE(handle_new_recovered_sig_ignores_the_wrong_llmq_type) {
 
     CBLSSignature retSig;
     int32_t retHeight;
-    CPartialMerkleTree retProof;
+    CAttestationBatchProof retProof;
     BOOST_CHECK(!handler.GetAttestation(ComputeAttestedMessageHash(tx), retSig, retHeight, retProof));
 }
 
@@ -252,7 +252,7 @@ BOOST_AUTO_TEST_CASE(handle_new_recovered_sig_ignores_a_root_with_the_wrong_id) 
 
     CBLSSignature retSig;
     int32_t retHeight;
-    CPartialMerkleTree retProof;
+    CAttestationBatchProof retProof;
     BOOST_CHECK(!handler.GetAttestation(ComputeAttestedMessageHash(tx), retSig, retHeight, retProof));
 }
 
@@ -270,7 +270,7 @@ BOOST_AUTO_TEST_CASE(handle_new_recovered_sig_ignores_a_root_never_asked_for) {
 
     CBLSSignature retSig;
     int32_t retHeight;
-    CPartialMerkleTree retProof;
+    CAttestationBatchProof retProof;
     BOOST_CHECK(!handler.GetAttestation(InsecureRand256(), retSig, retHeight, retProof));
 }
 
@@ -359,7 +359,7 @@ BOOST_AUTO_TEST_CASE(handle_new_recovered_sig_ignores_an_unconfirmable_quorum) {
 
     CBLSSignature retSig;
     int32_t retHeight;
-    CPartialMerkleTree retProof;
+    CAttestationBatchProof retProof;
     BOOST_CHECK(!handler.GetAttestation(ComputeAttestedMessageHash(tx), retSig, retHeight, retProof));
 }
 
