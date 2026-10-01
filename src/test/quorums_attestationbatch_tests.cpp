@@ -222,7 +222,7 @@ BOOST_AUTO_TEST_CASE(handle_new_recovered_sig_ignores_the_wrong_llmq_type) {
     sk.MakeNewKey();
     uint256 id = BuildAttestationBatchId(root);
     auto recSig = MakeRecoveredSig(id, root, sk.Sign(root), Consensus::LLMQType::LLMQ_50_60);
-    BOOST_REQUIRE(Params().GetConsensus().llmqTypeChainLocks != Consensus::LLMQType::LLMQ_50_60);
+    BOOST_REQUIRE(Params().GetConsensus().llmqTypeAttestedTx != Consensus::LLMQType::LLMQ_50_60);
     handler.HandleNewRecoveredSig(recSig);
 
     CBLSSignature retSig;
@@ -247,7 +247,7 @@ BOOST_AUTO_TEST_CASE(handle_new_recovered_sig_ignores_a_root_with_the_wrong_id) 
     // attestation id, or anything else that happens to carry this same
     // root as its own msgHash.
     uint256 wrongId = InsecureRand256();
-    auto recSig = MakeRecoveredSig(wrongId, root, sk.Sign(root), Params().GetConsensus().llmqTypeChainLocks);
+    auto recSig = MakeRecoveredSig(wrongId, root, sk.Sign(root), Params().GetConsensus().llmqTypeAttestedTx);
     handler.HandleNewRecoveredSig(recSig);
 
     CBLSSignature retSig;
@@ -265,7 +265,7 @@ BOOST_AUTO_TEST_CASE(handle_new_recovered_sig_ignores_a_root_never_asked_for) {
     CBLSSecretKey sk;
     sk.MakeNewKey();
     uint256 id = BuildAttestationBatchId(root);
-    auto recSig = MakeRecoveredSig(id, root, sk.Sign(root), Params().GetConsensus().llmqTypeChainLocks);
+    auto recSig = MakeRecoveredSig(id, root, sk.Sign(root), Params().GetConsensus().llmqTypeAttestedTx);
     handler.HandleNewRecoveredSig(recSig);
 
     CBLSSignature retSig;
@@ -354,7 +354,7 @@ BOOST_AUTO_TEST_CASE(handle_new_recovered_sig_ignores_an_unconfirmable_quorum) {
     CBLSSecretKey sk;
     sk.MakeNewKey();
     uint256 id = BuildAttestationBatchId(root);
-    auto recSig = MakeRecoveredSig(id, root, sk.Sign(root), Params().GetConsensus().llmqTypeChainLocks);
+    auto recSig = MakeRecoveredSig(id, root, sk.Sign(root), Params().GetConsensus().llmqTypeAttestedTx);
     handler.HandleNewRecoveredSig(recSig);
 
     CBLSSignature retSig;

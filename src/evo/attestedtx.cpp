@@ -35,10 +35,9 @@ static bool IsRestrictedSingleSigScript(const CScript &scriptPubKey) {
  *  own signing session from anything else that might share a quorum type)
  *  -- a different prefix here means an attestation signature can never be
  *  replayed as, or confused with, a chainlock or islock signature over the
- *  coincidentally-identical hash of some other object, even though this
- *  type currently reuses ChainLocks' own llmqType (see this file's own
- *  header doc comment for why that reuse, not a new quorum type, is v1's
- *  own interim choice). */
+ *  coincidentally-identical hash of some other object -- true regardless of
+ *  which quorum type signs it, and doubly so now that attested-tx has its
+ *  own (`llmqTypeAttestedTx`, F-248), not ChainLocks' own. */
 static const std::string ATTESTATION_REQUESTID_PREFIX = "atx";
 
 /** Fable review (2026-10-01), LOW, fixed: a v2 batch of exactly one
@@ -275,14 +274,17 @@ bool CheckAttestedTx(const CTransaction &tx, const CBlockIndex *pindexPrev, CVal
     }
 
     const uint256 msgHash = ComputeAttestedMessageHash(tx);
-    // v1's own interim choice (this file's own header doc comment):
-    // ChainLocks' existing, already-live llmqType, not a new one stood up
-    // for this purpose -- confirmed a real ::Consensus field by direct
-    // read of chainparams.cpp before relying on it, matching every other
-    // call site that already trusts it (quorums_chainlocks.cpp). Applies to
-    // both versions below -- 5.4.4.1 does not stand up a second quorum type
-    // for the batched path either.
-    const Consensus::LLMQType llmqType = Params().GetConsensus().llmqTypeChainLocks;
+    // F-248: its own `llmqTypeAttestedTx` field, not a reuse of ChainLocks'
+    // own (F-240's own interim choice, replaced the same day it was asked
+    // about) -- trí confirmed 85% is what his own security claim's 80%
+    // figure meant, and ChainLocks' own live threshold is 60%, not that
+    // (transaction-decoupling.md §17.6). LLMQ_400_85 is already registered
+    // and forming on every live network, confirmed live against mainnet
+    // (391 of 400 members valid, 2026-10-01) -- not a new quorum type to
+    // design, a different existing one to point at. Applies to both
+    // versions below -- 5.4.4.1 does not stand up a second quorum type for
+    // the batched path either.
+    const Consensus::LLMQType llmqType = Params().GetConsensus().llmqTypeAttestedTx;
 
     if (payload.nVersion == 2) {
         // Fable review (2026-10-01), CONFIRMED CRITICAL, fixed: this branch

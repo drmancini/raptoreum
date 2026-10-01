@@ -56,9 +56,10 @@ public:
     // the verifier from pindexPrev -- a verifier-inferred height silently
     // drifts from whatever height the signer actually used the moment the
     // signing quorum rotates between signing and verifying, which is not
-    // hypothetical (mainnet's real llmqTypeChainLocks rotates every 360
-    // blocks, llmq/quorums_parameters.h). Bounding this against pindexPrev
-    // at verify time (attestedtx.cpp) is still an interim choice, not
+    // hypothetical (mainnet's real llmqTypeAttestedTx, LLMQ_400_85, rotates
+    // every 720 blocks -- "one every 24 hours", llmq/quorums_parameters.h).
+    // Bounding this against pindexPrev at verify time (attestedtx.cpp) is
+    // still an interim choice, not
     // islock's own fuller cycleHash/dkgInterval scheme (quorums_instantsend.cpp).
     // Applies identically to v1 and v2 -- v2's own sig (below) is over the
     // batch, but SelectQuorumForSigning still needs a height to pick the
@@ -206,10 +207,13 @@ public:
  *    needing the unsound shared-store design -- trí's own throughput
  *    argument, now true per validating node, which is what a consensus
  *    rule can actually guarantee. Both versions use
- *    `Params().GetConsensus().llmqTypeChainLocks`, reusing an existing,
- *    already-live quorum type rather than standing up a new one
- *    (build-plan.md's own 5.4 row, open item: confirmed as a deliberate
- *    choice here, not yet put to tri for a real llmqType of its own). No
+ *    `Params().GetConsensus().llmqTypeAttestedTx` (F-248) -- its own
+ *    existing, already-live quorum type (`LLMQ_400_85`, confirmed live
+ *    against mainnet: 391 of 400 members valid, comfortably above the 340
+ *    needed), not a new one stood up for this purpose and not ChainLocks'
+ *    own (the original interim choice, F-240, replaced the same day it was
+ *    put to trí: his own 80%-quorum-compromise security claim meant 85%,
+ *    and ChainLocks' own live threshold is 60%, not that). No
  *    live-quorum test is possible for either version's own final
  *    acceptance step in this environment (F-216's own documented
  *    three-failed-DKG-attempts problem, the same limitation 5.3/F-238
