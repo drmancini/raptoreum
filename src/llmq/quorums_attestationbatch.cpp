@@ -220,10 +220,11 @@ uint256 CAttestationBatchHandler::TrySignBatch() {
         awaiting.timestamp = GetAdjustedTime();
     }
 
-    // v1's own interim choice (evo/attestedtx.h's own header doc comment),
-    // reused identically here -- 5.4.4.2 does not stand up a second
-    // quorum type for the batched path either.
-    const Consensus::LLMQType llmqType = Params().GetConsensus().llmqTypeChainLocks;
+    // F-248: its own `llmqTypeAttestedTx` field (evo/attestedtx.h's own
+    // header doc comment), not ChainLocks' own -- 5.4.4.2 does not stand
+    // up a second quorum type for the batched path either, it just points
+    // at the same already-live one (LLMQ_400_85) v1 now uses.
+    const Consensus::LLMQType llmqType = Params().GetConsensus().llmqTypeAttestedTx;
     const uint256 id = BuildAttestationBatchId(root);
 
     // HIGH-3 fix (Fable review, 2026-10-01): a signature for this exact id
@@ -284,7 +285,7 @@ bool CAttestationBatchHandler::GetAttestation(const uint256 &msgHash, CBLSSignat
 }
 
 void CAttestationBatchHandler::HandleNewRecoveredSig(const CRecoveredSig &recoveredSig) {
-    if (recoveredSig.getLlmqType() != Params().GetConsensus().llmqTypeChainLocks) {
+    if (recoveredSig.getLlmqType() != Params().GetConsensus().llmqTypeAttestedTx) {
         return;
     }
     const uint256 &root = recoveredSig.getMsgHash();

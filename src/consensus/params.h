@@ -96,6 +96,14 @@ namespace Consensus {
         LLMQType llmqTypeChainLocks;
         LLMQType llmqTypeInstantSend{LLMQ_NONE};
         LLMQType llmqTypePlatform{LLMQ_NONE};
+        // 5.4.2 (build-plan.md, F-248): attested-tx's own quorum type, no
+        // longer reusing llmqTypeChainLocks (F-240's own interim choice) --
+        // see CMainParams's own assignment, chainparams.cpp, for why.
+        // LLMQ_NONE default matches llmqTypeInstantSend/llmqTypePlatform's
+        // own pattern: every real network sets this explicitly, and a
+        // network that does not is a real gap to notice, not a silent
+        // fallback onto ChainLocks' own quorum.
+        LLMQType llmqTypeAttestedTx{LLMQ_NONE};
 
         FounderPayment nFounderPayment;
         FutureRewardShare nFutureRewardShare;

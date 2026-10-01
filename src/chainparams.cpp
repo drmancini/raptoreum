@@ -304,6 +304,17 @@ public:
         consensus.llmqTypeChainLocks = Consensus::LLMQ_400_60;
         consensus.llmqTypeInstantSend = Consensus::LLMQ_50_60;
         consensus.llmqTypePlatform = Consensus::LLMQ_100_67;
+        // 5.4.2 (build-plan.md, F-245/F-248): attested-tx's own interim choice
+        // (reusing llmqTypeChainLocks, F-240) confirmed and replaced the same
+        // day -- trí confirmed 85% is what he meant by the 80% quorum-
+        // compromise figure his own security claim assumed (transaction-
+        // decoupling.md §17.6), and 60% (llmqTypeChainLocks's own live
+        // threshold) is not that. LLMQ_400_85 is already registered and
+        // forming on every live network (confirmed live against mainnet,
+        // 2026-10-01: 391 of 400 members valid, comfortably above the 340
+        // needed) -- not a new quorum type to stand up, a different existing
+        // one to point at.
+        consensus.llmqTypeAttestedTx = Consensus::LLMQ_400_85;
         fDefaultConsistencyChecks = false;
         fRequireStandard = true;
         fRequireRoutableExternalIP = true;
@@ -490,6 +501,9 @@ public:
         consensus.llmqTypeChainLocks = Consensus::LLMQ_400_60;
         consensus.llmqTypeInstantSend = Consensus::LLMQ_50_60;
         consensus.llmqTypePlatform = Consensus::LLMQ_100_67;
+        // See the identical assignment's own comment in CMainParams -- same
+        // choice, same reasoning, confirmed live against mainnet.
+        consensus.llmqTypeAttestedTx = Consensus::LLMQ_400_85;
 
         consensus.nCollaterals = SmartnodeCollaterals(
                 {{INT_MAX, 60000 * COIN}},
@@ -664,6 +678,10 @@ public:
         consensus.llmqTypeChainLocks = Consensus::LLMQ_50_60;
         consensus.llmqTypeInstantSend = Consensus::LLMQ_50_60;
         consensus.llmqTypePlatform = Consensus::LLMQ_100_67;
+        // See CMainParams's own identical assignment -- LLMQ_400_85 is
+        // registered here too (just above) and rescaled by UpdateLLMQParams
+        // as devnet's own smartnode count grows, the same as LLMQ_400_60.
+        consensus.llmqTypeAttestedTx = Consensus::LLMQ_400_85;
 
         UpdateDevnetLLMQChainLocksFromArgs(args);
         UpdateDevnetLLMQInstantSendFromArgs(args);
@@ -889,6 +907,11 @@ public:
         consensus.llmqTypeChainLocks = Consensus::LLMQ_5_60;
         consensus.llmqTypeInstantSend = Consensus::LLMQ_5_60;
         consensus.llmqTypePlatform = Consensus::LLMQ_5_60;
+        // LLMQ_400_85 is not registered on plain regtest (UpdateLLMQParams
+        // early-returns here, by design -- see its own comment) -- reuse the
+        // one test type everything else on regtest already reuses, same as
+        // the three assignments above.
+        consensus.llmqTypeAttestedTx = Consensus::LLMQ_5_60;
         UpdateLLMQTestParametersFromArgs(args);
     }
 
