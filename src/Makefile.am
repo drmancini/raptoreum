@@ -163,6 +163,7 @@ BITCOIN_CORE_H = \
   cuckoocache.h \
   ctpl_stl.h \
   cxxtimer.hpp \
+  evo/attestationbatch.h \
   evo/attestedtx.h \
   evo/cbtx.h \
   evo/deterministicmns.h \
@@ -211,6 +212,7 @@ BITCOIN_CORE_H = \
   llmq/quorums.h \
   llmq/quorums_blockprocessor.h \
   llmq/quorums_commitment.h \
+  llmq/quorums_attestationbatch.h \
   llmq/quorums_chainlocks.h \
   llmq/quorums_debug.h \
   llmq/quorums_dkgsessionhandler.h \
@@ -370,6 +372,7 @@ libraptoreum_server_a_SOURCES = \
   consensus/tx_verify.cpp \
   dbwrapper.cpp \
   dsnotificationinterface.cpp \
+  evo/attestationbatch.cpp \
   evo/attestedtx.cpp \
   evo/cbtx.cpp \
   evo/deterministicmns.cpp \
@@ -402,6 +405,7 @@ libraptoreum_server_a_SOURCES = \
   llmq/quorums.cpp \
   llmq/quorums_blockprocessor.cpp \
   llmq/quorums_commitment.cpp \
+  llmq/quorums_attestationbatch.cpp \
   llmq/quorums_chainlocks.cpp \
   llmq/quorums_debug.cpp \
   llmq/quorums_dkgsessionhandler.cpp \
