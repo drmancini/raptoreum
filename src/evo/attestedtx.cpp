@@ -12,6 +12,12 @@
 #include <hash.h>
 #include <llmq/quorums_signing.h>
 #include <script/standard.h>
+#include <streams.h>
+#include <sync.h>
+
+#include <algorithm>
+#include <deque>
+#include <set>
 
 /** build-plan.md's own 5.4 row, interim decision (a): restricted to
  *  single-signature (P2PK/P2PKH) inputs only until non-standard-script
@@ -35,6 +41,16 @@ static bool IsRestrictedSingleSigScript(const CScript &scriptPubKey) {
  *  header doc comment for why that reuse, not a new quorum type, is v1's
  *  own interim choice). */
 static const std::string ATTESTATION_REQUESTID_PREFIX = "atx";
+
+/** Fable review (2026-10-01), LOW, fixed: a v2 batch of exactly one
+ *  transaction has a Merkle root equal to that transaction's own message
+ *  hash (CPartialMerkleTree's own height-0 case: the root IS the leaf) --
+ *  without a separate prefix here, BuildAttestationId(root) would collide
+ *  with BuildAttestationId(msgHash) for that one transaction, aliasing a
+ *  v1 id and a v2 batch id onto the same lookup key. Domain-separated the
+ *  same way "atx" already separates attestation ids from clsig/islock/
+ *  inlock ids. */
+static const std::string ATTESTATION_BATCH_REQUESTID_PREFIX = "atxb";
 
 /** Fable review (2026-09-30), CONFIRMED HIGH, fixed here: the attested
  *  message cannot be tx.GetHash() itself. CTransaction::Serialize writes
@@ -70,6 +86,54 @@ static uint256 BuildAttestationId(const uint256 &strippedTxHash) {
     return ::SerializeHash(std::make_pair(ATTESTATION_REQUESTID_PREFIX, strippedTxHash));
 }
 
+static uint256 BuildAttestationBatchId(const uint256 &batchRoot) {
+    return ::SerializeHash(std::make_pair(ATTESTATION_BATCH_REQUESTID_PREFIX, batchRoot));
+}
+
+/** Fable review (2026-10-01), CONFIRMED CRITICAL, fixed: a per-NODE cache
+ *  of (batchRoot, nSignHeight, sig) triples this node has already verified
+ *  via a real VerifyRecoveredSig call -- trí's own throughput argument
+ *  (verify a batch's signature once, not once per transaction sharing it)
+ *  realized correctly, per validating node, rather than the unsound
+ *  "verify once anywhere, trust everywhere" design this file originally
+ *  shipped with (looking the signature up in a shared store instead of
+ *  carrying it -- see CAttestationPayload's own `sig` doc comment,
+ *  evo/attestedtx.h, for why that store is not a general network-
+ *  propagation layer). Keyed on the full triple, not just the root: a
+ *  transaction carrying a forged signature over a genuinely-batched root
+ *  must still fail its OWN verification, never riding on an earlier,
+ *  real entry's cache hit for the same root. Bounded FIFO and process-
+ *  lifetime only (not persisted) -- 5.4.4.2 has not yet decided how large
+ *  a real batch-signing interval's own working set gets, and this is
+ *  reachable from multiple threads (parallel script checking,
+ *  g_parallel_script_checks), hence the lock. */
+static const size_t MAX_VERIFIED_BATCH_CACHE_ENTRIES = 10000;
+static RecursiveMutex cs_verifiedBatchCache;
+static std::set <uint256> g_verifiedBatchCache GUARDED_BY(cs_verifiedBatchCache);
+static std::deque <uint256> g_verifiedBatchCacheOrder GUARDED_BY(cs_verifiedBatchCache);
+
+static uint256 ComputeBatchCacheKey(const uint256 &batchRoot, int32_t nSignHeight, const CBLSSignature &sig) {
+    CHashWriter ss(SER_GETHASH, 0);
+    ss << batchRoot << nSignHeight << sig;
+    return ss.GetHash();
+}
+
+static bool IsKnownVerifiedBatch(const uint256 &cacheKey) {
+    LOCK(cs_verifiedBatchCache);
+    return g_verifiedBatchCache.count(cacheKey) != 0;
+}
+
+static void RememberVerifiedBatch(const uint256 &cacheKey) {
+    LOCK(cs_verifiedBatchCache);
+    if (g_verifiedBatchCache.insert(cacheKey).second) {
+        g_verifiedBatchCacheOrder.push_back(cacheKey);
+        if (g_verifiedBatchCacheOrder.size() > MAX_VERIFIED_BATCH_CACHE_ENTRIES) {
+            g_verifiedBatchCache.erase(g_verifiedBatchCacheOrder.front());
+            g_verifiedBatchCacheOrder.pop_front();
+        }
+    }
+}
+
 /** Fable review (2026-09-30), CONFIRMED MEDIUM, fixed here: bounding the
  *  explicitly-carried nSignHeight (CAttestationPayload's own doc comment)
  *  against the block actually being validated, rather than trusting it
@@ -89,6 +153,51 @@ static bool IsPlausibleAttestationSignHeight(int32_t nSignHeight, const CBlockIn
         return false;
     }
     return pindexPrev->nHeight - nSignHeight <= MAX_ATTESTATION_SIGN_HEIGHT_AGE;
+}
+
+/** 5.4.4.1 (build-plan.md, F-243): the quorum-free half of v2 verification,
+ *  factored out so it can be held to a direct test without needing a real
+ *  recovered signature to exist anywhere (CAttestationPayload's own `sig`
+ *  doc comment explains why that piece cannot be tested live in this
+ *  environment, same as v1's VerifyRecoveredSig call never could be).
+ *  `proof` is expected to match EXACTLY one leaf -- an attested transaction's
+ *  own payload proves only itself, never a set of other transactions too --
+ *  and that one leaf must equal `expectedLeaf` (this transaction's own
+ *  ComputeAttestedMessageHash), or the proof is for some OTHER transaction
+ *  entirely, carried (maliciously or by a packaging mistake) onto this one's
+ *  payload. CPartialMerkleTree::ExtractMatches (merkleblock.h) itself
+ *  returns a null root on any structurally malformed proof -- confirmed by
+ *  reading its own implementation before relying on that contract, not
+ *  assumed. The `matchedHashes.size() != 1` check is not just a logic
+ *  nicety: it guards a genuine out-of-bounds `matchedHashes[0]` read on a
+ *  zero-match proof. Fable review (2026-10-01), CONFIRMED MEDIUM, fixed:
+ *  this file's own first attempt at proving that live mutation-tested the
+ *  WRONG scenario -- a two-match proof (both matches equal to
+ *  `expectedLeaf`) still crashed when the check was removed, but via a
+ *  different, unrelated mechanism (falling through into
+ *  CSigningManager::VerifyRecoveredSig, which needs ChainstateActive() and
+ *  therefore a chainstate-manager-initializing fixture, not
+ *  BasicTestingSetup -- the same class of fixture-dependent fragility
+ *  F-241's own mutant 2 already found once) -- not the empty-vector read
+ *  this comment originally, wrongly, credited it to. The genuine
+ *  zero-match case is covered by its own dedicated test now
+ *  (attested_tx_rejects_a_v2_payload_matching_zero_leaves,
+ *  test/attestedtx_tests.cpp), under TestingSetup so a removed check fails
+ *  by assertion, not by crash, making the mutant's own failure mode
+ *  unambiguous. */
+static bool ExtractAttestedBatchRoot(const CPartialMerkleTree &proof, const uint256 &expectedLeaf, uint256 &retRoot) {
+    std::vector <uint256> matchedHashes;
+    std::vector<unsigned int> matchedIndices;
+    CPartialMerkleTree proofCopy(proof);
+    uint256 root = proofCopy.ExtractMatches(matchedHashes, matchedIndices);
+    if (root.IsNull() || matchedHashes.size() != 1) {
+        return false;
+    }
+    if (matchedHashes[0] != expectedLeaf) {
+        return false;
+    }
+    retRoot = root;
+    return true;
 }
 
 bool CheckAttestedTx(const CTransaction &tx, const CBlockIndex *pindexPrev, CValidationState &state,
@@ -160,6 +269,57 @@ bool CheckAttestedTx(const CTransaction &tx, const CBlockIndex *pindexPrev, CVal
     if (payload.nVersion == 0 || payload.nVersion > CAttestationPayload::CURRENT_VERSION) {
         return state.DoS(100, false, REJECT_INVALID, "bad-attested-tx-payload-version");
     }
+    // Fable review (2026-10-01), CONFIRMED MEDIUM, PARTIALLY addressed: a
+    // third party can rewrite this transaction's own txid (vExtraPayload
+    // is part of what CTransaction::GetHash() covers for any non-normal
+    // nType) without touching anything the attestation covers, by
+    // flipping an unused padding bit in CPartialMerkleTree's own flag-byte
+    // encoding, or by claiming nTransactions = n+1 for an odd-leaf-count
+    // proof -- both decode to the identical root and matched leaf
+    // (merkleblock.cpp's own tolerance of this ambiguity, the
+    // CVE-2012-2459 shape), confirmed live by the review's own PoC: three
+    // distinct txids from the same logical attestation. This check (re-
+    // serializing the successfully-parsed payload and requiring an exact
+    // byte match, now GetTxPayload has already required full consumption
+    // of tx.vExtraPayload, specialtx.h's own `ds.empty()` check) is a
+    // real, general defence, but does NOT close the specific padding-bit
+    // vector -- confirmed by direct testing, not assumed: CPartialMerkleTree's
+    // own read path (BytesToBits, merkleblock.cpp) expands every byte into
+    // vBits wholesale, including padding, and ExtractMatches's own
+    // consistency check only compares BYTE COUNTS (ExtractMatches's own
+    // `(nBitsUsed+7)/8 != (vBits.size()+7)/8`), never padding bit VALUES --
+    // so a flipped padding bit is faithfully preserved through vBits and
+    // re-emitted identically on the next write, round-tripping this check
+    // undetected (an attempt at a regression test for exactly this, during
+    // this same review response, could not be made to fail -- removed
+    // rather than shipped as a false-positive "proof"). Nor does it close
+    // the nTransactions ambiguity (both n and n+1 round-trip losslessly,
+    // since nTransactions is itself an explicit, faithfully-preserved
+    // field). Both remaining gaps need the same deeper fix: committing the
+    // real batch size and a canonical bit-level encoding into what the
+    // quorum actually signs, which is 5.4.4.2's own job (what the quorum
+    // signs), not this verification-side file's -- or exposing/canonicalizing
+    // CPartialMerkleTree's own vBits directly, a change to that existing,
+    // shared class this sub-step does not make.
+    {
+        CDataStream ds(SER_NETWORK, PROTOCOL_VERSION);
+        ds << payload;
+        // memcmp, not std::equal: CDataStream's own element type is signed
+        // `char` (CSerializeData, support/allocators/zeroafterfree.h) while
+        // vExtraPayload is std::vector<unsigned char> -- std::equal across
+        // the two promotes each element to int before comparing, so any
+        // byte >= 0x80 (routine in real hash/signature data) sign-extends
+        // differently on each side and never compares equal, producing
+        // false rejections on every payload regardless of malleability
+        // (confirmed live: all 5 existing tests failed here before this
+        // fix). memcmp compares raw bytes, matching CBLSWrapper::
+        // CheckMalleable's own established pattern for the identical kind
+        // of check (bls/bls.h).
+        if (ds.size() != tx.vExtraPayload.size() ||
+            memcmp(ds.data(), tx.vExtraPayload.data(), ds.size()) != 0) {
+            return state.DoS(100, false, REJECT_INVALID, "bad-attested-tx-payload-nonstandard-encoding");
+        }
+    }
     if (!IsPlausibleAttestationSignHeight(payload.nSignHeight, pindexPrev)) {
         return state.DoS(10, false, REJECT_INVALID, "bad-attested-tx-payload-height");
     }
@@ -175,13 +335,49 @@ bool CheckAttestedTx(const CTransaction &tx, const CBlockIndex *pindexPrev, CVal
     }
 
     const uint256 msgHash = ComputeAttestedMessageHash(tx);
-    const uint256 id = BuildAttestationId(msgHash);
     // v1's own interim choice (this file's own header doc comment):
     // ChainLocks' existing, already-live llmqType, not a new one stood up
     // for this purpose -- confirmed a real ::Consensus field by direct
     // read of chainparams.cpp before relying on it, matching every other
-    // call site that already trusts it (quorums_chainlocks.cpp).
+    // call site that already trusts it (quorums_chainlocks.cpp). Applies to
+    // both versions below -- 5.4.4.1 does not stand up a second quorum type
+    // for the batched path either.
     const Consensus::LLMQType llmqType = Params().GetConsensus().llmqTypeChainLocks;
+
+    if (payload.nVersion == 2) {
+        // Fable review (2026-10-01), CONFIRMED CRITICAL, fixed: this branch
+        // originally looked an already-recovered signature up in
+        // quorumSigningManager's own store by id alone (BuildAttestationId
+        // reused unchanged from v1, over the batch root instead of a
+        // per-tx hash) instead of verifying anything itself -- confirmed
+        // live, by the review's own PoC, that this makes block validity
+        // depend on local, non-consensus, 7-day-expiring state almost no
+        // node ever populates (CAttestationPayload's own `sig` doc comment,
+        // evo/attestedtx.h, has the full finding). Fixed: v2 now verifies
+        // the SAME way v1 does, over the extracted root instead of this
+        // one transaction's own hash, with its own domain-separated id
+        // (BuildAttestationBatchId, not BuildAttestationId -- the "atxb"
+        // prefix closes a separate LOW finding from the same review: a
+        // one-leaf batch's root equals its member's own message hash, so
+        // reusing v1's id would have aliased a v1 attestation and a v2
+        // batch attestation for that one transaction onto the same key).
+        uint256 batchRoot;
+        if (!ExtractAttestedBatchRoot(payload.batchProof, msgHash, batchRoot)) {
+            return state.DoS(100, false, REJECT_INVALID, "bad-attested-tx-batch-proof");
+        }
+        const uint256 id = BuildAttestationBatchId(batchRoot);
+        const uint256 cacheKey = ComputeBatchCacheKey(batchRoot, payload.nSignHeight, payload.sig);
+        if (!IsKnownVerifiedBatch(cacheKey)) {
+            if (!llmq::CSigningManager::VerifyRecoveredSig(llmqType, payload.nSignHeight, id, batchRoot,
+                                                            payload.sig)) {
+                return state.DoS(100, false, REJECT_INVALID, "bad-attested-tx-batch-attestation");
+            }
+            RememberVerifiedBatch(cacheKey);
+        }
+        return true;
+    }
+
+    const uint256 id = BuildAttestationId(msgHash);
     if (!llmq::CSigningManager::VerifyRecoveredSig(llmqType, payload.nSignHeight, id, msgHash, payload.sig)) {
         return state.DoS(100, false, REJECT_INVALID, "bad-attested-tx-attestation");
     }
