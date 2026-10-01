@@ -134,17 +134,6 @@ static void RememberVerifiedBatch(const uint256 &cacheKey) {
     }
 }
 
-/** Fable review (2026-09-30), CONFIRMED MEDIUM, fixed here: bounding the
- *  explicitly-carried nSignHeight (CAttestationPayload's own doc comment)
- *  against the block actually being validated, rather than trusting it
- *  unconditionally. Deliberately simple for v1, not islock's own
- *  cycleHash/dkgInterval scheme (quorums_instantsend.cpp) -- a real
- *  attestation-cycle concept is 5.4.4's own design job, not invented
- *  here. This only rejects a height that is structurally impossible
- *  (negative, or after the block being validated) or implausibly stale;
- *  it does not attempt to reconstruct which quorum rotation was live. */
-static const int32_t MAX_ATTESTATION_SIGN_HEIGHT_AGE = 576; // ~1 day at 2.5 min/block, an interim bound only
-
 static bool IsPlausibleAttestationSignHeight(int32_t nSignHeight, const CBlockIndex *pindexPrev) {
     if (nSignHeight < 0 || pindexPrev == nullptr) {
         return false;
