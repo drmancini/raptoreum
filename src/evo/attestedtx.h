@@ -207,6 +207,27 @@ public:
  *    three-failed-DKG-attempts problem, the same limitation 5.3/F-238
  *    already hit) -- verified by direct reading against
  *    VerifyRecoveredSig's own contract instead, for both versions. */
+/** Fable review (2026-09-30), CONFIRMED MEDIUM, fixed: bounding the
+ *  explicitly-carried nSignHeight (CAttestationPayload's own doc comment)
+ *  against the block actually being validated, rather than trusting it
+ *  unconditionally. Deliberately simple for v1, not islock's own
+ *  cycleHash/dkgInterval scheme (quorums_instantsend.cpp) -- a real
+ *  attestation-cycle concept is 5.4.4's own design job, not invented here.
+ *
+ *  Exposed (moved here from attestedtx.cpp, 5.4.4.1-OPEN item (a),
+ *  build-plan.md, F-246): CTxMemPool::removeStaleAttestedTx (txmempool.h/.cpp)
+ *  needs the SAME number -- not a second, independently-chosen one -- to
+ *  decide when a mempool-resident attested transaction has aged past the
+ *  point IsPlausibleAttestationSignHeight (attestedtx.cpp, unchanged,
+ *  still CBlockIndex*-based, still file-local) would reject it outright at
+ *  ConnectBlock/ATMP time. Sharing the NUMBER, not the whole comparison
+ *  function, is deliberate: the mempool's own sweep has no CBlockIndex to
+ *  hand that function (only a bare new-tip height, removeForBlock's own
+ *  existing parameter), and changing that function's signature to match
+ *  would ripple into every existing CheckAttestedTx call site and test for
+ *  no benefit this fix needs. */
+static constexpr int32_t MAX_ATTESTATION_SIGN_HEIGHT_AGE = 576; // ~1 day at 2.5 min/block, an interim bound only
+
 /** Exposed (not file-local) so CAttestationBatchHandler::RequestAttestation
  *  (llmq/quorums_attestationbatch.cpp) can hold a request to the exact same
  *  coin-existence/script-shape bar CheckAttestedTx itself enforces, without

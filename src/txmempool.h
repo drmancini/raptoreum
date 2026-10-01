@@ -690,6 +690,26 @@ public:
 
     EXCLUSIVE_LOCKS_REQUIRED(cs);
 
+    /** 5.4.4.1-OPEN item (a) (build-plan.md, F-246): evicts any attested
+     *  transaction (evo/attestedtx.h) whose own carried nSignHeight has
+     *  aged past MAX_ATTESTATION_SIGN_HEIGHT_AGE relative to `nNewHeight`.
+     *  IsPlausibleAttestationSignHeight (attestedtx.cpp) already refuses
+     *  such a transaction outright at ATMP/ConnectBlock time, but nothing
+     *  previously evicted an entry that was plausible WHEN ADMITTED and
+     *  only became implausible as the chain advanced further while it sat
+     *  in the mempool -- deterministically stalling every later
+     *  CreateNewBlock/getblocktemplate call once that entry's own
+     *  TestBlockValidity re-check starts failing (miner.cpp's own
+     *  TestPackage doc comment names the identical failure shape, for a
+     *  different root cause: "every caller... hits the identical exception
+     *  again: a deterministic stall, not a one-off wasted block"). Called
+     *  from removeForBlock -- the one event that can ever newly make an
+     *  entry implausible, since the height this check compares against
+     *  only changes when a block connects. */
+    void removeStaleAttestedTx(int32_t nNewHeight)
+
+    EXCLUSIVE_LOCKS_REQUIRED(cs);
+
     void clear();
 
     void _clear()

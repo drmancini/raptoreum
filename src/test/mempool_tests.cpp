@@ -3,6 +3,8 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <txmempool.h>
+#include <evo/attestedtx.h>
+#include <evo/specialtx.h>
 #include <policy/policy.h>
 #include <util/system.h>
 #include <util/time.h>
@@ -788,5 +790,91 @@ BOOST_AUTO_TEST_CASE(MempoolAncestryTests)
         BOOST_CHECK_EQUAL(ancestors, 9ULL);
         BOOST_CHECK_EQUAL(descendants, 6ULL);
         }
+
+BOOST_AUTO_TEST_CASE(remove_stale_attested_tx_evicts_only_what_has_aged_out) {
+    // 5.4.4.1-OPEN item (a) (build-plan.md, F-246): an attested transaction
+    // that was plausible when admitted must not sit in the mempool forever
+    // once its own nSignHeight ages past MAX_ATTESTATION_SIGN_HEIGHT_AGE --
+    // left alone, every later CreateNewBlock/getblocktemplate call that
+    // tries to include it hits TestBlockValidity's own unconditional
+    // IsPlausibleAttestationSignHeight rejection and throws, a
+    // deterministic stall until the 14-day mempool expiry or a restart.
+    CTxMemPool testPool;
+    LOCK2(cs_main, testPool.cs);
+    TestMemPoolEntryHelper entry;
+
+    CMutableTransaction txAttested;
+    txAttested.nVersion = 3;
+    txAttested.nType = TRANSACTION_ATTESTED;
+    txAttested.vin.resize(1);
+    txAttested.vin[0].prevout = COutPoint(InsecureRand256(), 0);
+    txAttested.vout.resize(1);
+    txAttested.vout[0].nValue = 1;
+    txAttested.vout[0].scriptPubKey = CScript() << OP_TRUE;
+    CAttestationPayload payload;
+    payload.nSignHeight = 100;
+    SetTxPayload(txAttested, payload);
+
+    CMutableTransaction txOrdinary;
+    txOrdinary.vin.resize(1);
+    txOrdinary.vin[0].scriptSig = CScript() << OP_11;
+    txOrdinary.vout.resize(1);
+    txOrdinary.vout[0].scriptPubKey = CScript() << OP_11 << OP_EQUAL;
+    txOrdinary.vout[0].nValue = 1;
+
+    testPool.addUnchecked(entry.FromTx(txAttested));
+    testPool.addUnchecked(entry.FromTx(txOrdinary));
+    BOOST_CHECK_EQUAL(testPool.size(), 2U);
+
+    // Still within the window -- neither entry is touched.
+    testPool.removeStaleAttestedTx(100 + MAX_ATTESTATION_SIGN_HEIGHT_AGE);
+    BOOST_CHECK_EQUAL(testPool.size(), 2U);
+
+    // One block past the window -- the attested entry is evicted; the
+    // ordinary one (this function's own "not this function's job" case)
+    // is untouched.
+    testPool.removeStaleAttestedTx(100 + MAX_ATTESTATION_SIGN_HEIGHT_AGE + 1);
+    BOOST_CHECK_EQUAL(testPool.size(), 1U);
+    BOOST_CHECK(testPool.exists(txOrdinary.GetHash()));
+    BOOST_CHECK(!testPool.exists(txAttested.GetHash()));
+}
+
+BOOST_AUTO_TEST_CASE(remove_for_block_evicts_a_stale_attested_tx_not_in_the_block) {
+    // The actual wiring, not just the standalone function: removeForBlock
+    // is the one event that can ever newly make an entry implausible
+    // (the height it compares against only changes when a block
+    // connects), so it must call removeStaleAttestedTx itself -- proven
+    // here by connecting a block that does NOT even contain the stale
+    // attested transaction, confirming it is still evicted as a side
+    // effect of the height simply advancing.
+    CTxMemPool testPool;
+    LOCK2(cs_main, testPool.cs);
+    TestMemPoolEntryHelper entry;
+
+    CMutableTransaction txAttested;
+    txAttested.nVersion = 3;
+    txAttested.nType = TRANSACTION_ATTESTED;
+    txAttested.vin.resize(1);
+    txAttested.vin[0].prevout = COutPoint(InsecureRand256(), 0);
+    txAttested.vout.resize(1);
+    txAttested.vout[0].nValue = 1;
+    txAttested.vout[0].scriptPubKey = CScript() << OP_TRUE;
+    CAttestationPayload payload;
+    payload.nSignHeight = 100;
+    SetTxPayload(txAttested, payload);
+    testPool.addUnchecked(entry.FromTx(txAttested));
+    BOOST_REQUIRE_EQUAL(testPool.size(), 1U);
+
+    CMutableTransaction txMined;
+    txMined.vin.resize(1);
+    txMined.vin[0].scriptSig = CScript() << OP_11;
+    txMined.vout.resize(1);
+    txMined.vout[0].scriptPubKey = CScript() << OP_11 << OP_EQUAL;
+    txMined.vout[0].nValue = 1;
+    std::vector <CTransactionRef> vtx = {MakeTransactionRef(txMined)};
+
+    testPool.removeForBlock(vtx, 100 + MAX_ATTESTATION_SIGN_HEIGHT_AGE + 1);
+    BOOST_CHECK_EQUAL(testPool.size(), 0U);
+}
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -21,6 +21,7 @@
 #include <hash.h>
 
 #include <bls/bls.h>
+#include <evo/attestedtx.h>
 #include <evo/specialtx.h>
 #include <evo/providertx.h>
 #include <evo/deterministicmns.h>
@@ -1123,8 +1124,30 @@ void CTxMemPool::removeForBlock(const std::vector <CTransactionRef> &vtx, unsign
         removeProTxConflicts(*tx);
         ClearPrioritisation(tx->GetHash());
     }
+    removeStaleAttestedTx(nBlockHeight);
     lastRollingFeeUpdate = GetTime();
     blockSinceLastRollingFeeBump = true;
+}
+
+void CTxMemPool::removeStaleAttestedTx(int32_t nNewHeight) {
+    AssertLockHeld(cs);
+    std::vector <CTransactionRef> stale;
+    for (const CTxMemPoolEntry &entry: mapTx) {
+        const CTransaction &tx = entry.GetTx();
+        if (!IsAttestedTx(tx)) {
+            continue;
+        }
+        CAttestationPayload payload;
+        if (!GetTxPayload(tx, payload)) {
+            continue; // malformed; not this function's job to police
+        }
+        if (nNewHeight - payload.nSignHeight > MAX_ATTESTATION_SIGN_HEIGHT_AGE) {
+            stale.push_back(entry.GetSharedTx());
+        }
+    }
+    for (const CTransactionRef &tx: stale) {
+        removeRecursive(*tx, MemPoolRemovalReason::EXPIRY);
+    }
 }
 
 void CTxMemPool::_clear() {
