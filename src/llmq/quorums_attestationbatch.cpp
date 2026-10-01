@@ -131,8 +131,44 @@ bool CAttestationBatchHandler::RequestAttestation(const CTransaction &tx, CValid
         }
     }
 
+    const uint256 msgHash = ComputeAttestedMessageHash(tx);
+
+    // CONFIRMED CRITICAL (own testing, 2026-10-01), fixed: this header's own
+    // doc comment above promises RequestAttestation is idempotent -- "a
+    // caller retrying its own already-queued request must not inflate the
+    // batch with duplicates" -- but std::set::insert's own return value
+    // answers a different question ("was this newly added") than the one
+    // this function used it to answer ("should the caller treat this as
+    // success"). A retry landing while the request is still sitting in
+    // pendingRequests (the common case: a wallet polling/retrying before
+    // the next tick), already hashed into an in-flight awaitingRecovery
+    // batch, or already sitting in recoveredBatches (GetAttestation can
+    // serve it right now) is the request having ALREADY succeeded, not a
+    // new failure -- confirmed live: a correctly-signed transaction
+    // submitted twice in a row threw RPC_VERIFY_REJECTED with an empty
+    // CValidationState (no DoS call on this path, so FormatStateMessage
+    // had nothing to report) on the second call alone, a functional-test
+    // failure this project's own "a guard present is not a guard that
+    // works" lesson would have caught even if this fix had not.
     LOCK(cs);
-    return pendingRequests.insert(ComputeAttestedMessageHash(tx)).second;
+    if (pendingRequests.count(msgHash) > 0) {
+        return true;
+    }
+    for (const auto &entry: awaitingRecovery) {
+        const RecoveredBatch &batch = entry.second;
+        if (std::find(batch.leaves.begin(), batch.leaves.end(), msgHash) != batch.leaves.end()) {
+            return true;
+        }
+    }
+    for (const auto &entry: recoveredBatches) {
+        const RecoveredBatch &batch = entry.second;
+        if (std::find(batch.leaves.begin(), batch.leaves.end(), msgHash) != batch.leaves.end()) {
+            return true;
+        }
+    }
+
+    pendingRequests.insert(msgHash);
+    return true;
 }
 
 void CAttestationBatchHandler::SweepExpiredEntries() {

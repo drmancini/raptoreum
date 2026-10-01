@@ -42,6 +42,9 @@ void RegisterQuorumsRPCCommands(CRPCTable &tableRPC);
 /** Register Quorums RPC commands */
 void RegisterAssetsRPCCommands(CRPCTable &tableRPC);
 
+/** Register attested-tx RPC commands (5.4.4.2's own missing wire transport, F-251) */
+void RegisterAttestedTxRPCCommands(CRPCTable &tableRPC);
+
 static inline void RegisterAllCoreRPCCommands(CRPCTable &t) {
     RegisterBlockchainRPCCommands(t);
     RegisterNetRPCCommands(t);
@@ -54,6 +57,7 @@ static inline void RegisterAllCoreRPCCommands(CRPCTable &t) {
     RegisterEvoRPCCommands(t);
     RegisterQuorumsRPCCommands(t);
     RegisterAssetsRPCCommands(t);
+    RegisterAttestedTxRPCCommands(t);
 }
 
 #endif // BITCOIN_RPC_REGISTER_H
