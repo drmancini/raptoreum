@@ -154,6 +154,18 @@ BOOST_AUTO_TEST_CASE(request_attestation_rejects_the_wrong_transaction_type) {
 }
 
 BOOST_AUTO_TEST_CASE(request_attestation_is_idempotent) {
+    // CONFIRMED CRITICAL (own testing, 2026-10-01), fixed: this test used to
+    // assert the OPPOSITE of the header's own doc comment's promise
+    // ("Idempotent -- a caller retrying its own already-queued request must
+    // not inflate the batch with duplicates") -- BOOST_CHECK(!...) on the
+    // second call, treating std::set::insert's own "was this newly added"
+    // return value as if it answered "should the caller treat this as
+    // success." A retry landing while the request is still sitting in
+    // pendingRequests is the request having ALREADY succeeded, not a new
+    // failure; this is the actual bug the functional test
+    // feature_attestedtx_batch_rpc.py caught live (RPC_VERIFY_REJECTED with
+    // an empty CValidationState on a second, identical request) that this
+    // unit test's own wrong assertion had been locking in as correct.
     llmq::CAttestationBatchHandler handler;
     CCoinsView coinsDummy;
     CCoinsViewCache view(&coinsDummy);
@@ -162,7 +174,28 @@ BOOST_AUTO_TEST_CASE(request_attestation_is_idempotent) {
     CValidationState state;
     BOOST_CHECK(handler.RequestAttestation(tx, state, view));
     BOOST_CHECK(state.IsValid());
-    BOOST_CHECK(!handler.RequestAttestation(tx, state, view)); // already queued
+    BOOST_CHECK(handler.RequestAttestation(tx, state, view)); // still queued -- not a new failure
+    BOOST_CHECK(state.IsValid());
+}
+
+BOOST_AUTO_TEST_CASE(request_attestation_is_idempotent_once_awaiting_recovery) {
+    // Same contract, the OTHER state a retry can land in: TrySignBatch has
+    // already snapshotted this request out of pendingRequests and into
+    // awaitingRecovery (no live quorum needed to reach this state -- the
+    // same direct TrySignBatch() call try_sign_batch_computes_the_same_root_
+    // a_direct_call_would already relies on). A retry here must find it via
+    // the awaitingRecovery leaves search, not re-queue a duplicate.
+    llmq::CAttestationBatchHandler handler;
+    CCoinsView coinsDummy;
+    CCoinsViewCache view(&coinsDummy);
+    CTransaction tx = MakeSignedAttestedSpend(view);
+
+    CValidationState state;
+    BOOST_REQUIRE(handler.RequestAttestation(tx, state, view));
+    BOOST_REQUIRE(!handler.TrySignBatch().IsNull());
+
+    BOOST_CHECK(handler.RequestAttestation(tx, state, view));
+    BOOST_CHECK(state.IsValid());
 }
 
 BOOST_AUTO_TEST_CASE(try_sign_batch_is_a_noop_on_an_empty_queue) {

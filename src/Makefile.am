@@ -445,6 +445,7 @@ libraptoreum_server_a_SOURCES = \
   rpc/net.cpp \
   rpc/rawtransaction.cpp \
   rpc/rpcassets.cpp \
+  rpc/rpcattestedtx.cpp \
   rpc/rpcevo.cpp \
   rpc/rpcquorums.cpp \
   rpc/server.cpp \

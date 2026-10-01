@@ -6,6 +6,7 @@
 #include <llmq/quorums_init.h>
 
 #include <llmq/quorums.h>
+#include <llmq/quorums_attestationbatch.h>
 #include <llmq/quorums_blockprocessor.h>
 #include <llmq/quorums_commitment.h>
 #include <llmq/quorums_chainlocks.h>
@@ -33,6 +34,11 @@ namespace llmq {
         quorumSigningManager = new CSigningManager(connman, unitTests, fWipe);
         chainLocksHandler = new CChainLocksHandler(mempool, connman);
         quorumInstantSendManager = new CInstantSendManager(mempool, connman, unitTests, fWipe);
+        // 5.4.4.2 (build-plan.md, F-251): the init.cpp/net_processing.cpp wiring
+        // this row's own header comment (quorums_attestationbatch.h) named as
+        // still missing -- mirrors chainLocksHandler's own identical
+        // Init/Start/Stop/Destroy lifecycle immediately above, nothing novel.
+        attestationBatchHandler = new CAttestationBatchHandler();
 
         // TODO: remove at some point of future upgrades. it is used only to wipe old db.
         auto llmqDbTmp = std::make_unique<CDBWrapper>(unitTests ? "" : (GetDataDir() / "llmq"), 1 << 20, unitTests,
@@ -40,6 +46,8 @@ namespace llmq {
     }
 
     void DestroyLLMQSystem() {
+        delete attestationBatchHandler;
+        attestationBatchHandler = nullptr;
         delete quorumInstantSendManager;
         quorumInstantSendManager = nullptr;
         delete chainLocksHandler;
@@ -80,9 +88,15 @@ namespace llmq {
         if (quorumInstantSendManager != nullptr) {
             quorumInstantSendManager->Start();
         }
+        if (attestationBatchHandler != nullptr) {
+            attestationBatchHandler->Start();
+        }
     }
 
     void StopLLMQSystem() {
+        if (attestationBatchHandler != nullptr) {
+            attestationBatchHandler->Stop();
+        }
         if (quorumInstantSendManager != nullptr) {
             quorumInstantSendManager->Stop();
         }
