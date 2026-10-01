@@ -221,6 +221,22 @@ bool g_perf_parallel_atmp{false};
  *  transaction ConnectBlock will catch for real regardless. */
 bool g_perf_admission_only_atmp{false};
 
+/** Test-only (F-250): see the doc comment in validation.h. The real
+ *  `IsLocked` lookup is DB-backed and populated only by a live quorum's own
+ *  DKG/signing pipeline (confirmed by direct read, not assumed, in F-238) --
+ *  the same live-quorum requirement F-216 already documented failing three
+ *  times in this exact test environment, so there is no way to drive a real
+ *  islock through this flag's own gate without a live Smartnode swarm. This
+ *  flag exists so the ATMP-side shortcut itself -- the part that does not
+ *  depend on how a transaction came to be islocked, only on what happens
+ *  once it is -- can still be measured honestly on a single node: the SAME
+ *  production code this file's own AcceptToMemoryPoolWorker runs, with only
+ *  the islock precondition's own answer forced, proved genuine the same way
+ *  every other perf arm in this file already is (a transaction with a
+ *  well-formed but wrong signature must be ACCEPTED while this is on, or the
+ *  flag is not measuring what it claims). */
+bool g_perf_force_islocked_atmp{false};
+
 std::atomic_bool fImporting(false);
 std::atomic_bool fReindex(false);
 std::atomic_bool fProcessingHeaders(false);
@@ -1048,8 +1064,14 @@ static bool AcceptToMemoryPoolWorker(const CChainParams &chainparams, CTxMemPool
         // measurement this flag exists for is specifically "does ConnectBlock
         // pay cold for this transaction," and a warm cache would answer that
         // question wrong.
+        //
+        // F-250: `g_perf_force_islocked_atmp` substitutes for the real
+        // `IsLocked` answer, not for `g_perf_admission_only_atmp` itself --
+        // see its own doc comment above for why (no live quorum in this
+        // environment can ever make the real lookup return true).
         bool fAdmissionOnlyShortcut =
-                g_perf_admission_only_atmp && llmq::quorumInstantSendManager->IsLocked(hash);
+                g_perf_admission_only_atmp &&
+                (g_perf_force_islocked_atmp || llmq::quorumInstantSendManager->IsLocked(hash));
 
         // 5.4.3 (build-plan.md, F-242): unlike the test-only shortcut above,
         // this one is real and production (no perf/test flag gating it) --

@@ -358,6 +358,14 @@ extern bool g_perf_parallel_atmp;
  *  independently re-verifies every transaction regardless of this flag. See
  *  the definition in validation.cpp. */
 extern bool g_perf_admission_only_atmp;
+
+/** Test-only (F-250): forces g_perf_admission_only_atmp's own islock check to
+ *  true for every transaction, so the real shortcut's ATMP ceiling can be
+ *  measured without a live Smartnode quorum actually signing one
+ *  (-perfforceislockedatmp). Has no effect at all unless
+ *  g_perf_admission_only_atmp is ALSO set -- this does not create a second,
+ *  independent bypass. See the definition in validation.cpp. */
+extern bool g_perf_force_islocked_atmp;
 extern bool fAddressIndex;
 extern bool fAssetIndex;
 extern bool fTimestampIndex;
