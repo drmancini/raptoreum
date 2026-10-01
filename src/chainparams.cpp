@@ -739,6 +739,39 @@ public:
     void UpdateDevnetLLMQInstantSendFromArgs(const ArgsManager &args);
 };
 
+/** Test-only (F-249): lets a regtest-only functional test or demo make
+ *  EUpdate::ATTESTED_TX's own structurally-unreachable placeholder height
+ *  (100,000,000, see CRegTestParams's own registration below) reachable,
+ *  without changing that default for every other regtest run that does not
+ *  ask for this -- the "-testactivationheight"-style knob F-242 itself
+ *  named as needed but did not build ("no test/functional coverage exists
+ *  for this consensus change... makes one impossible without a new
+ *  -testactivationheight-style CLI knob"). Parsed the same way
+ *  -llmqtestparams is (CRegTestParams::UpdateLLMQTestParametersFromArgs,
+ *  below), and just as inert when unset: returns defaultHeight verbatim
+ *  unless "-testactivationheight=<bit>:<height>" names THIS bit
+ *  specifically, so passing it for a different bit (or not passing it at
+ *  all) changes nothing here. Update's own constructor (update/update.h)
+ *  still enforces startHeight % roundSize == 0, so an invalid height still
+ *  fails loudly at startup rather than silently rounding. */
+static int64_t TestActivationHeightFromArgs(const ArgsManager &args, int bit, int64_t defaultHeight) {
+    if (!args.IsArgSet("-testactivationheight")) return defaultHeight;
+    std::string strArg = args.GetArg("-testactivationheight", "");
+    std::vector <std::string> vParams;
+    boost::split(vParams, strArg, boost::is_any_of(":"));
+    if (vParams.size() != 2) {
+        throw std::runtime_error("-testactivationheight must be specified as bit:height");
+    }
+    int argBit;
+    int64_t argHeight;
+    if (!ParseInt32(vParams[0], &argBit) || !ParseInt64(vParams[1], &argHeight)) {
+        throw std::runtime_error("Invalid bit or height in -testactivationheight");
+    }
+    if (argBit != bit) return defaultHeight;
+    LogPrintf("Setting EUpdate bit %d's own regtest startHeight to %ld (-testactivationheight)\n", bit, argHeight);
+    return argHeight;
+}
+
 /**
  * Regression test
  */
@@ -804,9 +837,14 @@ public:
         // 5.4.3 (F-242): mechanism-testing registration only -- same
         // reasoning as the devnet registration above and as COMMITMENT_MODE's
         // own regtest registration directly above this one. NOT registered
-        // on mainnet or testnet.
+        // on mainnet or testnet. F-249: startHeight now runs through
+        // TestActivationHeightFromArgs (this file, above) instead of the
+        // bare literal, so "-testactivationheight=4:100" can make this
+        // reachable for a specific functional test or demo without moving
+        // the real default for every other regtest run.
         updateManager.Add(
-            Update(EUpdate::ATTESTED_TX, std::string("Attested Transaction"), 4, 10, 100000000, 10, 100, 10, false,
+            Update(EUpdate::ATTESTED_TX, std::string("Attested Transaction"), 4, 10,
+                TestActivationHeightFromArgs(args, 4, 100000000), 10, 100, 10, false,
                 VoteThreshold(85, 85, 1), VoteThreshold(0, 0, 1)));
 
         // The best chain should have at least this much work.

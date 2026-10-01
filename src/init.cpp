@@ -833,6 +833,18 @@ void SetupServerArgs() {
                  "always independently re-verifies regardless. Performance measurement only. "
                  "(default: 0)",
                  ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    gArgs.AddArg("-perfforceislockedatmp",
+                 "Test-only: treat every transaction as already islocked for "
+                 "-perfadmissiononlyatmp's own check, since no live Smartnode quorum exists in "
+                 "this environment to produce a real one. Has no effect unless "
+                 "-perfadmissiononlyatmp is also set. Performance measurement only. (default: 0)",
+                 ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    gArgs.AddArg("-testactivationheight=<bit>:<height>",
+                 "Test-only, regtest only: override a specific EUpdate bit's own startHeight "
+                 "(e.g. 4:100 for EUpdate::ATTESTED_TX). Every other bit, and every other "
+                 "network, is unaffected. height must be a multiple of that bit's own "
+                 "roundSize (10 for ATTESTED_TX/COMMITMENT_MODE). (default: unset)",
+                 ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     gArgs.AddArg("-servebodyrange",
                  "Test-only: serve GETBODYRANGE requests (2.2.3a's fetch-protocol handler, "
                  "F-149/F-150/F-151/F-218). Off by default. A per-connection request-count and "
@@ -1730,6 +1742,7 @@ bool AppInitParameterInteraction() {
     g_perf_skip_sigs = gArgs.GetBoolArg("-perfskipsigs", false);
     g_perf_parallel_atmp = gArgs.GetBoolArg("-perfparallelatmp", false);
     g_perf_admission_only_atmp = gArgs.GetBoolArg("-perfadmissiononlyatmp", false);
+    g_perf_force_islocked_atmp = gArgs.GetBoolArg("-perfforceislockedatmp", false);
     if (g_perf_skip_sigs) {
         LogPrintf("PERF: signature verification DISABLED (-perfskipsigs). "
                   "This node accepts invalid transactions.\n");
@@ -1740,6 +1753,11 @@ bool AppInitParameterInteraction() {
     if (g_perf_admission_only_atmp) {
         LogPrintf("PERF: mempool script checks skipped for already-islocked transactions "
                   "(-perfadmissiononlyatmp)\n");
+    }
+    if (g_perf_force_islocked_atmp) {
+        LogPrintf("PERF: every transaction treated as already islocked "
+                  "(-perfforceislockedatmp)%s\n",
+                  g_perf_admission_only_atmp ? "" : " -- NO EFFECT without -perfadmissiononlyatmp");
     }
 
     // Checkmempool and checkblockindex default to true in regtest mode
