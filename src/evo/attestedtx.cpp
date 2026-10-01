@@ -86,7 +86,7 @@ static uint256 BuildAttestationId(const uint256 &strippedTxHash) {
     return ::SerializeHash(std::make_pair(ATTESTATION_REQUESTID_PREFIX, strippedTxHash));
 }
 
-static uint256 BuildAttestationBatchId(const uint256 &batchRoot) {
+uint256 BuildAttestationBatchId(const uint256 &batchRoot) {
     return ::SerializeHash(std::make_pair(ATTESTATION_BATCH_REQUESTID_PREFIX, batchRoot));
 }
 
@@ -200,12 +200,26 @@ static bool ExtractAttestedBatchRoot(const CPartialMerkleTree &proof, const uint
     return true;
 }
 
-bool CheckAttestedTx(const CTransaction &tx, const CBlockIndex *pindexPrev, CValidationState &state,
-                     const CCoinsViewCache &view, bool check_sigs) {
-    if (!IsAttestedTx(tx)) {
-        return state.DoS(100, false, REJECT_INVALID, "bad-attested-tx-type");
-    }
-
+/** 5.4.4.2 (build-plan.md, F-245), factored out of CheckAttestedTx: the
+ *  structural, payload-independent checks -- type, coinbase, non-empty,
+ *  per-input confirmed/script-shape. Shared with
+ *  CAttestationBatchHandler::RequestAttestation (llmq/quorums_attestationbatch.cpp)
+ *  so a request for a transaction that could never pass CheckAttestedTx
+ *  anyway is rejected before ever wasting a quorum's own signing effort --
+ *  one copy, not two that could silently diverge (this project's own
+ *  established anti-pattern, F-95's own sigop-counter lesson for the same
+ *  class of risk). Deliberately does NOT include the per-input SIGNATURE
+ *  check (CScriptCheck) -- that is RequestAttestation's own, separate job,
+ *  run once at request time, never inside this function: CheckAttestedTx
+ *  itself runs unconditionally on every validating node regardless of the
+ *  5.4.3 CheckInputs-skip, so putting a real script check HERE would pay
+ *  the full cost on every node every time, defeating the skip's entire
+ *  purpose. See CAttestationBatchHandler::RequestAttestation's own doc
+ *  comment for the CRITICAL this split fixes (Fable review, 2026-10-01):
+ *  without a script check anywhere in the request-to-verification chain,
+ *  anyone who could get a hash into a signed batch could spend any
+ *  single-sig UTXO with no valid signature at all. */
+bool CheckAttestedTxInputShapes(const CTransaction &tx, CValidationState &state, const CCoinsViewCache &view) {
     if (tx.IsCoinBase()) {
         // Consensus::CheckTxInputs' own value-conservation/double-spend
         // checks (this file's own doc comment explains why they are not
@@ -249,6 +263,18 @@ bool CheckAttestedTx(const CTransaction &tx, const CBlockIndex *pindexPrev, CVal
             return state.DoS(10, false, REJECT_INVALID, "bad-attested-tx-nonstandard-input", false,
                              "TRANSACTION_ATTESTED is restricted to single-signature inputs (5.4.1)");
         }
+    }
+    return true;
+}
+
+bool CheckAttestedTx(const CTransaction &tx, const CBlockIndex *pindexPrev, CValidationState &state,
+                     const CCoinsViewCache &view, bool check_sigs) {
+    if (!IsAttestedTx(tx)) {
+        return state.DoS(100, false, REJECT_INVALID, "bad-attested-tx-type");
+    }
+
+    if (!CheckAttestedTxInputShapes(tx, state, view)) {
+        return false; // state filled in by CheckAttestedTxInputShapes
     }
 
     // Fable review (2026-09-30), CONFIRMED MEDIUM, fixed: payload presence

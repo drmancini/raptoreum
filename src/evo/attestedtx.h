@@ -207,6 +207,26 @@ public:
  *    three-failed-DKG-attempts problem, the same limitation 5.3/F-238
  *    already hit) -- verified by direct reading against
  *    VerifyRecoveredSig's own contract instead, for both versions. */
+/** Exposed (not file-local) so CAttestationBatchHandler::RequestAttestation
+ *  (llmq/quorums_attestationbatch.cpp) can hold a request to the exact same
+ *  coin-existence/script-shape bar CheckAttestedTx itself enforces, without
+ *  a second copy of that rule risking drift from this one (this project's
+ *  own established anti-pattern -- F-95's sigop-counter lesson for the same
+ *  class of risk). Covers only the structural, payload-independent checks
+ *  -- type-irrelevant coinbase/empty-input/per-input shape -- never the
+ *  per-input SIGNATURE itself: that is RequestAttestation's own, separate
+ *  job (CScriptCheck, at request time only), and deliberately does not
+ *  belong here, since this function's caller, CheckAttestedTx, runs
+ *  unconditionally on every validating node via CheckSpecialTx's dispatch
+ *  regardless of 5.4.3's own CheckInputs-skip -- a real script check here
+ *  would charge every node the full cost on every relay hop, defeating the
+ *  skip's entire throughput purpose. See attestedtx.cpp's own comment on
+ *  this function for the CRITICAL (Fable review, 2026-10-01) this split
+ *  fixes: with no script check anywhere in the request-to-verification
+ *  chain, anyone who could get a hash into a quorum-signed batch could
+ *  spend any single-sig UTXO with a completely empty scriptSig. */
+bool CheckAttestedTxInputShapes(const CTransaction &tx, CValidationState &state, const CCoinsViewCache &view);
+
 bool CheckAttestedTx(const CTransaction &tx, const CBlockIndex *pindexPrev, CValidationState &state,
                      const CCoinsViewCache &view, bool check_sigs);
 
@@ -243,5 +263,18 @@ inline bool IsAttestedTx(const CTransaction &tx) {
  *  from `payload.sig`) is pure and quorum-free, so it is tested directly
  *  instead. */
 uint256 ComputeAttestedMessageHash(const CTransaction &tx);
+
+/** 5.4.4.2 (build-plan.md, F-245): exposed (not file-local `static`) so the
+ *  quorum-member-side batch-signing handler (llmq/quorums_attestationbatch.h)
+ *  can build the exact same domain-separated id CheckAttestedTx's own v2
+ *  path (attestedtx.cpp) looks a recovered signature up with -- "atxb",
+ *  not "atx" (CAttestationPayload's own `sig` doc comment explains why a
+ *  separate prefix from the per-tx id matters). Also used the OTHER
+ *  direction, by that same handler's HandleNewRecoveredSig: recomputing
+ *  this from a candidate CRecoveredSig::getMsgHash() and comparing against
+ *  its own getId() is how a recovered signature is confirmed to actually
+ *  be an attestation-batch signature at all, not some other id/msgHash
+ *  pair that happens to arrive at the same listener. */
+uint256 BuildAttestationBatchId(const uint256 &batchRoot);
 
 #endif //BITCOIN_EVO_ATTESTEDTX_H
