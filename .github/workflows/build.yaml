@@ -224,8 +224,21 @@ jobs:
           chmod +x functional-bin/raptoreumd functional-bin/raptoreum-cli
           ls -la functional-bin
 
-      - name: Install Python Test Dependencies
-        run: pip3 install pyzmq
+      - name: Install Required Packages
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y python3-dev
+
+      - name: Setup Dependencies
+        uses: ./.github/actions/setup-depends
+        with:
+          host: x86_64-pc-linux-gnu
+
+      - name: Build raptoreum_hash (ghostrider-py)
+        run: |
+          pip3 install setuptools pyzmq
+          cd contrib/ghostrider-py && pip3 install . && cd ../..
+          python3 -c "import raptoreum_hash; print('raptoreum_hash OK:', raptoreum_hash.__file__)"
 
       - name: Write test/config.ini
         run: |
