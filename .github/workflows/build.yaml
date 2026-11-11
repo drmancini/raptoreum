@@ -227,6 +227,25 @@ jobs:
       - name: Install Python Test Dependencies
         run: pip3 install pyzmq
 
+      - name: Write test/config.ini
+        run: |
+          cat > test/config.ini <<EOF
+          [environment]
+          PACKAGE_NAME=Raptoreum Core
+          PACKAGE_BUGREPORT=https://github.com/Raptor3um/raptoreum/issues
+          SRCDIR=$PWD
+          BUILDDIR=$PWD
+          EXEEXT=
+          RPCAUTH=$PWD/share/rpcauth/rpcauth.py
+
+          [components]
+          ENABLE_WALLET=true
+          ENABLE_CLI=true
+          ENABLE_WALLET_TOOL=true
+          ENABLE_BITCOIND=true
+          ENABLE_ZMQ=true
+          EOF
+
       - name: Run Functional Test Suite
         run: |
           python3 test/functional/test_runner.py \
